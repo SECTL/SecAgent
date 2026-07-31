@@ -16,11 +16,6 @@ const template = (workspace: string): SecAgentConfig => ({
     maxTokens: 800,
     systemPromptFile: "./prompts/agent-system.md"
   } as SecAgentConfig["agent"],
-  skills: [
-    { path: "./skills/secscore", enabled: true },
-    { path: "./skills/class-schedule", enabled: true },
-    { path: "./skills/random-picker", enabled: true }
-  ],
   mcp: { servers: {
     secscore: { transport: "http", url: "http://127.0.0.1:3901/mcp", enabled: true },
     classisland: { transport: "http", url: "http://127.0.0.1:18789/mcp", enabled: false }
@@ -43,16 +38,16 @@ export function initializeWorkspace(workspace: string): void {
   const file = configPath(workspace);
   if (!fs.existsSync(file)) fs.writeFileSync(file, YAML.stringify(template(workspace)), "utf8");
   const skills: Record<string, string> = {
-    secscore: "# SecScore\n\n处理学生查询、积分加减分和撤销。使用已提供的 MCP 工具获取真实结果；当前运行策略为 bypass，工具调用将直接执行并由 SecAgent 审计。\n",
-    "class-schedule": "# Class Schedule\n\n处理课程查询和换课。使用已提供的 MCP 工具获取真实结果；当前运行策略为 bypass，工具调用将直接执行并由 SecAgent 审计。\n",
-    "random-picker": "# Random Picker\n\n在指定班级或范围内随机抽取学生。结果不修改外部系统。\n"
+    secscore: "---\nname: SecScore\ndescription: 处理学生查询、积分加减分和撤销。\n---\n# SecScore\n\n使用已提供的 MCP 工具获取真实结果；当前运行策略为 bypass，工具调用将直接执行并由 SecAgent 审计。\n\n隐藏工具说明：`secscore__add_score` 用于给指定学生增加或扣减积分；`secscore__undo_score` 用于撤销一条已完成的积分操作。调用前请确认学生、变更数值和原因。\n",
+    "class-schedule": "---\nname: Class Schedule\ndescription: 处理课程查询和换课。\n---\n# Class Schedule\n\n使用已提供的 MCP 工具获取真实结果；当前运行策略为 bypass，工具调用将直接执行并由 SecAgent 审计。\n",
+    "random-picker": "---\nname: Random Picker\ndescription: 在指定班级或范围内随机抽取学生。\n---\n# Random Picker\n\n结果不修改外部系统。\n"
   };
   for (const [name, content] of Object.entries(skills)) {
     const filePath = path.join(workspace, "skills", name, "SKILL.md");
     if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, content, "utf8");
   }
   const promptFile = path.join(workspace, "prompts", "agent-system.md");
-  if (!fs.existsSync(promptFile)) fs.writeFileSync(promptFile, "你是 SecAgent，一个教育场景操作助手。\n\n根据教师指令，从提供的 MCP 工具中选择合适的工具并调用。工具调用已被 SecAgent 审计并直接执行；不要询问是否确认，不要编造工具结果。完成后用中文简洁说明真实结果。\n\n系统会提供可用 Skills 的名称和摘要，不会预加载完整内容。需要某个 Skill 的流程、约束或示例时，先调用 secagent__read_skill，并使用目录中给出的准确名称；读完后再继续决策和调用 MCP 工具。\n", "utf8");
+  if (!fs.existsSync(promptFile)) fs.writeFileSync(promptFile, "你是 SecAgent，一个教育场景操作助手。\n\n根据教师指令，从提供的 MCP 工具中选择合适的工具并调用。工具调用已被 SecAgent 审计并直接执行；不要询问是否确认，不要编造工具结果。完成后用中文简洁说明真实结果。\n\n系统会提供可用 Skills 的名称和摘要，不会预加载完整内容。需要某个 Skill 的流程、约束或示例时，通常先调用 secagent__read_skill，并使用目录中给出的准确名称。Skill 声明的隐藏工具不会提供 MCP schema；如果已知工具名称和契约，可直接通过 secagent__call_hidden_tool 调用，否则先读取相关 Skill 获取说明。\n", "utf8");
   const mcpFile = path.join(workspace, "mcp", "secscore-server.json");
   if (!fs.existsSync(mcpFile)) fs.writeFileSync(mcpFile, JSON.stringify({ name: "secscore", transport: "http", url: "http://127.0.0.1:3901/mcp", tools: ["list_students", "find_students", "add_score", "undo_score"] }, null, 2) + "\n");
   const envFile = path.join(workspace, ".env");
@@ -109,14 +104,9 @@ export function normalizeAndValidate(raw: SecAgentConfig, workspace: string): Se
   if (!raw?.agent?.baseUrl) errors.push("agent.baseUrl 缺失");
   if (!raw?.agent?.systemPrompt) errors.push("agent.systemPrompt 或 agent.systemPromptFile 缺失");
   if (raw?.agent?.models !== undefined && !Array.isArray(raw.agent.models)) errors.push("agent.models 必须为数组");
-  if (!Array.isArray(raw?.skills)) errors.push("skills 必须为数组");
   if (!raw?.mcp?.servers || typeof raw.mcp.servers !== "object") errors.push("mcp.servers 缺失");
   if (!raw?.policy?.confirmation) errors.push("policy.confirmation 缺失");
   if (errors.length) throw new Error(`配置校验失败：${errors.join("；")}`);
-  for (const skill of raw.skills) {
-    if (!skill.path) throw new Error("配置校验失败：skills[].path 缺失");
-    skill.path = expandPath(skill.path, workspace);
-  }
   raw.agent.baseUrl = raw.agent.baseUrl.replace(/\/$/, "");
   raw.agent.maxTokens = raw.agent.maxTokens || 800;
   for (const model of raw.agent.models ?? []) validateModelProfile(model, errors);

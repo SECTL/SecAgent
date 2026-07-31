@@ -8,7 +8,8 @@ interface McpToolResult {
 
 interface RpcResponse { result?: McpToolResult; error?: { message?: string } }
 
-export interface McpToolDefinition { name: string; description?: string; inputSchema?: Record<string, unknown> }
+/** `hidden` is a SecAgent MCP extension: hidden tools remain callable but are omitted from model tool definitions. */
+export interface McpToolDefinition { name: string; description?: string; inputSchema?: Record<string, unknown>; hidden?: boolean }
 export interface RegisteredMcpTool extends McpToolDefinition { key: string; server: string }
 
 /** Minimal JSON-RPC client for HTTP MCP servers configured by the workspace. */

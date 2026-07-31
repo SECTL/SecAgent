@@ -77,4 +77,14 @@ agent:
 
 当前验证阶段的 `policy.execution: bypass` 表示模型调用已启用 MCP 的工具后会直接执行；每次调用仍会写入本地审计。生产使用前应改为 `confirm` 并为写操作配置确认策略。
 
-基础系统提示词在工作区的 `prompts/agent-system.md`。每个启用 Skill 的名称和摘要会进入系统上下文；模型需要完整流程时会调用 `secagent__read_skill` 读取对应 `SKILL.md`。两类文件都可直接手动编辑。
+基础系统提示词在工作区的 `prompts/agent-system.md`。SecAgent 会自动扫描工作目录下三层以内、文件名大小写不敏感的 `SKILL.md`。每个 Skill 应在文件开头使用 YAML frontmatter 声明 `name` 和 `description`，两者会进入系统上下文；模型需要完整流程时会调用 `secagent__read_skill` 读取对应文件。Skill 不需要写入 `secagent.yaml`，文件可直接手动编辑。
+
+```md
+---
+name: SecScore
+description: 处理学生查询、积分加减分和撤销。
+---
+# SecScore
+```
+
+隐藏 MCP 工具的声明方式、通用调用入口，以及 Skill/MCP 开发者约定见 [`docs/skill-mcp-convention.md`](docs/skill-mcp-convention.md)。

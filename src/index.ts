@@ -80,7 +80,7 @@ async function main(): Promise<void> {
     const skills = loadEnabledSkills(config);
     const enabledMcp = Object.entries(config.mcp.servers).filter(([, server]) => server.enabled);
     console.log(`✓ 配置有效：${loaded}/secagent.yaml`);
-    console.log(`✓ 已加载 ${skills.length} 个显式 Skill`);
+    console.log(`✓ 已发现 ${skills.length} 个 Skill`);
     console.log(`✓ 已声明 ${enabledMcp.length} 个启用 MCP：${enabledMcp.map(([name]) => name).join("、") || "无"}`);
     console.log(`✓ 审计存储：${loaded}/audit/secagent.sqlite`);
     const modelKey = process.env[config.agent.apiKeyEnv];

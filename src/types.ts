@@ -37,7 +37,6 @@ export interface SecAgentConfig {
   version: number;
   workspace: string;
   agent: AgentConfig;
-  skills: Array<{ path: string; enabled: boolean }>;
   mcp: { servers: Record<string, McpServerConfig> };
   policy: {
     execution?: "bypass" | "confirm";
