@@ -1,5 +1,3 @@
-export type ConfirmationMode = "required" | "none" | "denied";
-
 export interface McpServerConfig {
   transport: "stdio" | "http";
   command?: string;
@@ -29,7 +27,6 @@ export interface AgentConfig {
   anthropicVersion?: string;
   maxTokens: number;
   systemPrompt: string;
-  systemPromptFile?: string;
   models?: ModelProfile[];
 }
 
@@ -38,12 +35,6 @@ export interface SecAgentConfig {
   workspace: string;
   agent: AgentConfig;
   mcp: { servers: Record<string, McpServerConfig> };
-  policy: {
-    execution?: "bypass" | "confirm";
-    confirmation: Record<string, ConfirmationMode>;
-    allowlist: string[];
-    audit: { enabled: boolean; redactSensitiveFields: boolean };
-  };
 }
 
 export interface Student { id: number; name: string; class: string; balance: number }
@@ -55,15 +46,6 @@ export interface Preview {
   reason: string;
   before: number;
   after: number;
-}
-
-export interface PendingAction {
-  id: string;
-  action: "score.adjust";
-  payload: { studentId: string; delta: number; reason: string };
-  preview: Preview;
-  createdAt: string;
-  expiresAt: string;
 }
 
 export interface AuditRecord {

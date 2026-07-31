@@ -1,16 +1,15 @@
 # SecAgent CLI
 
-SecAgent 的第一阶段验证版：把教学场景自然语言转换为受策略保护的工具调用。
+SecAgent：把自然语言转换为工具调用。
 
 ```bash
 npm install
 npm run build
 node dist/index.js init --workspace ./demo-workspace
 node dist/index.js run "给高一三班的李明加 2 分" --workspace ./demo-workspace
-node dist/index.js confirm <confirmation-id> --workspace ./demo-workspace
 ```
 
-CLI 直接调用 SecScore 的 HTTP MCP（默认 `http://127.0.0.1:3901/mcp`），支持查学生、积分预览、一次性确认、真实写入、审计和撤销。先在 SecScore 中以管理员身份启动 MCP 服务，再执行写操作。
+CLI 直接调用 SecScore 的 HTTP MCP（默认 `http://127.0.0.1:3901/mcp`），支持查学生、真实写入、审计和撤销。
 
 ## 本地中文语音输入
 
@@ -87,9 +86,9 @@ agent:
 #   maxTokens: 800
 ```
 
-当前验证阶段的 `policy.execution: bypass` 表示模型调用已启用 MCP 的工具后会直接执行；每次调用仍会写入本地审计。生产使用前应改为 `confirm` 并为写操作配置确认策略。
+模型可直接调用所有已发现的 MCP 工具，以及 Pi 风格的 `read`、`write`、`edit`、`bash` 四个本地工具；每次调用仍会写入本地审计。
 
-基础系统提示词在工作区的 `prompts/agent-system.md`。SecAgent 会自动扫描工作目录下三层以内、文件名大小写不敏感的 `SKILL.md`。每个 Skill 应在文件开头使用 YAML frontmatter 声明 `name` 和 `description`，两者会进入系统上下文；模型需要完整流程时会调用 `secagent__read_skill` 读取对应文件。Skill 不需要写入 `secagent.yaml`，文件可直接手动编辑。
+基础系统提示词固定写在源码中，不从工作区配置读取。SecAgent 会自动扫描工作目录下三层以内、文件名大小写不敏感的 `SKILL.md`。每个 Skill 应在文件开头使用 YAML frontmatter 声明 `name` 和 `description`，两者会进入系统上下文；模型需要完整流程时会调用 `secagent__read_skill` 读取对应文件。Skill 不需要写入 `secagent.yaml`，文件可直接手动编辑。
 
 ```md
 ---

@@ -9,7 +9,7 @@ import { SecAgentRuntime, type RunResult } from "./runtime.js";
 import { SecScoreMcpAdapter } from "./mcp-adapter.js";
 
 function usage(): string {
-  return `SecAgent CLI\n\n用法：\n  secagent init [--workspace <目录>]\n  secagent run <自然语言指令> [--workspace <目录>] [--verbose]\n  secagent confirm <确认令牌> [--workspace <目录>] [--verbose]\n  secagent undo <操作 ID> [--workspace <目录>] [--verbose]\n  secagent chat [--workspace <目录>] [--verbose]\n  secagent skills list [--workspace <目录>]\n  secagent mcp list [--workspace <目录>]\n  secagent config validate [--workspace <目录>]\n  secagent doctor [--workspace <目录>]\n  secagent audit list [--workspace <目录>]`;
+  return `SecAgent CLI\n\n用法：\n  secagent init [--workspace <目录>]\n  secagent run <自然语言指令> [--workspace <目录>] [--verbose]\n  secagent undo <操作 ID> [--workspace <目录>] [--verbose]\n  secagent chat [--workspace <目录>] [--verbose]\n  secagent skills list [--workspace <目录>]\n  secagent mcp list [--workspace <目录>]\n  secagent config validate [--workspace <目录>]\n  secagent doctor [--workspace <目录>]\n  secagent audit list [--workspace <目录>]`;
 }
 
 function workspaceFrom(args: string[]): string {
@@ -25,7 +25,7 @@ function printResult(result: RunResult): void {
 
 function openRuntime(workspaceInput: string, verbose = false): { runtime: SecAgentRuntime; audit: AuditStore } {
   const { workspace, config } = loadConfig(workspaceInput);
-  const audit = new AuditStore(workspace, config.policy.audit.redactSensitiveFields);
+  const audit = new AuditStore(workspace);
   const skills = loadEnabledSkills(config);
   const trace = verbose ? (event: { stage: string; data: unknown }) => console.log(`[trace] ${event.stage}\n${JSON.stringify(event.data, null, 2)}`) : undefined;
   return { runtime: new SecAgentRuntime(config, audit, skills, trace), audit };
@@ -40,9 +40,8 @@ async function chat(workspace: string, verbose: boolean): Promise<void> {
       const line = (await rl.question("你：")).trim();
       if (["exit", "quit", "退出"].includes(line.toLowerCase())) break;
       try {
-        const confirm = line.match(/^确认\s+(.+)$/);
         const undo = line.match(/^撤销\s+(.+)$/);
-        printResult(await (confirm ? runtime.confirm(confirm[1]) : undo ? runtime.undo(undo[1]) : runtime.run(line)));
+        printResult(await (undo ? runtime.undo(undo[1]) : runtime.run(line)));
       } catch (error) { console.error(`错误：${error instanceof Error ? error.message : String(error)}`); }
     }
   } finally { rl.close(); audit.close(); }
@@ -99,9 +98,6 @@ async function main(): Promise<void> {
       const text = args.filter((item, index) => index > 0 && item !== "--workspace" && item !== "--verbose" && args[index - 1] !== "--workspace").join(" ");
       if (!text) throw new Error("run 需要自然语言指令");
       printResult(await runtime.run(text));
-    } else if (command === "confirm") {
-      if (!args[1]) throw new Error("confirm 需要确认令牌");
-      printResult(await runtime.confirm(args[1]));
     } else if (command === "undo") {
       if (!args[1]) throw new Error("undo 需要操作 ID");
       printResult(await runtime.undo(args[1]));

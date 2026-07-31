@@ -4,6 +4,7 @@ import { AuditStore } from "./audit.js";
 import { McpRegistry } from "./mcp-adapter.js";
 import { ModelToolAgent } from "./model-provider.js";
 import type { LoadedSkill } from "./skills.js";
+import { callPiTool, piTools } from "./pi-tools.js";
 
 export type RunResult =
   | { kind: "completed"; message: string; actionId?: string }
@@ -12,11 +13,8 @@ export type RunResult =
 export type TraceEvent = { sequence: number; at: string; stage: string; data: unknown };
 
 /**
- * The model receives visible MCP tool schemas. Skill-declared hidden tools are never sent as MCP
- * schemas; after reading a Skill, the model calls them through one generic SecAgent entry point
- * using the name and contract defined in the Skill itself.
- * This development-stage runtime deliberately bypasses policy confirmation as requested; every
- * actual call is still emitted to the trace channel and persisted in the audit store.
+ * Hidden MCP tools are omitted from the model schema but remain callable through the generic
+ * hidden-tool entry point. Local Pi tools are always available.
  */
 export class SecAgentRuntime {
   private registry: McpRegistry;
@@ -31,6 +29,7 @@ export class SecAgentRuntime {
     const hiddenTools = new Set(mcpTools.filter((tool) => tool.hidden).map((tool) => tool.key));
     const tools = [
       ...mcpTools.filter((tool) => !hiddenTools.has(tool.key)),
+      ...piTools,
       { key: "secagent__read_skill", description: "读取指定 Skill 的完整操作说明。仅当需要该 Skill 的详细流程、约束或示例时调用。", inputSchema: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", description: "Skill 名称，必须来自系统提示词中的可用 Skills 目录。" } } } },
       { key: "secagent__call_hidden_tool", description: "调用 Skill 约定的隐藏 MCP 工具。工具名称和参数格式应严格遵循 Skill 正文或模型已知的其他契约。", inputSchema: { type: "object", additionalProperties: false, required: ["name", "arguments"], properties: { name: { type: "string", description: "隐藏工具的完整 key，例如 secscore__add_score。" }, arguments: { type: "object", description: "按照工具契约填写的参数。" } } } }
     ];
@@ -40,9 +39,6 @@ export class SecAgentRuntime {
     const message = await this.agent.run(input, tools, async (key, args) => this.callTool(input, key, args, hiddenTools));
     this.emit("model.agent.result", { message });
     return { kind: "completed", message };
-  }
-  async confirm(_confirmationId?: string): Promise<RunResult> {
-    throw new Error("当前运行时已启用 bypass：模型工具调用会直接执行，不会生成确认令牌。");
   }
   async undo(actionId: string): Promise<RunResult> {
     const record = this.audit.getRecord(actionId);
@@ -54,6 +50,11 @@ export class SecAgentRuntime {
     return { kind: "completed", message: `已请求撤销 ${actionId}：${JSON.stringify(response)}` };
   }
   private async callTool(request: string, key: string, args: Record<string, unknown>, hiddenTools?: Set<string>): Promise<unknown> {
+    if (piTools.some((tool) => tool.key === key)) {
+      const result = await callPiTool(this.config.workspace, key, args);
+      this.audit.log({ id: randomUUID(), status: "completed", tool: key, request, params: args, result });
+      return result;
+    }
     if (key === "secagent__read_skill") return this.readSkill(request, args);
     if (key === "secagent__call_hidden_tool") return this.callHiddenTool(request, args, hiddenTools);
     return this.executeMcpTool(request, key, args);

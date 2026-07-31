@@ -6,12 +6,12 @@ import type { McpServerConfig, ModelProfile, SecAgentConfig } from "./types.js";
 import type { GoogleModelInfo } from "./google-models.js";
 
 export const DEFAULT_GOOGLE_MODEL = "gemini-2.5-flash";
+export const DEFAULT_SYSTEM_PROMPT = "你是 SecAgent，一个教育场景操作助手。\n\n根据用户指令选择并使用可用工具，完成任务后用中文简洁说明真实结果。";
 
 const template = (workspace: string): SecAgentConfig => ({
   version: 1,
   workspace,
   agent: {
-    systemPromptFile: "./prompts/agent-system.md",
     models: [{
       id: "default",
       name: "gpt-5",
@@ -26,35 +26,27 @@ const template = (workspace: string): SecAgentConfig => ({
   mcp: { servers: {
     secscore: { transport: "http", url: "http://127.0.0.1:3901/mcp", enabled: true },
     classisland: { transport: "http", url: "http://127.0.0.1:18789/mcp", enabled: false }
-  } },
-  policy: {
-    execution: "bypass",
-    confirmation: { "score.add": "required", "score.subtract": "required", "schedule.change": "required", "settings.write": "required", "random.pick": "none" },
-    allowlist: ["secscore_*", "classisland_*", "random_picker_*"],
-    audit: { enabled: true, redactSensitiveFields: true }
-  }
+  } }
 });
 
 export function configPath(workspace: string): string { return path.join(workspace, "secagent.yaml"); }
 
 export function initializeWorkspace(workspace: string): void {
   fs.mkdirSync(workspace, { recursive: true });
-  for (const part of ["skills/secscore", "skills/class-schedule", "skills/random-picker", "mcp", "plugins", "sessions", "audit", "prompts"]) {
+  for (const part of ["skills/secscore", "skills/class-schedule", "skills/random-picker", "mcp", "plugins", "sessions", "audit"]) {
     fs.mkdirSync(path.join(workspace, part), { recursive: true });
   }
   const file = configPath(workspace);
   if (!fs.existsSync(file)) fs.writeFileSync(file, YAML.stringify(template(workspace)), "utf8");
   const skills: Record<string, string> = {
-    secscore: "---\nname: SecScore\ndescription: 处理学生查询、积分加减分和撤销。\n---\n# SecScore\n\n使用已提供的 MCP 工具获取真实结果；当前运行策略为 bypass，工具调用将直接执行并由 SecAgent 审计。\n\n隐藏工具说明：`secscore__add_score` 用于给指定学生增加或扣减积分；`secscore__undo_score` 用于撤销一条已完成的积分操作。调用前请确认学生、变更数值和原因。\n",
-    "class-schedule": "---\nname: Class Schedule\ndescription: 处理课程查询和换课。\n---\n# Class Schedule\n\n使用已提供的 MCP 工具获取真实结果；当前运行策略为 bypass，工具调用将直接执行并由 SecAgent 审计。\n",
+    secscore: "---\nname: SecScore\ndescription: 处理学生查询、积分加减分和撤销。\n---\n# SecScore\n\n使用已提供的 MCP 工具获取真实结果。\n",
+    "class-schedule": "---\nname: Class Schedule\ndescription: 处理课程查询和换课。\n---\n# Class Schedule\n\n使用已提供的 MCP 工具获取真实结果。\n",
     "random-picker": "---\nname: Random Picker\ndescription: 在指定班级或范围内随机抽取学生。\n---\n# Random Picker\n\n结果不修改外部系统。\n"
   };
   for (const [name, content] of Object.entries(skills)) {
     const filePath = path.join(workspace, "skills", name, "SKILL.md");
     if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, content, "utf8");
   }
-  const promptFile = path.join(workspace, "prompts", "agent-system.md");
-  if (!fs.existsSync(promptFile)) fs.writeFileSync(promptFile, "你是 SecAgent，一个教育场景操作助手。\n\n根据教师指令，从提供的 MCP 工具中选择合适的工具并调用。工具调用已被 SecAgent 审计并直接执行；不要询问是否确认，不要编造工具结果。完成后用中文简洁说明真实结果。\n\n系统会提供可用 Skills 的名称和摘要，不会预加载完整内容。需要某个 Skill 的流程、约束或示例时，通常先调用 secagent__read_skill，并使用目录中给出的准确名称。Skill 声明的隐藏工具不会提供 MCP schema；如果已知工具名称和契约，可直接通过 secagent__call_hidden_tool 调用，否则先读取相关 Skill 获取说明。\n", "utf8");
   const mcpFile = path.join(workspace, "mcp", "secscore-server.json");
   if (!fs.existsSync(mcpFile)) fs.writeFileSync(mcpFile, JSON.stringify({ name: "secscore", transport: "http", url: "http://127.0.0.1:3901/mcp", tools: ["list_students", "find_students", "add_score", "undo_score"] }, null, 2) + "\n");
   const envFile = path.join(workspace, ".env");
@@ -109,25 +101,17 @@ export function normalizeAndValidate(raw: SecAgentConfig, workspace: string): Se
       baseUrl: "https://api.openai.com/v1",
       endpoint: "/chat/completions",
       maxTokens: 800,
-      systemPrompt: typeof legacyAgent.systemPrompt === "string" ? legacyAgent.systemPrompt : "你是 SecAgent，一个教育场景操作助手。"
+      systemPrompt: DEFAULT_SYSTEM_PROMPT
     };
   }
-  if (raw?.agent?.systemPromptFile) {
-    const promptFile = expandPath(raw.agent.systemPromptFile, workspace);
-    if (!fs.existsSync(promptFile)) errors.push(`agent.systemPromptFile 不存在：${promptFile}`);
-    else {
-      raw.agent.systemPrompt = fs.readFileSync(promptFile, "utf8").trim();
-      raw.agent.systemPromptFile = promptFile;
-    }
-  }
+  raw.agent.systemPrompt = DEFAULT_SYSTEM_PROMPT;
+  delete (raw.agent as { systemPromptFile?: unknown }).systemPromptFile;
   if (!raw?.agent?.provider || !["openai-compatible", "anthropic", "google"].includes(raw.agent.provider)) errors.push("agent.provider 必须是 openai-compatible、anthropic 或 google");
   if (!raw?.agent?.model && raw?.agent?.provider !== "google") errors.push("agent.model 缺失");
   if (!raw?.agent?.apiKeyEnv) errors.push("agent.apiKeyEnv 缺失");
   if (!raw?.agent?.baseUrl) errors.push("agent.baseUrl 缺失");
-  if (!raw?.agent?.systemPrompt) errors.push("agent.systemPrompt 或 agent.systemPromptFile 缺失");
   if (raw?.agent?.models !== undefined && !Array.isArray(raw.agent.models)) errors.push("agent.models 必须为数组");
   if (!raw?.mcp?.servers || typeof raw.mcp.servers !== "object") errors.push("mcp.servers 缺失");
-  if (!raw?.policy?.confirmation) errors.push("policy.confirmation 缺失");
   if (errors.length) throw new Error(`配置校验失败：${errors.join("；")}`);
   raw.agent.baseUrl = raw.agent.baseUrl.replace(/\/$/, "");
   raw.agent.maxTokens = raw.agent.maxTokens || 800;
@@ -143,6 +127,7 @@ export function normalizeAndValidate(raw: SecAgentConfig, workspace: string): Se
     }
   }
   if (errors.length) throw new Error(`配置校验失败：${errors.join("；")}`);
+  delete (raw as SecAgentConfig & { policy?: unknown }).policy;
   raw.workspace = workspace;
   return raw;
 }
@@ -190,7 +175,7 @@ export function useConfiguredModel(config: SecAgentConfig, id?: string): void {
   const profileId = separator > 0 ? id.slice(dynamicPrefix.length, separator) : id;
   const selected = config.agent.models.find((model) => model.id === profileId) ?? (id === "default" ? config.agent.models[0] : undefined);
   if (!selected) throw new Error(`未找到配置模型：${id}`);
-  config.agent = { ...config.agent, ...selected, model: dynamicModel || selected.model || DEFAULT_GOOGLE_MODEL, maxTokens: selected.maxTokens || config.agent.maxTokens, systemPrompt: config.agent.systemPrompt, systemPromptFile: config.agent.systemPromptFile, models: config.agent.models };
+  config.agent = { ...config.agent, ...selected, model: dynamicModel || selected.model || DEFAULT_GOOGLE_MODEL, maxTokens: selected.maxTokens || config.agent.maxTokens, systemPrompt: config.agent.systemPrompt, models: config.agent.models };
 }
 
 export interface SettingsPayload {
@@ -230,8 +215,9 @@ export function saveSettings(workspaceInput: string, payload: SettingsPayload): 
     if (typeof apiKey === "string" && apiKey.trim()) writeWorkspaceEnv(workspace, model.apiKeyEnv, apiKey.trim());
     return model;
   });
-  raw.agent = { systemPrompt: raw.agent.systemPrompt, systemPromptFile: raw.agent.systemPromptFile, models } as SecAgentConfig["agent"];
+  raw.agent = { models } as SecAgentConfig["agent"];
   raw.mcp = payload.mcp;
+  delete (raw as SecAgentConfig & { policy?: unknown }).policy;
   // Validate before replacing the user's file, then write the exact editable model/MCP values.
   normalizeAndValidate(raw, workspace);
   fs.writeFileSync(file, YAML.stringify(raw), "utf8");

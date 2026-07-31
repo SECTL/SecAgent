@@ -103,7 +103,7 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
   sessionStore.appendMessage(id, "user", text);
   const { workspace, config } = loadConfig(DEFAULT_WORKSPACE);
   useConfiguredModel(config, modelId);
-  const audit = new AuditStore(workspace, config.policy.audit.redactSensitiveFields);
+  const audit = new AuditStore(workspace);
   let traceSequence = 0;
   const toolCalls: ToolCallRecord[] = [];
   const activities: AssistantActivity[] = [];
