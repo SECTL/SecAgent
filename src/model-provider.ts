@@ -6,6 +6,25 @@ type ExecuteTool = (key: string, args: Record<string, unknown>) => Promise<unkno
 export type AgentTool = Pick<RegisteredMcpTool, "key" | "description" | "inputSchema">;
 type ModelTrace = (stage: string, data: unknown) => void;
 
+function toGoogleSchema(input: unknown): Record<string, unknown> {
+  const source = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+  const rawType = source.type;
+  const typeValue = Array.isArray(rawType) ? rawType.find((item) => item !== "null") : rawType;
+  const schema: Record<string, unknown> = {};
+  if (typeof typeValue === "string") schema.type = typeValue.toUpperCase();
+  else if (source.properties && typeof source.properties === "object") schema.type = "OBJECT";
+  else if (source.items) schema.type = "ARRAY";
+  if (Array.isArray(rawType) && rawType.includes("null")) schema.nullable = true;
+  if (typeof source.description === "string") schema.description = source.description;
+  if (Array.isArray(source.enum)) schema.enum = source.enum;
+  if (source.properties && typeof source.properties === "object" && !Array.isArray(source.properties)) {
+    schema.properties = Object.fromEntries(Object.entries(source.properties as Record<string, unknown>).map(([key, value]) => [key, toGoogleSchema(value)]));
+  }
+  if (Array.isArray(source.required)) schema.required = source.required.filter((item): item is string => typeof item === "string");
+  if (source.items) schema.items = toGoogleSchema(source.items);
+  return schema;
+}
+
 export class ModelToolAgent {
   private agent: SecAgentConfig["agent"];
   constructor(config: SecAgentConfig, skills: LoadedSkill[], private trace?: ModelTrace) {
@@ -18,9 +37,9 @@ export class ModelToolAgent {
     if (!tools.length) throw new Error("没有已启用且可发现的 MCP 工具");
     const key = process.env[this.agent.apiKeyEnv];
     if (!key) throw new Error(`未配置模型密钥环境变量 ${this.agent.apiKeyEnv}。请设置后重试；密钥不要写入 secagent.yaml。`);
-    return this.agent.provider === "anthropic"
-      ? this.runAnthropic(instruction, tools, key, execute)
-      : this.runOpenAICompatible(instruction, tools, key, execute);
+    if (this.agent.provider === "anthropic") return this.runAnthropic(instruction, tools, key, execute);
+    if (this.agent.provider === "google") return this.runGoogle(instruction, tools, key, execute);
+    return this.runOpenAICompatible(instruction, tools, key, execute);
   }
   private async request(url: string, headers: Record<string, string>, body: unknown): Promise<unknown> {
     this.trace?.("model.request", { url, body });
@@ -126,6 +145,86 @@ export class ModelToolAgent {
       }
     }
     throw new Error("模型工具调用超过最大轮数（8）");
+  }
+  private async runGoogle(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool): Promise<string> {
+    type Part = { text?: string; functionCall?: { name?: string; args?: Record<string, unknown> }; functionResponse?: { name?: string; response?: unknown }; thoughtSignature?: string };
+    const contents: Array<{ role: "user" | "model"; parts: Part[] }> = [{ role: "user", parts: [{ text: instruction }] }];
+    const definitions = tools.map((tool) => ({ name: tool.key, description: tool.description || tool.key, parameters: toGoogleSchema(tool.inputSchema || { type: "object", properties: {} }) }));
+    for (let turn = 0; turn < 8; turn++) {
+      let text = "";
+      const calls = new Map<string, { name: string; args: Record<string, unknown>; thoughtSignature?: string }>();
+      const body = {
+        systemInstruction: { parts: [{ text: this.agent.systemPrompt }] },
+        contents,
+        tools: [{ functionDeclarations: definitions }],
+        generationConfig: { maxOutputTokens: this.agent.maxTokens }
+      };
+      await this.streamGoogleRequest(`${this.agent.baseUrl}${this.agent.endpoint || `/models/${encodeURIComponent(this.agent.model || "gemini-2.5-flash")}:streamGenerateContent`}`, key, body, (chunk) => {
+        const parts = (chunk.candidates as Array<{ content?: { parts?: Part[] } }> | undefined)?.[0]?.content?.parts || [];
+        for (const part of parts) {
+          if (typeof part.text === "string") {
+            text += part.text;
+            this.trace?.("model.output.delta", { text: part.text, turn: turn + 1 });
+          }
+          if (part.functionCall?.name) {
+            const name = part.functionCall.name;
+            const current = calls.get(name) || { name, args: {} };
+            current.args = { ...current.args, ...(part.functionCall.args || {}) };
+            const signature = part.thoughtSignature || (part as Part & { thought_signature?: string }).thought_signature;
+            if (signature) current.thoughtSignature = signature;
+            calls.set(name, current);
+          }
+        }
+      }, () => ({ candidates: [{ content: { parts: [{ text: text || undefined }, ...[...calls.values()].map((call) => ({ functionCall: call }))] } }] }));
+      const functionCalls = [...calls.values()];
+      if (!functionCalls.length) return text.trim() || "已完成。";
+      if (text) this.trace?.("model.output.reset", { turn: turn + 1, reason: "tool_call" });
+      const modelParts: Part[] = [];
+      if (text) modelParts.push({ text });
+      modelParts.push(...functionCalls.map((call) => ({
+        functionCall: { name: call.name, args: call.args },
+        ...(call.thoughtSignature ? { thoughtSignature: call.thoughtSignature } : {})
+      })));
+      contents.push({ role: "model", parts: modelParts });
+      for (const call of functionCalls) {
+        let result: unknown;
+        try { result = await execute(call.name, call.args); } catch (error) { result = { error: error instanceof Error ? error.message : String(error) }; }
+        contents.push({ role: "user", parts: [{ functionResponse: { name: call.name, response: result } }] });
+      }
+    }
+    throw new Error("模型工具调用超过最大轮数（8）");
+  }
+  private async streamGoogleRequest(url: string, key: string, body: unknown, onChunk: (chunk: Record<string, unknown>) => void, completeBody: () => unknown): Promise<void> {
+    const requestUrl = `${url}${url.includes("?") ? "&" : "?"}alt=sse`;
+    this.trace?.("model.request", { url, body });
+    let response: Response;
+    try { response = await fetch(requestUrl, { method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": key }, body: JSON.stringify(body), signal: AbortSignal.timeout(90_000) }); }
+    catch (error) { throw new Error(`无法连接 Google Gemini 端点 ${url}：${error instanceof Error ? error.message : String(error)}`); }
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({})) as { error?: { message?: string } };
+      this.trace?.("model.response", { url, status: response.status, body: payload });
+      if (response.status === 401 || response.status === 403) throw new Error("Google Gemini 鉴权失败，请检查 Google AI Studio API Key。");
+      throw new Error(`Google Gemini 请求失败（${response.status}）：${payload.error?.message || "请检查模型名称和 API Key"}`);
+    }
+    if (!response.body) throw new Error("Google Gemini 流式响应为空");
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const consume = (packet: string) => {
+      const data = packet.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("");
+      if (!data) return;
+      try { onChunk(JSON.parse(data) as Record<string, unknown>); } catch { /* Ignore incomplete provider packets. */ }
+    };
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+      const packets = buffer.split(/\r?\n\r?\n/);
+      buffer = packets.pop() || "";
+      for (const packet of packets) consume(packet);
+      if (done) break;
+    }
+    if (buffer.trim()) consume(buffer);
+    this.trace?.("model.response", { url, status: response.status, body: completeBody() });
   }
   private async runAnthropic(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool): Promise<string> {
     const messages: Array<Record<string, unknown>> = [{ role: "user", content: instruction }];

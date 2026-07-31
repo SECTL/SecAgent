@@ -30,7 +30,10 @@ npm run dev
 ```dotenv
 OPENAI_API_KEY=...
 ANTHROPIC_API_KEY=...
+GEMINI_API_KEY=...
 ```
+
+桌面端打开“设置”后，可在“协议”中选择“Google Gemini”，粘贴从 Google AI Studio 获取的 API key 并保存。程序会使用 Gemini 原生 API；key 会保存到工作区 `.env`，不会写入 `secagent.yaml`。
 
 在 `secagent.yaml` 的 `agent` 区块选择协议、模型和端点：
 
@@ -72,6 +75,15 @@ agent:
 #   baseUrl: https://api.anthropic.com
 #   endpoint: /v1/messages
 #   anthropicVersion: "2023-06-01"
+#   maxTokens: 800
+
+# Google Gemini 原生 API
+# agent:
+#   provider: google
+#   model: gemini-2.5-flash
+#   apiKeyEnv: GEMINI_API_KEY
+#   baseUrl: https://generativelanguage.googleapis.com/v1beta
+#   endpoint: ""
 #   maxTokens: 800
 ```
 

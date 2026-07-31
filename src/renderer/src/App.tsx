@@ -26,20 +26,70 @@ function toolTitle(name: string): string {
   return name.replace(/__/g, " · ").replace(/_/g, " ");
 }
 
-function MessageActivities({ activities }: { activities: AssistantActivity[] }) {
+const emptyModel = (): ModelProfile => ({ id: `model-${Date.now()}`, name: "新模型", provider: "openai-compatible", model: "", apiKeyEnv: "OPENAI_API_KEY", baseUrl: "https://api.openai.com/v1", endpoint: "/chat/completions", maxTokens: 800 });
+const emptyMcp = (): McpServerConfig => ({ transport: "http", url: "http://127.0.0.1:3901/mcp", enabled: true });
+
+function SettingsApp() {
+  const bridge = window.secagent;
+  const [settings, setSettings] = useState<SettingsPayload | null>(null);
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => { void bridge.getSettings().then(setSettings).catch((reason) => setError(String(reason))); }, [bridge]);
+  if (!settings) return <main className="settings-shell"><p>正在读取配置…</p></main>;
+  const updateModel = (index: number, patch: Partial<ModelProfile>) => setSettings((current) => current && { ...current, models: current.models.map((model, item) => item === index ? { ...model, ...patch } : model) });
+  const selectProvider = (index: number, provider: ModelProfile["provider"]) => updateModel(index, provider === "google"
+    ? { provider, apiKey: "", apiKeyConfigured: false, apiKeyEnv: "GEMINI_API_KEY", baseUrl: "https://generativelanguage.googleapis.com/v1beta", endpoint: "", model: "" }
+    : provider === "anthropic"
+      ? { provider, apiKey: "", apiKeyConfigured: false, apiKeyEnv: "ANTHROPIC_API_KEY", baseUrl: "https://api.anthropic.com", endpoint: "/v1/messages" }
+      : { provider, apiKey: "", apiKeyConfigured: false, apiKeyEnv: "OPENAI_API_KEY", baseUrl: "https://api.openai.com/v1", endpoint: "/chat/completions" });
+  const updateServer = (name: string, patch: Partial<McpServerConfig>) => setSettings((current) => current && { ...current, mcp: { servers: Object.fromEntries(Object.entries(current.mcp.servers).map(([key, server]) => [key, key === name ? { ...server, ...patch } : server])) } });
+  const renameServer = (oldName: string, newName: string) => {
+    const name = newName.trim();
+    if (!name || (name !== oldName && settings.mcp.servers[name])) return;
+    setSettings((current) => current && { ...current, mcp: { servers: Object.fromEntries(Object.entries(current.mcp.servers).map(([key, server]) => [key === oldName ? name : key, server])) } });
+  };
+  const save = async () => {
+    setError(""); setSaved(false);
+    try { const result = await bridge.saveSettings(settings); setSettings(result); setSaved(true); setTimeout(() => setSaved(false), 2200); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+  };
+  return <main className="settings-shell">
+    <header className="settings-header"><div><p className="eyebrow">SECAGENT</p><h1>设置</h1><p>修改后立即写入工作目录的 secagent.yaml。</p></div><button className="primary-button" onClick={() => void save()}>保存设置</button></header>
+    {error && <div className="settings-error">{error}</div>}{saved && <div className="settings-success">设置已保存，下一次请求立即生效。</div>}
+    <section className="settings-section"><div className="section-title"><div><h2>模型</h2><p>Google Gemini 填写 API Key 即可自动获取常用文本模型；模型名称可留空。</p></div><button className="secondary-button" onClick={() => setSettings((current) => current && { ...current, models: [...current.models, emptyModel()] })}>+ 添加模型</button></div>
+      <div className="settings-cards">{settings.models.map((model, index) => <article className="settings-card" key={model.id}>
+        <div className="card-heading"><strong>{model.name || model.model || "未命名模型"}</strong>{settings.models.length > 1 && <button className="text-button danger" onClick={() => setSettings((current) => current && { ...current, models: current.models.filter((_, item) => item !== index) })}>删除</button>}</div>
+        <div className="form-grid"><label>显示名称<input value={model.name || ""} onChange={(event) => updateModel(index, { name: event.target.value })} /></label><label>模型 ID<input value={model.id} onChange={(event) => updateModel(index, { id: event.target.value })} /></label><label>协议<select value={model.provider} onChange={(event) => selectProvider(index, event.target.value as ModelProfile["provider"])}><option value="openai-compatible">OpenAI 兼容</option><option value="anthropic">Anthropic</option><option value="google">Google Gemini</option></select></label><label>{model.provider === "google" ? "模型名称（可选，留空自动获取）" : "模型名称"}<input value={model.model} placeholder={model.provider === "google" ? "保存后自动使用可用 Gemini 文本模型" : ""} onChange={(event) => updateModel(index, { model: event.target.value })} /></label><label>{model.provider === "google" ? "Google AI Studio API Key" : "API Key"}<input type="password" placeholder={model.apiKeyConfigured ? "已配置（留空则保持不变）" : "粘贴你的 key"} value={model.apiKey || ""} onChange={(event) => updateModel(index, { apiKey: event.target.value })} /></label><label>API Key 环境变量<input value={model.apiKeyEnv} onChange={(event) => updateModel(index, { apiKeyEnv: event.target.value })} /></label><label>Base URL<input value={model.baseUrl} onChange={(event) => updateModel(index, { baseUrl: event.target.value })} /></label><label>Endpoint<input value={model.endpoint || ""} onChange={(event) => updateModel(index, { endpoint: event.target.value })} /></label><label>最大 Tokens<input type="number" min="1" value={model.maxTokens || 800} onChange={(event) => updateModel(index, { maxTokens: Number(event.target.value) })} /></label></div>
+      </article>)}</div>
+    </section>
+    <section className="settings-section"><div className="section-title"><div><h2>MCP 服务</h2><p>管理可被 SecAgent 发现和调用的 MCP 服务。</p></div><button className="secondary-button" onClick={() => setSettings((current) => current && { ...current, mcp: { servers: { ...current.mcp.servers, [`mcp-${Object.keys(current.mcp.servers).length + 1}`]: emptyMcp() } } })}>+ 添加服务</button></div>
+      <div className="settings-cards">{Object.entries(settings.mcp.servers).map(([name, server]) => <article className="settings-card" key={name}><div className="card-heading"><input className="server-name" value={name} onChange={(event) => renameServer(name, event.target.value)} />{Object.keys(settings.mcp.servers).length > 1 && <button className="text-button danger" onClick={() => setSettings((current) => { if (!current) return current; const servers = { ...current.mcp.servers }; delete servers[name]; return { ...current, mcp: { servers } }; })}>删除</button>}</div><div className="form-grid"><label>传输方式<select value={server.transport} onChange={(event) => updateServer(name, { transport: event.target.value as McpServerConfig["transport"] })}><option value="http">HTTP</option><option value="stdio">stdio</option></select></label><label className="checkbox-label"><input type="checkbox" checked={server.enabled} onChange={(event) => updateServer(name, { enabled: event.target.checked })} /> 启用</label>{server.transport === "http" ? <label>服务 URL<input value={server.url || ""} onChange={(event) => updateServer(name, { url: event.target.value })} /></label> : <><label>启动命令<input value={server.command || ""} onChange={(event) => updateServer(name, { command: event.target.value })} /></label><label>参数（每行一个）<textarea value={(server.args || []).join("\n")} onChange={(event) => updateServer(name, { args: event.target.value.split(/\r?\n/).filter(Boolean) })} rows={3} /></label></>}</div></article>)}</div>
+    </section>
+  </main>;
+}
+
+function MessageActivities({ activities, elapsedSeconds }: { activities: AssistantActivity[]; elapsedSeconds?: number }) {
   if (!activities.length) return null;
-  return <div className="message-tool-calls" aria-label="本消息的执行过程">
-    {activities.map((activity, index) => activity.kind === "text"
-      ? <section className="intermediate-output" key={`text-${index}`}><div className="intermediate-title">模型中间输出</div><ReactMarkdown remarkPlugins={[remarkGfm]}>{activity.content}</ReactMarkdown></section>
-      : <details className="message-tool" key={`${activity.name}-${index}`}>
-        <summary><span className="tool-icon">⌘</span><span className="tool-name">{toolTitle(activity.name)}</span><span className="tool-state">{"result" in activity ? "已完成" : "调用中"}</span></summary>
-        <div className="tool-detail"><p>参数</p><pre>{JSON.stringify(activity.arguments, null, 2)}</pre><p>工具结果</p><pre>{"result" in activity ? JSON.stringify(activity.result, null, 2) : "正在等待返回…"}</pre></div>
-      </details>)}
-  </div>;
+  const toolCount = activities.filter((activity) => activity.kind === "tool").length;
+  const pending = activities.some((activity) => activity.kind === "tool" && !("result" in activity));
+  const toolCountLabel = toolCount === 1 ? "一个" : `${toolCount}`;
+  return <details className="execution-summary" aria-label="本消息的执行过程" open={pending}>
+    <summary><span className="activity-glyph">✦</span><span>{pending ? "正在执行" : elapsedSeconds ? `用时${elapsedSeconds}秒` : "本轮完成"}，共调用了{toolCountLabel}个工具</span><img className={`execution-chevron ${pending ? "open" : ""}`} src="/session-chevron.svg" alt="" /></summary>
+    <div className="message-tool-calls">
+      {activities.map((activity, index) => activity.kind === "text"
+        ? <details className="intermediate-output" key={`text-${index}`} open><summary><span className="activity-dot">·</span><span>模型思考</span></summary><div className="activity-content"><ReactMarkdown remarkPlugins={[remarkGfm]}>{activity.content}</ReactMarkdown></div></details>
+        : <details className="message-tool" key={`${activity.name}-${index}`}>
+          <summary><span className="activity-dot">·</span><span className="tool-name">{toolTitle(activity.name)}</span><span className="tool-state">{"result" in activity ? "已完成" : "调用中"}</span></summary>
+          <div className="tool-detail"><div><p>参数</p><pre>{JSON.stringify(activity.arguments, null, 2)}</pre></div><div><p>工具结果</p><pre>{"result" in activity ? JSON.stringify(activity.result, null, 2) : "正在等待返回…"}</pre></div></div>
+        </details>)}
+    </div>
+  </details>;
 }
 
 export function App() {
   const bridge = window.secagent;
+  if (new URLSearchParams(window.location.search).has("settings")) return <SettingsApp />;
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [models, setModels] = useState<ModelOption[]>([]);
   const [selectedModelId, setSelectedModelId] = useState("");
@@ -69,6 +119,16 @@ export function App() {
       setSessions(await bridge.listSessions());
       setSession(active);
     })();
+  }, [bridge]);
+
+  useEffect(() => {
+    if (!bridge) return;
+    return bridge.onSettingsChanged(() => {
+      void bridge.listModels().then((models) => {
+        setModels(models);
+        setSelectedModelId((current) => models.some((model) => model.id === current) ? current : models[0]?.id || "");
+      });
+    });
   }, [bridge]);
 
   useEffect(() => {
@@ -125,6 +185,13 @@ export function App() {
   const streamingOutput = useMemo(() => activeTrace.slice(finalStreamStart).filter((item) => item.stage === "model.output.delta")
     .map((item) => (item.data as { text?: string }).text || "").join(""), [activeTrace]);
   const timelineTrace = useMemo(() => activeTrace.filter((item) => item.stage !== "model.output.delta"), [activeTrace]);
+  const executionSeconds = useMemo(() => {
+    const start = activeTrace.find((item) => item.stage === "user.request");
+    const end = [...activeTrace].reverse().find((item) => item.stage === "assistant.response" || item.stage === "runtime.error");
+    if (!start) return undefined;
+    const endAt = end ? new Date(end.at).getTime() : Date.now();
+    return Math.max(1, Math.round((endAt - new Date(start.at).getTime()) / 1000));
+  }, [activeTrace]);
   const traceActivities = useMemo(() => {
     const activities: AssistantActivity[] = [];
     const partialTurns = new Map<number, string>();
@@ -229,9 +296,9 @@ export function App() {
           {session?.messages.length === 0 && <div className="empty-state"><h2>开始一个课堂操作</h2><p>例如：查询张三积分，或给张三加 2 分。</p></div>}
           {session?.messages.map((message) => {
             const activities = message.activities?.length ? message.activities : message.toolCalls?.length ? message.toolCalls.map((call) => ({ kind: "tool" as const, ...call })) : message.id === latestAssistantId ? traceActivities : [];
-            return <article className={`message ${message.role}`} key={message.id}><div className="avatar">{message.role === "user" ? "你" : <img src="/icon.svg" alt="SecAgent" />}</div><div><div className="message-meta">{message.role === "user" ? "教师" : "SecAgent"} · {new Date(message.createdAt).toLocaleTimeString()}</div>{message.role === "assistant" && <MessageActivities activities={activities} />}<div className="bubble">{message.role === "assistant" ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown> : message.content}</div></div></article>;
+            return <article className={`message ${message.role}`} key={message.id}><div className="avatar">{message.role === "user" ? "你" : <img src="/icon.svg" alt="SecAgent" />}</div><div><div className="message-meta">{message.role === "user" ? "教师" : "SecAgent"} · {new Date(message.createdAt).toLocaleTimeString()}</div>{message.role === "assistant" && <MessageActivities activities={activities} elapsedSeconds={message.id === latestAssistantId ? executionSeconds : undefined} />}<div className="bubble">{message.role === "assistant" ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown> : message.content}</div></div></article>;
           })}
-          {sending && <article className="message assistant"><div className="avatar"><img src="/icon.svg" alt="SecAgent" /></div><div><div className="message-meta">SecAgent · 正在生成</div><MessageActivities activities={traceActivities} /><div className="bubble loading">{streamingOutput ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingOutput}</ReactMarkdown> : "正在调用模型与工具…"}</div></div></article>}
+          {sending && <article className="message assistant"><div className="avatar"><img src="/icon.svg" alt="SecAgent" /></div><div><div className="message-meta">SecAgent · 正在生成</div><MessageActivities activities={traceActivities} elapsedSeconds={executionSeconds} /><div className="bubble loading">{streamingOutput ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingOutput}</ReactMarkdown> : "正在调用模型与工具…"}</div></div></article>}
           <div ref={messageEnd} />
         </div>
         <form className="composer" onSubmit={send}>

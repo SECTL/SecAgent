@@ -3,6 +3,8 @@ import { contextBridge, ipcRenderer } from "electron";
 contextBridge.exposeInMainWorld("secagent", {
   listSessions: () => ipcRenderer.invoke("sessions:list"),
   listModels: () => ipcRenderer.invoke("models:list"),
+  getSettings: () => ipcRenderer.invoke("settings:get"),
+  saveSettings: (payload: unknown) => ipcRenderer.invoke("settings:save", payload),
   createSession: () => ipcRenderer.invoke("sessions:create"),
   getSession: (id: string) => ipcRenderer.invoke("sessions:get", id),
   sendMessage: (id: string, text: string, modelId?: string) => ipcRenderer.invoke("sessions:send", id, text, modelId),
@@ -18,5 +20,10 @@ contextBridge.exposeInMainWorld("secagent", {
     const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
     ipcRenderer.on("sessions:runtime-event", wrapped);
     return () => ipcRenderer.removeListener("sessions:runtime-event", wrapped);
+  },
+  onSettingsChanged: (listener: (settings: unknown) => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
+    ipcRenderer.on("settings:changed", wrapped);
+    return () => ipcRenderer.removeListener("settings:changed", wrapped);
   }
 });

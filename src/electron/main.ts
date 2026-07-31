@@ -1,15 +1,17 @@
-import { app, BrowserWindow, ipcMain, session } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, session } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { DEFAULT_WORKSPACE } from "../paths.js";
-import { configuredModels, initializeWorkspace, loadConfig, useConfiguredModel } from "../config.js";
+import { configuredModels, initializeWorkspace, loadConfig, readSettings, saveSettings, useConfiguredModel, type SettingsPayload } from "../config.js";
 import { loadEnabledSkills } from "../skills.js";
 import { AuditStore } from "../audit.js";
 import { SecAgentRuntime, type TraceEvent } from "../runtime.js";
 import { SessionStore, type AssistantActivity, type SessionData, type ToolCallRecord } from "../session-store.js";
 import { sendSpeechAudio, startSpeech, stopSpeech } from "./speech.js";
+import { listGoogleModels } from "../google-models.js";
 
 let windowRef: BrowserWindow | undefined;
+let settingsWindow: BrowserWindow | undefined;
 
 function appIconPath(): string {
   const bundledIcon = path.join(__dirname, "../renderer/icon.png");
@@ -39,6 +41,37 @@ function createWindow(): void {
   else windowRef.loadFile(path.join(__dirname, "../renderer/index.html"));
 }
 
+function openSettings(): void {
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    settingsWindow.show();
+    settingsWindow.focus();
+    return;
+  }
+  settingsWindow = new BrowserWindow({
+    width: 900,
+    height: 720,
+    minWidth: 720,
+    minHeight: 560,
+    title: "设置",
+    parent: windowRef,
+    modal: false,
+    icon: appIconPath(),
+    webPreferences: { preload: path.join(__dirname, "../preload/preload.cjs"), contextIsolation: true, nodeIntegration: false }
+  });
+  if (process.env.ELECTRON_RENDERER_URL) settingsWindow.loadURL(`${process.env.ELECTRON_RENDERER_URL}?settings=1`);
+  else settingsWindow.loadFile(path.join(__dirname, "../renderer/index.html"), { query: { settings: "1" } });
+  settingsWindow.on("closed", () => { settingsWindow = undefined; });
+}
+
+function createApplicationMenu(): void {
+  const template: Electron.MenuItemConstructorOptions[] = [
+    ...(process.platform === "darwin" ? [{ role: "appMenu" as const }] : []),
+    { label: "文件", submenu: [{ label: "设置…", accelerator: "CmdOrCtrl+,", click: openSettings }, { type: "separator" }, { role: "quit" }] },
+    { label: "编辑", submenu: [{ role: "undo" }, { role: "redo" }, { type: "separator" }, { role: "cut" }, { role: "copy" }, { role: "paste" }] }
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
 function store(): SessionStore { return new SessionStore(DEFAULT_WORKSPACE); }
 
 function historyInput(session: SessionData, current: string): string {
@@ -49,9 +82,17 @@ function historyInput(session: SessionData, current: string): string {
 ipcMain.handle("sessions:list", () => { logMain("ipc.sessions.list"); return store().list(); });
 ipcMain.handle("sessions:create", () => { const session = store().create(); logMain("ipc.sessions.create", { sessionId: session.meta.id }); return session; });
 ipcMain.handle("sessions:get", (_event, id: string) => { logMain("ipc.sessions.get", { sessionId: id }); return store().get(id); });
-ipcMain.handle("models:list", () => {
+ipcMain.handle("models:list", async () => {
   const { config } = loadConfig(DEFAULT_WORKSPACE);
-  return configuredModels(config);
+  const googleProfile = config.agent.models?.find((model) => model.provider === "google");
+  const googleModels = googleProfile ? await listGoogleModels(process.env[googleProfile.apiKeyEnv] || "", googleProfile.baseUrl).catch(() => []) : [];
+  return configuredModels(config, googleModels);
+});
+ipcMain.handle("settings:get", () => readSettings(DEFAULT_WORKSPACE));
+ipcMain.handle("settings:save", (_event, payload: SettingsPayload) => {
+  const saved = saveSettings(DEFAULT_WORKSPACE, payload);
+  windowRef?.webContents.send("settings:changed", saved);
+  return saved;
 });
 ipcMain.handle("speech:start", () => startSpeech(windowRef));
 ipcMain.handle("speech:stop", () => { stopSpeech(); return { ok: true }; });
@@ -123,6 +164,7 @@ app.whenReady().then(() => {
     callback(permission === "media");
   });
   initializeWorkspace(DEFAULT_WORKSPACE);
+  createApplicationMenu();
   if (process.platform === "darwin") app.dock?.setIcon(appIconPath());
   logMain("app.ready");
   createWindow();

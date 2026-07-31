@@ -11,7 +11,7 @@ export interface McpServerConfig {
 export interface ModelProfile {
   id: string;
   name?: string;
-  provider: "openai-compatible" | "anthropic";
+  provider: "openai-compatible" | "anthropic" | "google";
   model: string;
   apiKeyEnv: string;
   baseUrl: string;
@@ -21,7 +21,7 @@ export interface ModelProfile {
 }
 
 export interface AgentConfig {
-  provider: "openai-compatible" | "anthropic";
+  provider: "openai-compatible" | "anthropic" | "google";
   model: string;
   apiKeyEnv: string;
   baseUrl: string;
