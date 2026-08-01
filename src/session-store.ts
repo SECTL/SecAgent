@@ -36,6 +36,12 @@ export class SessionStore {
     if (this.hydrateLegacyToolCalls(session)) this.writeSession(session);
     return session;
   }
+  delete(id: string): void {
+    const sessions = this.readIndex();
+    if (!sessions.some((item) => item.id === id)) throw new Error(`会话不存在：${id}`);
+    fs.rmSync(this.sessionDir(id), { recursive: true, force: true });
+    this.writeIndex(sessions.filter((item) => item.id !== id));
+  }
   appendMessage(id: string, role: SessionMessage["role"], content: string, toolCalls?: ToolCallRecord[], activities?: AssistantActivity[]): SessionData {
     const session = this.get(id);
     const now = new Date().toISOString();

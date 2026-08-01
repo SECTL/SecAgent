@@ -83,6 +83,7 @@ function historyInput(session: SessionData, current: string): string {
 
 ipcMain.handle("sessions:list", () => { logMain("ipc.sessions.list"); return store().list(); });
 ipcMain.handle("sessions:create", () => { const session = store().create(); logMain("ipc.sessions.create", { sessionId: session.meta.id }); return session; });
+ipcMain.handle("sessions:delete", (_event, id: string) => { store().delete(id); logMain("ipc.sessions.delete", { sessionId: id }); return store().list(); });
 ipcMain.handle("sessions:get", (_event, id: string) => { logMain("ipc.sessions.get", { sessionId: id }); return store().get(id); });
 ipcMain.handle("models:list", async () => {
   const { config } = loadConfig(DEFAULT_WORKSPACE);

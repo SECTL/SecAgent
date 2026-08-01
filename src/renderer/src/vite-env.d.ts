@@ -14,6 +14,7 @@ interface Window {
     getSettings(): Promise<SettingsPayload>;
     saveSettings(payload: SettingsPayload): Promise<SettingsPayload>;
     createSession(): Promise<SessionData>;
+    deleteSession(id: string): Promise<SessionMeta[]>;
     getSession(id: string): Promise<SessionData>;
     sendMessage(id: string, text: string, modelId?: string): Promise<SessionData>;
     onRuntimeEvent(listener: (event: unknown) => void): () => void;

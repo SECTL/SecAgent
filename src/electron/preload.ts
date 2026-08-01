@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld("secagent", {
   getSettings: () => ipcRenderer.invoke("settings:get"),
   saveSettings: (payload: unknown) => ipcRenderer.invoke("settings:save", payload),
   createSession: () => ipcRenderer.invoke("sessions:create"),
+  deleteSession: (id: string) => ipcRenderer.invoke("sessions:delete", id),
   getSession: (id: string) => ipcRenderer.invoke("sessions:get", id),
   sendMessage: (id: string, text: string, modelId?: string) => ipcRenderer.invoke("sessions:send", id, text, modelId),
   startSpeech: () => ipcRenderer.invoke("speech:start"),

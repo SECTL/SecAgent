@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -69,22 +69,37 @@ function SettingsApp() {
   </main>;
 }
 
-function MessageActivities({ activities, elapsedSeconds }: { activities: AssistantActivity[]; elapsedSeconds?: number }) {
-  if (!activities.length) return null;
+function AnimatedDetails({ className, summary, children, autoOpen = false, summaryRef }: { className: string; summary: ReactNode; children: ReactNode; autoOpen?: boolean; summaryRef?: { current: HTMLButtonElement | null } }) {
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (autoOpen) setOpen(true);
+    else setOpen(false);
+  }, [autoOpen]);
+
+  const expanded = autoOpen || open;
+  return <div className={`${className} animated-details ${expanded ? "is-open" : ""}`}>
+    <button ref={summaryRef} type="button" className="details-summary" aria-expanded={expanded} onClick={() => { if (!autoOpen) setOpen((current) => !current); }}>
+      {summary}
+    </button>
+    <div className="details-panel" aria-hidden={!expanded}><div className="details-panel-inner">{children}</div></div>
+  </div>;
+}
+
+function MessageActivities({ activities, elapsedSeconds, isExecuting = false, summaryRef }: { activities: AssistantActivity[]; elapsedSeconds?: number; isExecuting?: boolean; summaryRef?: { current: HTMLButtonElement | null } }) {
+  if (!activities.length && !isExecuting) return null;
   const toolCount = activities.filter((activity) => activity.kind === "tool").length;
   const pending = activities.some((activity) => activity.kind === "tool" && !("result" in activity));
   const toolCountLabel = toolCount === 1 ? "一个" : `${toolCount}`;
-  return <details className="execution-summary" aria-label="本消息的执行过程" open={pending}>
-    <summary><span className="activity-glyph">✦</span><span>{pending ? "正在执行" : elapsedSeconds ? `用时${elapsedSeconds}秒` : "本轮完成"}，共调用了{toolCountLabel}个工具</span><img className={`execution-chevron ${pending ? "open" : ""}`} src="/session-chevron.svg" alt="" /></summary>
+  return <AnimatedDetails className="execution-summary" autoOpen={isExecuting} summaryRef={summaryRef} summary={<><span>{isExecuting || pending ? "正在执行" : elapsedSeconds ? `用时${elapsedSeconds}秒` : "本轮完成"}，共调用了{toolCountLabel}个工具</span><img className="execution-chevron" src="/session-chevron.svg" alt="" /></>}>
     <div className="message-tool-calls">
       {activities.map((activity, index) => activity.kind === "text"
-        ? <details className="intermediate-output" key={`text-${index}`} open><summary><span className="activity-dot">·</span><span>模型思考</span></summary><div className="activity-content"><ReactMarkdown remarkPlugins={[remarkGfm]}>{activity.content}</ReactMarkdown></div></details>
-        : <details className="message-tool" key={`${activity.name}-${index}`}>
-          <summary><span className="activity-dot">·</span><span className="tool-name">{toolTitle(activity.name)}</span><span className="tool-state">{"result" in activity ? "已完成" : "调用中"}</span></summary>
+        ? <AnimatedDetails className="intermediate-output" key={`text-${index}`} autoOpen summary={<><span className="activity-dot">·</span><span>模型思考</span><img className="details-chevron" src="/session-chevron.svg" alt="" /></>}><div className="activity-content"><ReactMarkdown remarkPlugins={[remarkGfm]}>{activity.content}</ReactMarkdown></div></AnimatedDetails>
+        : <AnimatedDetails className="message-tool" key={`${activity.name}-${index}`} summary={<><span className="activity-dot">·</span><span className="tool-name">{toolTitle(activity.name)}</span><span className="tool-state">{"result" in activity ? "已完成" : "调用中"}</span><img className="details-chevron" src="/session-chevron.svg" alt="" /></>}>
           <div className="tool-detail"><div><p>参数</p><pre>{JSON.stringify(activity.arguments, null, 2)}</pre></div><div><p>工具结果</p><pre>{"result" in activity ? JSON.stringify(activity.result, null, 2) : "正在等待返回…"}</pre></div></div>
-        </details>)}
+        </AnimatedDetails>)}
     </div>
-  </details>;
+  </AnimatedDetails>;
 }
 
 export function App() {
@@ -94,14 +109,19 @@ export function App() {
   const [models, setModels] = useState<ModelOption[]>([]);
   const [selectedModelId, setSelectedModelId] = useState("");
   const [sessionMenuDismissed, setSessionMenuDismissed] = useState(false);
+  const [allSessionsOpen, setAllSessionsOpen] = useState(false);
   const [session, setSession] = useState<SessionData | null>(null);
   const [draft, setDraft] = useState("");
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [sending, setSending] = useState(false);
+  const [finishing, setFinishing] = useState(false);
   const [recording, setRecording] = useState(false);
   const [speechStatus, setSpeechStatus] = useState("");
   const [trace, setTrace] = useState<TraceEvent[]>([]);
-  const messageEnd = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
+  const executionSummaryRef = useRef<HTMLButtonElement>(null);
+  const answerScrollPhase = useRef<"follow-bottom" | "settling" | "locked">("follow-bottom");
+  const answerScrollLockTimer = useRef<number | undefined>(undefined);
   const modelMenuEnd = useRef<HTMLDivElement>(null);
   const initializing = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -170,8 +190,6 @@ export function App() {
     });
   }, [bridge]);
 
-  useEffect(() => { messageEnd.current?.scrollIntoView({ behavior: "smooth" }); }, [session?.messages.length]);
-
   useEffect(() => {
     const closeOnOutsideClick = (event: PointerEvent) => {
       if (!modelMenuEnd.current?.contains(event.target as Node)) setModelMenuOpen(false);
@@ -184,6 +202,33 @@ export function App() {
   const finalStreamStart = useMemo(() => activeTrace.reduce((start, item, index) => item.stage === "model.output.reset" ? index + 1 : start, 0), [activeTrace]);
   const streamingOutput = useMemo(() => activeTrace.slice(finalStreamStart).filter((item) => item.stage === "model.output.delta")
     .map((item) => (item.data as { text?: string }).text || "").join(""), [activeTrace]);
+  useEffect(() => {
+    if (!sending || !streamingOutput || !messagesRef.current || !executionSummaryRef.current) return;
+    const messages = messagesRef.current;
+    const summary = executionSummaryRef.current;
+    const target = messages.scrollTop + summary.getBoundingClientRect().top - messages.getBoundingClientRect().top;
+    const maxScrollTop = Math.max(0, messages.scrollHeight - messages.clientHeight);
+    if (target > maxScrollTop) {
+      if (answerScrollLockTimer.current !== undefined) {
+        window.clearTimeout(answerScrollLockTimer.current);
+        answerScrollLockTimer.current = undefined;
+      }
+      answerScrollPhase.current = "follow-bottom";
+      messages.scrollTo({ top: maxScrollTop, behavior: "auto" });
+      console.debug("[SecAgent scroll] follow-bottom", { outputLength: streamingOutput.length, targetScrollTop: target, maxScrollTop, scrollTop: messages.scrollTop });
+      return;
+    }
+
+    if (answerScrollPhase.current !== "follow-bottom") return;
+    answerScrollPhase.current = "settling";
+    messages.scrollTo({ top: Math.max(0, target), behavior: "smooth" });
+    console.debug("[SecAgent scroll] settle-summary", { outputLength: streamingOutput.length, targetScrollTop: target, maxScrollTop, scrollTop: messages.scrollTop });
+    answerScrollLockTimer.current = window.setTimeout(() => {
+      answerScrollPhase.current = "locked";
+      answerScrollLockTimer.current = undefined;
+      console.debug("[SecAgent scroll] summary-locked", { scrollTop: messages.scrollTop });
+    }, 320);
+  }, [streamingOutput, sending]);
   const timelineTrace = useMemo(() => activeTrace.filter((item) => item.stage !== "model.output.delta"), [activeTrace]);
   const executionSeconds = useMemo(() => {
     const start = activeTrace.find((item) => item.stage === "user.request");
@@ -222,15 +267,49 @@ export function App() {
   const latestAssistantId = useMemo(() => session?.messages.filter((message) => message.role === "assistant").at(-1)?.id, [session?.messages]);
   const changeSession = async (id: string) => { if (bridge) { setSession(await bridge.getSession(id)); setTrace([]); } };
   const createSession = async () => { if (bridge) { const next = await bridge.createSession(); setSessions(await bridge.listSessions()); setSession(next); setTrace([]); } };
+  const deleteSession = async (id: string) => {
+    if (!bridge) return;
+    const remaining = await bridge.deleteSession(id);
+    if (id === session?.meta.id) {
+      const next = remaining[0] ? await bridge.getSession(remaining[0].id) : await bridge.createSession();
+      setSession(next);
+      setTrace([]);
+      setSessions(await bridge.listSessions());
+    } else {
+      setSessions(remaining);
+    }
+  };
   const send = async (event: FormEvent) => {
     event.preventDefault();
     const text = draft.trim();
     if (!text || !session || sending) return;
     const optimisticMessage: SessionMessage = { id: `pending-${Date.now()}`, role: "user", content: text, createdAt: new Date().toISOString() };
     setSession((current) => current ? { ...current, messages: [...current.messages, optimisticMessage] } : current);
-    setDraft(""); setTrace([]); setSending(true);
-    try { if (bridge) { setSession(await bridge.sendMessage(session.meta.id, text, selectedModelId)); setSessions(await bridge.listSessions()); } }
-    finally { setSending(false); }
+    if (answerScrollLockTimer.current !== undefined) window.clearTimeout(answerScrollLockTimer.current);
+    answerScrollLockTimer.current = undefined;
+    answerScrollPhase.current = "follow-bottom";
+    requestAnimationFrame(() => {
+      const messages = messagesRef.current;
+      if (!messages) return;
+      const nextScrollTop = Math.max(0, messages.scrollHeight - messages.clientHeight);
+      console.debug("[SecAgent scroll] user-message", { currentScrollTop: messages.scrollTop, nextScrollTop, maxScrollTop: nextScrollTop });
+      messages.scrollTo({ top: nextScrollTop, behavior: "smooth" });
+    });
+    setDraft(""); setTrace([]); setFinishing(false); setSending(true);
+    let completed = false;
+    try {
+      if (bridge) {
+        const response = await bridge.sendMessage(session.meta.id, text, selectedModelId);
+        setSession(response);
+        setSessions(await bridge.listSessions());
+        completed = true;
+        setFinishing(true);
+      }
+    } finally {
+      if (completed) await new Promise((resolve) => setTimeout(resolve, 260));
+      setFinishing(false);
+      setSending(false);
+    }
   };
 
   const stopRecording = async () => {
@@ -284,22 +363,37 @@ export function App() {
         <div className={`session-options ${sessionMenuDismissed ? "dismissed" : ""}`} onMouseEnter={() => setSessionMenuDismissed(false)}>
           <button className="session-trigger" aria-label="选择历史会话"><img className="session-chevron" src="/session-chevron.svg" alt="" /> <span>{session?.meta.title || "问候"}</span></button>
           <div className="session-list" role="menu">
-            {sessions.filter((item) => item.id !== session?.meta.id).map((item) => <button className="session-option" role="menuitem" key={item.id} onClick={() => { setSessionMenuDismissed(true); void changeSession(item.id); }}>{item.title}</button>)}
-            <button className="session-option new-session" role="menuitem" onClick={() => { setSessionMenuDismissed(true); void createSession(); }}>+ 新会话</button>
+            {sessions.filter((item) => item.id !== session?.meta.id).slice(0, 10).map((item) => <button className="session-option" role="menuitem" key={item.id} onClick={() => { setSessionMenuDismissed(true); void changeSession(item.id); }}>{item.title}</button>)}
+            <button className="session-option all-sessions-option" role="menuitem" onClick={() => { setSessionMenuDismissed(true); setAllSessionsOpen(true); }}>全部会话...</button>
           </div>
         </div>
+        <button className="new-session-button" type="button" aria-label="新建会话" title="新建会话" onClick={() => void createSession()}>+</button>
       </div>
     </header>
+    {allSessionsOpen && <div className="session-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setAllSessionsOpen(false); }}>
+      <section className="session-modal" role="dialog" aria-modal="true" aria-labelledby="all-sessions-title">
+        <div className="session-modal-header"><div><p className="eyebrow">SECAGENT</p><h2 id="all-sessions-title">全部会话</h2></div><button className="modal-close" type="button" aria-label="关闭" onClick={() => setAllSessionsOpen(false)}>×</button></div>
+        <div className="all-session-list">
+          {sessions.length === 0 && <p className="all-session-empty">还没有会话</p>}
+          {sessions.map((item) => <div className={`all-session-item ${item.id === session?.meta.id ? "active" : ""}`} key={item.id}>
+            <button className="all-session-title" type="button" onClick={() => { setAllSessionsOpen(false); void changeSession(item.id); }}>{item.title}</button>
+            <time>{new Date(item.updatedAt).toLocaleString()}</time>
+            <button className="delete-session-button" type="button" aria-label={`删除会话 ${item.title}`} onClick={() => { if (window.confirm(`确定删除会话“${item.title}”吗？`)) void deleteSession(item.id); }}>删除</button>
+          </div>)}
+        </div>
+        <button className="modal-new-session" type="button" onClick={() => { setAllSessionsOpen(false); void createSession(); }}>+ 新建会话</button>
+      </section>
+    </div>}
     <section className="workspace">
       <section className="conversation" aria-label="当前会话">
-        <div className="messages">
+        <div className="messages" ref={messagesRef}>
           {session?.messages.length === 0 && <div className="empty-state"><h2>开始一个课堂操作</h2><p>例如：查询张三积分，或给张三加 2 分。</p></div>}
           {session?.messages.map((message) => {
             const activities = message.activities?.length ? message.activities : message.toolCalls?.length ? message.toolCalls.map((call) => ({ kind: "tool" as const, ...call })) : message.id === latestAssistantId ? traceActivities : [];
-            return <article className={`message ${message.role}`} key={message.id}><div className="avatar">{message.role === "user" ? "你" : <img src="/icon.svg" alt="SecAgent" />}</div><div><div className="message-meta">{message.role === "user" ? "教师" : "SecAgent"} · {new Date(message.createdAt).toLocaleTimeString()}</div>{message.role === "assistant" && <MessageActivities activities={activities} elapsedSeconds={message.id === latestAssistantId ? executionSeconds : undefined} />}<div className="bubble">{message.role === "assistant" ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown> : message.content}</div></div></article>;
+            return <article className={`message ${message.role}`} key={message.id}><div className="message-content"><div className="message-meta">{message.role === "user" ? "教师" : "SecAgent"} · {new Date(message.createdAt).toLocaleTimeString()}</div>{message.role === "assistant" && <MessageActivities activities={activities} elapsedSeconds={message.id === latestAssistantId ? executionSeconds : undefined} isExecuting={finishing && message.id === latestAssistantId} summaryRef={finishing && message.id === latestAssistantId ? executionSummaryRef : undefined} />}<div className="bubble-row"><div className="avatar">{message.role === "user" ? "你" : <img src="/icon.svg" alt="SecAgent" />}</div><div className="bubble">{message.role === "assistant" ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown> : message.content}</div></div></div></article>;
           })}
-          {sending && <article className="message assistant"><div className="avatar"><img src="/icon.svg" alt="SecAgent" /></div><div><div className="message-meta">SecAgent · 正在生成</div><MessageActivities activities={traceActivities} elapsedSeconds={executionSeconds} /><div className="bubble loading">{streamingOutput ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingOutput}</ReactMarkdown> : "正在调用模型与工具…"}</div></div></article>}
-          <div ref={messageEnd} />
+          {sending && !finishing && <article className="message assistant"><div className="message-content"><div className="message-meta">SecAgent · 正在生成</div><MessageActivities activities={traceActivities} elapsedSeconds={executionSeconds} isExecuting summaryRef={executionSummaryRef} /><div className="bubble-row"><div className="avatar"><img src="/icon.svg" alt="SecAgent" /></div><div className="bubble loading">{streamingOutput ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingOutput}</ReactMarkdown> : "正在调用模型与工具…"}</div></div></div></article>}
+          <div />
         </div>
         <form className="composer" onSubmit={send}>
           <div className="composer-actions"><button type="button" className="icon-button" aria-label="添加图片"><img className="composer-icon" src="/image-icon.svg" alt="" /></button><button type="button" className={`icon-button mic-button ${recording ? "recording" : ""}`} aria-label={recording ? "停止语音输入" : "语音输入"} aria-pressed={recording} onClick={() => void toggleRecording()}><img className="composer-icon" src="/mic-icon.svg" alt="" /></button></div>
