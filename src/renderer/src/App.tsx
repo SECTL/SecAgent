@@ -42,6 +42,7 @@ const ttsRates = [["-30%", "较慢"], ["-15%", "慢"], ["+0%", "正常"], ["+15%
 
 function SettingsApp() {
   const bridge = window.secagent;
+  const isOobe = new URLSearchParams(window.location.search).get("oobe") === "1";
   const [settings, setSettings] = useState<SettingsPayload | null>(null);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
@@ -65,7 +66,11 @@ function SettingsApp() {
     try { const result = await bridge.saveSettings(settings); setSettings(result); setSaved(true); setTimeout(() => setSaved(false), 2200); }
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
   };
-  return <main className="settings-shell">
+  return <main className={`settings-shell ${isOobe ? "oobe-shell" : ""}`}>
+    {isOobe && <>
+      <header className="oobe-header"><p className="eyebrow">WELCOME TO SECAGENT</p><h1>先配置一个大模型</h1><p>完成模型配置后就可以开始使用。其他设置暂时不用处理，之后随时可以回来修改。</p><button className="primary-button" onClick={() => void save()}>保存并开始使用</button></header>
+      <div className="oobe-intro"><strong>只需要完成这一项</strong><span>选择模型协议，填写模型名称和 API Key。MCP、语音及其他高级设置不会影响首次使用。</span></div>
+    </>}
     <header className="settings-header"><div><p className="eyebrow">SECAGENT</p><h1>设置</h1><p>修改后立即写入工作目录的 secagent.yaml。</p></div><button className="primary-button" onClick={() => void save()}>保存设置</button></header>
     {error && <div className="settings-error">{error}</div>}{saved && <div className="settings-success">设置已保存，下一次请求立即生效。</div>}
     <section className="settings-section"><div className="section-title"><div><h2>朗读</h2><p>右键消息气泡选择“朗读”。语音由 Microsoft Edge 在线生成，不需要 API Key。</p></div></div>

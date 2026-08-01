@@ -7,6 +7,7 @@ import type { GoogleModelInfo } from "./google-models.js";
 
 export const DEFAULT_GOOGLE_MODEL = "gemini-2.5-flash";
 export const DEFAULT_MAX_TOKENS = 16_384;
+const ONBOARDING_MARKER = ".oobe-complete";
 export const DEFAULT_SYSTEM_PROMPT = "你是 SecAgent，一个教育场景操作助手。\n\n根据用户指令选择并使用可用工具，完成任务后用中文简洁说明真实结果。";
 export const DEFAULT_TTS_VOICE = "zh-CN-XiaoxiaoNeural";
 export const DEFAULT_TTS_RATE = "+0%";
@@ -27,13 +28,20 @@ const template = (workspace: string): SecAgentConfig => ({
     }]
   } as SecAgentConfig["agent"],
   tts: { voice: DEFAULT_TTS_VOICE, rate: DEFAULT_TTS_RATE },
-  mcp: { servers: {
-    secscore: { transport: "http", url: "http://127.0.0.1:3901/mcp", enabled: true },
-    classisland: { transport: "http", url: "http://127.0.0.1:18789/mcp", enabled: false }
-  } }
+  mcp: { servers: {} }
 });
 
 export function configPath(workspace: string): string { return path.join(workspace, "secagent.yaml"); }
+
+export function isOnboardingComplete(workspaceInput: string): boolean {
+  return fs.existsSync(path.join(expandPath(workspaceInput), ONBOARDING_MARKER));
+}
+
+export function markOnboardingComplete(workspaceInput: string): void {
+  const workspace = expandPath(workspaceInput);
+  ensureWorkspaceDirectories(workspace);
+  fs.writeFileSync(path.join(workspace, ONBOARDING_MARKER), "1\n", "utf8");
+}
 
 /**
  * Prepare only the directory structure needed by the app.
@@ -52,8 +60,6 @@ export function initializeWorkspace(workspace: string): void {
   ensureWorkspaceDirectories(workspace);
   const file = configPath(workspace);
   if (!fs.existsSync(file)) fs.writeFileSync(file, YAML.stringify(template(workspace)), "utf8");
-  const mcpFile = path.join(workspace, "mcp", "secscore-server.json");
-  if (!fs.existsSync(mcpFile)) fs.writeFileSync(mcpFile, JSON.stringify({ name: "secscore", transport: "http", url: "http://127.0.0.1:3901/mcp", tools: ["list_students", "find_students", "add_score", "undo_score"] }, null, 2) + "\n");
   const envFile = path.join(workspace, ".env");
   if (!fs.existsSync(envFile)) fs.writeFileSync(envFile, "# 填入密钥；不要提交或分享此文件。\nOPENAI_API_KEY=\nANTHROPIC_API_KEY=\nGEMINI_API_KEY=\n", "utf8");
 }

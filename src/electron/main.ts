@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, Menu, session } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { DEFAULT_WORKSPACE } from "../paths.js";
-import { configuredModels, loadConfig, readSettings, saveSettings, useConfiguredModel, type SettingsPayload } from "../config.js";
+import { configuredModels, configPath, initializeWorkspace, isOnboardingComplete, loadConfig, markOnboardingComplete, readSettings, saveSettings, useConfiguredModel, type SettingsPayload } from "../config.js";
 import { loadEnabledSkills } from "../skills.js";
 import { AuditStore } from "../audit.js";
 import { SecAgentRuntime, type TraceEvent } from "../runtime.js";
@@ -43,7 +43,8 @@ function createWindow(): void {
   else windowRef.loadFile(path.join(__dirname, "../renderer/index.html"));
 }
 
-function openSettings(): void {
+function openSettings(oobeOrMenuItem: boolean | Electron.MenuItem = false, _window?: Electron.BaseWindow, _event?: Electron.KeyboardEvent): void {
+  const oobe = typeof oobeOrMenuItem === "boolean" ? oobeOrMenuItem : false;
   if (settingsWindow && !settingsWindow.isDestroyed()) {
     settingsWindow.show();
     settingsWindow.focus();
@@ -60,8 +61,9 @@ function openSettings(): void {
     icon: appIconPath(),
     webPreferences: { preload: path.join(__dirname, "../preload/preload.cjs"), contextIsolation: true, nodeIntegration: false }
   });
-  if (process.env.ELECTRON_RENDERER_URL) settingsWindow.loadURL(`${process.env.ELECTRON_RENDERER_URL}?settings=1`);
-  else settingsWindow.loadFile(path.join(__dirname, "../renderer/index.html"), { query: { settings: "1" } });
+  const query = oobe ? "?settings=1&oobe=1" : "?settings=1";
+  if (process.env.ELECTRON_RENDERER_URL) settingsWindow.loadURL(`${process.env.ELECTRON_RENDERER_URL}${query}`);
+  else settingsWindow.loadFile(path.join(__dirname, "../renderer/index.html"), { query: oobe ? { settings: "1", oobe: "1" } : { settings: "1" } });
   settingsWindow.on("closed", () => { settingsWindow = undefined; });
 }
 
@@ -96,6 +98,7 @@ ipcMain.handle("models:list", async () => {
 ipcMain.handle("settings:get", () => readSettings(DEFAULT_WORKSPACE));
 ipcMain.handle("settings:save", (_event, payload: SettingsPayload) => {
   const saved = saveSettings(DEFAULT_WORKSPACE, payload);
+  markOnboardingComplete(DEFAULT_WORKSPACE);
   windowRef?.webContents.send("settings:changed", saved);
   return saved;
 });
@@ -169,6 +172,8 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
 });
 
 app.whenReady().then(() => {
+  const needsOnboarding = !fs.existsSync(configPath(DEFAULT_WORKSPACE)) || !isOnboardingComplete(DEFAULT_WORKSPACE);
+  initializeWorkspace(DEFAULT_WORKSPACE);
   // Electron otherwise rejects getUserMedia requests in some desktop environments.
   // Speech audio is only used by the local recognizer and is never sent to a server.
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
@@ -178,6 +183,7 @@ app.whenReady().then(() => {
   if (process.platform === "darwin") app.dock?.setIcon(appIconPath());
   logMain("app.ready");
   createWindow();
+  if (needsOnboarding) openSettings(true);
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
