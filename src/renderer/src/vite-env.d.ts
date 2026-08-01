@@ -7,7 +7,7 @@ type ReasoningEffort = "none" | "low" | "medium" | "high";
 interface ModelOption { id: string; name: string; model: string; provider: string }
 interface ModelProfile { id: string; name?: string; provider: "openai-compatible" | "openai-responses" | "anthropic" | "google"; model: string; apiKeyEnv: string; apiKey?: string; apiKeyConfigured?: boolean; baseUrl: string; endpoint?: string; anthropicVersion?: string; maxTokens?: number }
 interface McpServerConfig { transport: "stdio" | "http"; command?: string; args?: string[]; url?: string; enabled: boolean }
-interface SettingsPayload { models: ModelProfile[]; mcp: { servers: Record<string, McpServerConfig> } }
+interface SettingsPayload { models: ModelProfile[]; tts: { voice: string; rate: string }; mcp: { servers: Record<string, McpServerConfig> } }
 interface Window {
   secagent: {
     listSessions(): Promise<SessionMeta[]>;
@@ -22,6 +22,7 @@ interface Window {
     startSpeech(): Promise<{ ok: true }>;
     sendSpeechAudio(samples: Float32Array): void;
     stopSpeech(): Promise<{ ok: true }>;
+    synthesizeSpeech(text: string): Promise<string>;
     onSpeechEvent(listener: (event: unknown) => void): () => void;
     onSettingsChanged(listener: (settings: SettingsPayload) => void): () => void;
   };

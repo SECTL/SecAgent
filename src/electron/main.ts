@@ -10,6 +10,7 @@ import { SessionStore, type AssistantActivity, type SessionData, type ToolCallRe
 import { sendSpeechAudio, startSpeech, stopSpeech } from "./speech.js";
 import type { ReasoningEffort } from "../types.js";
 import { listGoogleModels } from "../google-models.js";
+import { synthesizeSpeech } from "./tts.js";
 
 let windowRef: BrowserWindow | undefined;
 let settingsWindow: BrowserWindow | undefined;
@@ -100,6 +101,12 @@ ipcMain.handle("settings:save", (_event, payload: SettingsPayload) => {
 });
 ipcMain.handle("speech:start", () => startSpeech(windowRef));
 ipcMain.handle("speech:stop", () => { stopSpeech(); return { ok: true }; });
+ipcMain.handle("tts:synthesize", async (_event, text: string) => {
+  if (typeof text !== "string" || !text.trim()) return "";
+  const { config } = loadConfig(DEFAULT_WORKSPACE);
+  const audio = await synthesizeSpeech(text.slice(0, 1800), config.tts);
+  return audio.toString("base64");
+});
 ipcMain.on("speech:audio", (_event, samples: Float32Array) => sendSpeechAudio(samples));
 ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId?: string, reasoningEffort: ReasoningEffort = "high") => {
   const sessionStore = store();

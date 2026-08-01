@@ -8,6 +8,8 @@ import type { GoogleModelInfo } from "./google-models.js";
 export const DEFAULT_GOOGLE_MODEL = "gemini-2.5-flash";
 export const DEFAULT_MAX_TOKENS = 16_384;
 export const DEFAULT_SYSTEM_PROMPT = "你是 SecAgent，一个教育场景操作助手。\n\n根据用户指令选择并使用可用工具，完成任务后用中文简洁说明真实结果。";
+export const DEFAULT_TTS_VOICE = "zh-CN-XiaoxiaoNeural";
+export const DEFAULT_TTS_RATE = "+0%";
 
 const template = (workspace: string): SecAgentConfig => ({
   version: 1,
@@ -24,6 +26,7 @@ const template = (workspace: string): SecAgentConfig => ({
       maxTokens: DEFAULT_MAX_TOKENS
     }]
   } as SecAgentConfig["agent"],
+  tts: { voice: DEFAULT_TTS_VOICE, rate: DEFAULT_TTS_RATE },
   mcp: { servers: {
     secscore: { transport: "http", url: "http://127.0.0.1:3901/mcp", enabled: true },
     classisland: { transport: "http", url: "http://127.0.0.1:18789/mcp", enabled: false }
@@ -107,6 +110,7 @@ export function normalizeAndValidate(raw: SecAgentConfig, workspace: string): Se
     };
   }
   raw.agent.systemPrompt = DEFAULT_SYSTEM_PROMPT;
+  raw.tts = { voice: raw.tts?.voice || DEFAULT_TTS_VOICE, rate: raw.tts?.rate || DEFAULT_TTS_RATE };
   delete (raw.agent as { systemPromptFile?: unknown }).systemPromptFile;
   if (!raw?.agent?.provider || !["openai-compatible", "openai-responses", "anthropic", "google"].includes(raw.agent.provider)) errors.push("agent.provider 必须是 openai-compatible、openai-responses、anthropic 或 google");
   if (!raw?.agent?.model && raw?.agent?.provider !== "google") errors.push("agent.model 缺失");
@@ -182,6 +186,7 @@ export function useConfiguredModel(config: SecAgentConfig, id?: string): void {
 
 export interface SettingsPayload {
   models: Array<ModelProfile & { apiKey?: string; apiKeyConfigured?: boolean }>;
+  tts: { voice: string; rate: string };
   mcp: { servers: Record<string, McpServerConfig> };
 }
 
@@ -202,7 +207,7 @@ export function readSettings(workspaceInput: string): SettingsPayload {
     }];
   const google = configured.find((model) => model.provider === "google");
   const models = [...configured.filter((model) => model.provider !== "google"), ...(google ? [google] : [])];
-  return { models: models.map((model) => ({ ...model, apiKeyConfigured: Boolean(process.env[model.apiKeyEnv]) })), mcp: config.mcp };
+  return { models: models.map((model) => ({ ...model, apiKeyConfigured: Boolean(process.env[model.apiKeyEnv]) })), tts: { voice: config.tts?.voice || DEFAULT_TTS_VOICE, rate: config.tts?.rate || DEFAULT_TTS_RATE }, mcp: config.mcp };
 }
 
 export function saveSettings(workspaceInput: string, payload: SettingsPayload): SettingsPayload {
@@ -218,6 +223,7 @@ export function saveSettings(workspaceInput: string, payload: SettingsPayload): 
     return model;
   });
   raw.agent = { models } as SecAgentConfig["agent"];
+  raw.tts = { voice: payload.tts?.voice || DEFAULT_TTS_VOICE, rate: payload.tts?.rate || DEFAULT_TTS_RATE };
   raw.mcp = payload.mcp;
   delete (raw as SecAgentConfig & { policy?: unknown }).policy;
   // Validate before replacing the user's file, then write the exact editable model/MCP values.

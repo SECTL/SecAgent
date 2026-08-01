@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld("secagent", {
   startSpeech: () => ipcRenderer.invoke("speech:start"),
   sendSpeechAudio: (samples: Float32Array) => ipcRenderer.send("speech:audio", samples),
   stopSpeech: () => ipcRenderer.invoke("speech:stop"),
+  synthesizeSpeech: (text: string) => ipcRenderer.invoke("tts:synthesize", text),
   onSpeechEvent: (listener: (event: unknown) => void) => {
     const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
     ipcRenderer.on("speech:event", wrapped);

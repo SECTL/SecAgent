@@ -17,6 +17,8 @@
     "test": "node --test dist/**/*.test.js"
   },
   "dependencies": {
+    "@andresaya/edge-tts": "^1.8.0",
+    "lucide-react": "^0.468.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-markdown": "^10.1.0",

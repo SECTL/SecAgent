@@ -36,6 +36,7 @@ export interface SecAgentConfig {
   version: number;
   workspace: string;
   agent: AgentConfig;
+  tts?: { voice?: string; rate?: string };
   mcp: { servers: Record<string, McpServerConfig> };
 }
 
