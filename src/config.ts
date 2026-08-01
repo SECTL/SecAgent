@@ -8,6 +8,7 @@ import type { GoogleModelInfo } from "./google-models.js";
 export const DEFAULT_GOOGLE_MODEL = "gemini-2.5-flash";
 export const DEFAULT_MAX_TOKENS = 16_384;
 const ONBOARDING_MARKER = ".oobe-complete";
+const LEGACY_AGENT_MODEL_FIELDS = ["provider", "model", "apiKeyEnv", "baseUrl", "endpoint", "anthropicVersion", "maxTokens"] as const;
 export const DEFAULT_SYSTEM_PROMPT = "你是 SecAgent，一个教育场景操作助手。\n\n根据用户指令选择并使用可用工具，完成任务后用中文简洁说明真实结果。";
 export const DEFAULT_TTS_VOICE = "zh-CN-XiaoxiaoNeural";
 export const DEFAULT_TTS_RATE = "+0%";
@@ -228,12 +229,19 @@ export function saveSettings(workspaceInput: string, payload: SettingsPayload): 
     if (typeof apiKey === "string" && apiKey.trim()) writeWorkspaceEnv(workspace, model.apiKeyEnv, apiKey.trim());
     return model;
   });
-  raw.agent = { models } as SecAgentConfig["agent"];
-  raw.tts = { voice: payload.tts?.voice || DEFAULT_TTS_VOICE, rate: payload.tts?.rate || DEFAULT_TTS_RATE };
+  const nextTts = { voice: payload.tts?.voice || DEFAULT_TTS_VOICE, rate: payload.tts?.rate || DEFAULT_TTS_RATE };
+  const canonicalAgent = { ...(raw.agent as unknown as Record<string, unknown>), models } as SecAgentConfig["agent"];
+  for (const field of LEGACY_AGENT_MODEL_FIELDS) delete (canonicalAgent as unknown as Record<string, unknown>)[field];
+  const candidateAgent = { ...canonicalAgent, models: models.map((model) => ({ ...model })) } as SecAgentConfig["agent"];
+  const candidate: SecAgentConfig = { ...raw, agent: candidateAgent, tts: nextTts, mcp: payload.mcp };
+  delete (candidate as SecAgentConfig & { policy?: unknown }).policy;
+  // Validate a normalized copy, then persist only the canonical multi-model fields.
+  normalizeAndValidate(candidate, workspace);
+  canonicalAgent.models = candidate.agent.models;
+  raw.agent = canonicalAgent;
+  raw.tts = nextTts;
   raw.mcp = payload.mcp;
   delete (raw as SecAgentConfig & { policy?: unknown }).policy;
-  // Validate before replacing the user's file, then write the exact editable model/MCP values.
-  normalizeAndValidate(raw, workspace);
   fs.writeFileSync(file, YAML.stringify(raw), "utf8");
   return readSettings(workspace);
 }
