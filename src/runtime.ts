@@ -51,9 +51,17 @@ export class SecAgentRuntime {
   }
   private async callTool(request: string, key: string, args: Record<string, unknown>, hiddenTools?: Set<string>): Promise<unknown> {
     if (piTools.some((tool) => tool.key === key)) {
-      const result = await callPiTool(this.config.workspace, key, args);
-      this.audit.log({ id: randomUUID(), status: "completed", tool: key, request, params: args, result });
-      return result;
+      this.emit("secagent.tools/call", { name: key, arguments: args });
+      try {
+        const result = await callPiTool(this.config.workspace, key, args);
+        this.emit("secagent.tools/result", { name: key, result });
+        this.audit.log({ id: randomUUID(), status: "completed", tool: key, request, params: args, result });
+        return result;
+      } catch (error) {
+        const result = { error: error instanceof Error ? error.message : String(error) };
+        this.emit("secagent.tools/result", { name: key, result });
+        throw error;
+      }
     }
     if (key === "secagent__read_skill") return this.readSkill(request, args);
     if (key === "secagent__call_hidden_tool") return this.callHiddenTool(request, args, hiddenTools);

@@ -6,6 +6,8 @@ type ExecuteTool = (key: string, args: Record<string, unknown>) => Promise<unkno
 export type AgentTool = Pick<RegisteredMcpTool, "key" | "description" | "inputSchema">;
 type ModelTrace = (stage: string, data: unknown) => void;
 
+const MAX_TOOL_TURNS = 32;
+
 function toGoogleSchema(input: unknown): Record<string, unknown> {
   const source = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
   const rawType = source.type;
@@ -108,7 +110,7 @@ export class ModelToolAgent {
   private async runOpenAICompatible(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool): Promise<string> {
     const messages: Array<Record<string, unknown>> = [{ role: "system", content: this.agent.systemPrompt }, { role: "user", content: instruction }];
     const definitions = tools.map((tool) => ({ type: "function", function: { name: tool.key, description: tool.description || tool.key, parameters: tool.inputSchema || { type: "object", properties: {} } } }));
-    for (let turn = 0; turn < 8; turn++) {
+    for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
       let content = "";
       const toolCalls = new Map<number, { id?: string; function: { name?: string; arguments: string } }>();
       await this.streamRequest(`${this.agent.baseUrl}${this.agent.endpoint || "/chat/completions"}`, { "Content-Type": "application/json", Authorization: `Bearer ${key}` }, {
@@ -139,18 +141,19 @@ export class ModelToolAgent {
         if (!name || !call.id) continue;
         let args: Record<string, unknown> = {};
         try { args = JSON.parse(call.function?.arguments || "{}"); } catch { args = { _error: "模型返回了无法解析的工具参数" }; }
+        if ("_error" in args) throw new Error("模型返回了无法解析的工具参数，请提高 maxTokens 或重试");
         let result: unknown;
         try { result = await execute(name, args); } catch (error) { result = { error: error instanceof Error ? error.message : String(error) }; }
         messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result) });
       }
     }
-    throw new Error("模型工具调用超过最大轮数（8）");
+    throw new Error(`模型工具调用超过最大轮数（${MAX_TOOL_TURNS}）`);
   }
   private async runGoogle(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool): Promise<string> {
     type Part = { text?: string; functionCall?: { name?: string; args?: Record<string, unknown> }; functionResponse?: { name?: string; response?: unknown }; thoughtSignature?: string };
     const contents: Array<{ role: "user" | "model"; parts: Part[] }> = [{ role: "user", parts: [{ text: instruction }] }];
     const definitions = tools.map((tool) => ({ name: tool.key, description: tool.description || tool.key, parameters: toGoogleSchema(tool.inputSchema || { type: "object", properties: {} }) }));
-    for (let turn = 0; turn < 8; turn++) {
+    for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
       let text = "";
       const calls = new Map<string, { name: string; args: Record<string, unknown>; thoughtSignature?: string }>();
       const body = {
@@ -192,7 +195,7 @@ export class ModelToolAgent {
         contents.push({ role: "user", parts: [{ functionResponse: { name: call.name, response: result } }] });
       }
     }
-    throw new Error("模型工具调用超过最大轮数（8）");
+    throw new Error(`模型工具调用超过最大轮数（${MAX_TOOL_TURNS}）`);
   }
   private async streamGoogleRequest(url: string, key: string, body: unknown, onChunk: (chunk: Record<string, unknown>) => void, completeBody: () => unknown): Promise<void> {
     const requestUrl = `${url}${url.includes("?") ? "&" : "?"}alt=sse`;
@@ -229,7 +232,7 @@ export class ModelToolAgent {
   private async runAnthropic(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool): Promise<string> {
     const messages: Array<Record<string, unknown>> = [{ role: "user", content: instruction }];
     const definitions = tools.map((tool) => ({ name: tool.key, description: tool.description || tool.key, input_schema: tool.inputSchema || { type: "object", properties: {} } }));
-    for (let turn = 0; turn < 8; turn++) {
+    for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
       const blocks = new Map<number, { type?: string; id?: string; name?: string; text?: string; inputJson?: string; input?: Record<string, unknown> }>();
       await this.streamRequest(`${this.agent.baseUrl}${this.agent.endpoint || "/v1/messages"}`, {
         "Content-Type": "application/json", "x-api-key": key, "anthropic-version": this.agent.anthropicVersion || "2023-06-01"
@@ -274,13 +277,14 @@ export class ModelToolAgent {
       messages.push({ role: "assistant", content });
       const results: Array<Record<string, unknown>> = [];
       for (const call of calls) {
+        if (call.input && "_error" in call.input) throw new Error("模型返回了无法解析的工具参数，请提高 maxTokens 或重试");
         let result: unknown;
         try { result = await execute(call.name!, call.input || {}); } catch (error) { result = { error: error instanceof Error ? error.message : String(error) }; }
         results.push({ type: "tool_result", tool_use_id: call.id, content: JSON.stringify(result) });
       }
       messages.push({ role: "user", content: results });
     }
-    throw new Error("模型工具调用超过最大轮数（8）");
+    throw new Error(`模型工具调用超过最大轮数（${MAX_TOOL_TURNS}）`);
   }
   private parseToolInput(input: string | undefined): Record<string, unknown> {
     try { return JSON.parse(input || "{}") as Record<string, unknown>; }

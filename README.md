@@ -44,7 +44,7 @@ agent:
   apiKeyEnv: OPENAI_API_KEY
   baseUrl: https://api.openai.com/v1
   endpoint: /chat/completions
-  maxTokens: 800
+  maxTokens: 16384
 
   # 可选：配置多个模型后，可在桌面端输入框右侧切换。
   models:
@@ -55,7 +55,7 @@ agent:
       apiKeyEnv: OPENAI_API_KEY
       baseUrl: https://api.openai.com/v1
       endpoint: /chat/completions
-      maxTokens: 800
+      maxTokens: 16384
     - id: claude
       name: Claude Sonnet
       provider: anthropic
@@ -64,7 +64,7 @@ agent:
       baseUrl: https://api.anthropic.com
       endpoint: /v1/messages
       anthropicVersion: "2023-06-01"
-      maxTokens: 800
+      maxTokens: 16384
 
 # Anthropic Messages API 或其兼容端点
 # agent:
@@ -74,7 +74,7 @@ agent:
 #   baseUrl: https://api.anthropic.com
 #   endpoint: /v1/messages
 #   anthropicVersion: "2023-06-01"
-#   maxTokens: 800
+#   maxTokens: 16384
 
 # Google Gemini 原生 API
 # agent:
@@ -83,7 +83,7 @@ agent:
 #   apiKeyEnv: GEMINI_API_KEY
 #   baseUrl: https://generativelanguage.googleapis.com/v1beta
 #   endpoint: ""
-#   maxTokens: 800
+#   maxTokens: 16384
 ```
 
 模型可直接调用所有已发现的 MCP 工具，以及 Pi 风格的 `read`、`write`、`edit`、`bash` 四个本地工具；每次调用仍会写入本地审计。

@@ -35,7 +35,8 @@ function resolvePath(workspace: string, filePath: string): string {
 
 export async function callPiTool(workspace: string, key: string, args: Record<string, unknown>): Promise<unknown> {
   if (key === "read") {
-    const filePath = resolvePath(workspace, String(args.path || ""));
+    if (typeof args.path !== "string" || !args.path.trim()) throw new Error("read 需要非空 path");
+    const filePath = resolvePath(workspace, args.path);
     const content = await fs.readFile(filePath, "utf8");
     const lines = content.split(/\r?\n/);
     const offset = Math.max(1, Number(args.offset) || 1);
@@ -43,10 +44,12 @@ export async function callPiTool(workspace: string, key: string, args: Record<st
     return { path: filePath, content: lines.slice(offset - 1, offset - 1 + limit).join("\n"), offset, limit, totalLines: lines.length };
   }
   if (key === "write") {
-    const filePath = resolvePath(workspace, String(args.path || ""));
+    if (typeof args.path !== "string" || !args.path.trim()) throw new Error("write 需要非空 path，例如 clock.html");
+    if (typeof args.content !== "string") throw new Error("write 需要 content");
+    const filePath = resolvePath(workspace, args.path);
     await fs.mkdir(path.dirname(filePath), { recursive: true });
-    await fs.writeFile(filePath, String(args.content ?? ""), "utf8");
-    return { path: filePath, bytes: Buffer.byteLength(String(args.content ?? ""), "utf8") };
+    await fs.writeFile(filePath, args.content, "utf8");
+    return { path: filePath, bytes: Buffer.byteLength(args.content, "utf8") };
   }
   if (key === "edit") {
     const filePath = resolvePath(workspace, String(args.path || ""));

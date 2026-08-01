@@ -121,14 +121,14 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
       const content = typeof data.turn === "number" ? streamedTurns.get(data.turn) : undefined;
       if (content) activities.push({ kind: "text", content });
     }
-    if (ordered.stage === "mcp.tools/call") {
+    if (ordered.stage === "mcp.tools/call" || ordered.stage === "secagent.tools/call") {
       const data = ordered.data as { name?: unknown; arguments?: unknown };
       if (typeof data.name === "string") {
         toolCalls.push({ name: data.name, arguments: data.arguments ?? {} });
         activities.push({ kind: "tool", name: data.name, arguments: data.arguments ?? {} });
       }
     }
-    if (ordered.stage === "mcp.tools/result") {
+    if (ordered.stage === "mcp.tools/result" || ordered.stage === "secagent.tools/result") {
       const data = ordered.data as { name?: unknown; result?: unknown };
       if (typeof data.name === "string") {
         const call = [...toolCalls].reverse().find((item) => item.name === data.name && !("result" in item));

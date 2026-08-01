@@ -6,6 +6,7 @@ import type { McpServerConfig, ModelProfile, SecAgentConfig } from "./types.js";
 import type { GoogleModelInfo } from "./google-models.js";
 
 export const DEFAULT_GOOGLE_MODEL = "gemini-2.5-flash";
+export const DEFAULT_MAX_TOKENS = 16_384;
 export const DEFAULT_SYSTEM_PROMPT = "你是 SecAgent，一个教育场景操作助手。\n\n根据用户指令选择并使用可用工具，完成任务后用中文简洁说明真实结果。";
 
 const template = (workspace: string): SecAgentConfig => ({
@@ -20,7 +21,7 @@ const template = (workspace: string): SecAgentConfig => ({
       apiKeyEnv: "OPENAI_API_KEY",
       baseUrl: "https://api.openai.com/v1",
       endpoint: "/chat/completions",
-      maxTokens: 800
+      maxTokens: DEFAULT_MAX_TOKENS
     }]
   } as SecAgentConfig["agent"],
   mcp: { servers: {
@@ -88,7 +89,7 @@ export function normalizeAndValidate(raw: SecAgentConfig, workspace: string): Se
       baseUrl: raw.agent.baseUrl ?? first.baseUrl,
       endpoint: raw.agent.endpoint ?? first.endpoint,
       anthropicVersion: raw.agent.anthropicVersion ?? first.anthropicVersion,
-      maxTokens: raw.agent.maxTokens ?? first.maxTokens ?? 800
+      maxTokens: raw.agent.maxTokens ?? first.maxTokens ?? DEFAULT_MAX_TOKENS
     };
   }
   // 兼容首版配置的 `openai:gpt-5` 写法，并迁移到明确的协议配置。
@@ -100,7 +101,7 @@ export function normalizeAndValidate(raw: SecAgentConfig, workspace: string): Se
       apiKeyEnv: "OPENAI_API_KEY",
       baseUrl: "https://api.openai.com/v1",
       endpoint: "/chat/completions",
-      maxTokens: 800,
+      maxTokens: DEFAULT_MAX_TOKENS,
       systemPrompt: DEFAULT_SYSTEM_PROMPT
     };
   }
@@ -114,7 +115,7 @@ export function normalizeAndValidate(raw: SecAgentConfig, workspace: string): Se
   if (!raw?.mcp?.servers || typeof raw.mcp.servers !== "object") errors.push("mcp.servers 缺失");
   if (errors.length) throw new Error(`配置校验失败：${errors.join("；")}`);
   raw.agent.baseUrl = raw.agent.baseUrl.replace(/\/$/, "");
-  raw.agent.maxTokens = raw.agent.maxTokens || 800;
+  raw.agent.maxTokens = raw.agent.maxTokens || DEFAULT_MAX_TOKENS;
   for (const model of raw.agent.models ?? []) validateModelProfile(model, errors);
   if (raw.agent.models?.length) {
     const ids = new Set<string>();
