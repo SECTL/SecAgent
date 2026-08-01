@@ -107,7 +107,7 @@ export function normalizeAndValidate(raw: SecAgentConfig, workspace: string): Se
   }
   raw.agent.systemPrompt = DEFAULT_SYSTEM_PROMPT;
   delete (raw.agent as { systemPromptFile?: unknown }).systemPromptFile;
-  if (!raw?.agent?.provider || !["openai-compatible", "anthropic", "google"].includes(raw.agent.provider)) errors.push("agent.provider 必须是 openai-compatible、anthropic 或 google");
+  if (!raw?.agent?.provider || !["openai-compatible", "openai-responses", "anthropic", "google"].includes(raw.agent.provider)) errors.push("agent.provider 必须是 openai-compatible、openai-responses、anthropic 或 google");
   if (!raw?.agent?.model && raw?.agent?.provider !== "google") errors.push("agent.model 缺失");
   if (!raw?.agent?.apiKeyEnv) errors.push("agent.apiKeyEnv 缺失");
   if (!raw?.agent?.baseUrl) errors.push("agent.baseUrl 缺失");
@@ -136,7 +136,7 @@ export function normalizeAndValidate(raw: SecAgentConfig, workspace: string): Se
 function validateModelProfile(model: ModelProfile, errors: string[]): void {
   if (!model?.id) errors.push("agent.models[].id 缺失");
   if (!model?.model && model?.provider !== "google") errors.push(`agent.models[${model?.id || "?"}].model 缺失`);
-  if (!model?.provider || !["openai-compatible", "anthropic", "google"].includes(model.provider)) errors.push(`agent.models[${model?.id || "?"}].provider 无效`);
+  if (!model?.provider || !["openai-compatible", "openai-responses", "anthropic", "google"].includes(model.provider)) errors.push(`agent.models[${model?.id || "?"}].provider 无效`);
   if (!model?.apiKeyEnv) errors.push(`agent.models[${model?.id || "?"}].apiKeyEnv 缺失`);
   if (!model?.baseUrl) errors.push(`agent.models[${model?.id || "?"}].baseUrl 缺失`);
 }

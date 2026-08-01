@@ -1,4 +1,4 @@
-import type { SecAgentConfig } from "./types.js";
+import type { ReasoningEffort, SecAgentConfig } from "./types.js";
 import type { RegisteredMcpTool } from "./mcp-adapter.js";
 import type { LoadedSkill } from "./skills.js";
 
@@ -35,13 +35,14 @@ export class ModelToolAgent {
       : "";
     this.agent = { ...config.agent, systemPrompt: `${config.agent.systemPrompt}${skillCatalog}` };
   }
-  async run(instruction: string, tools: AgentTool[], execute: ExecuteTool): Promise<string> {
+  async run(instruction: string, tools: AgentTool[], execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high"): Promise<string> {
     if (!tools.length) throw new Error("没有已启用且可发现的 MCP 工具");
     const key = process.env[this.agent.apiKeyEnv];
     if (!key) throw new Error(`未配置模型密钥环境变量 ${this.agent.apiKeyEnv}。请设置后重试；密钥不要写入 secagent.yaml。`);
-    if (this.agent.provider === "anthropic") return this.runAnthropic(instruction, tools, key, execute);
-    if (this.agent.provider === "google") return this.runGoogle(instruction, tools, key, execute);
-    return this.runOpenAICompatible(instruction, tools, key, execute);
+    if (this.agent.provider === "anthropic") return this.runAnthropic(instruction, tools, key, execute, reasoningEffort);
+    if (this.agent.provider === "google") return this.runGoogle(instruction, tools, key, execute, reasoningEffort);
+    if (this.agent.provider === "openai-responses") return this.runOpenAIResponses(instruction, tools, key, execute, reasoningEffort);
+    return this.runOpenAICompatible(instruction, tools, key, execute, reasoningEffort);
   }
   private async request(url: string, headers: Record<string, string>, body: unknown): Promise<unknown> {
     this.trace?.("model.request", { url, body });
@@ -107,20 +108,24 @@ export class ModelToolAgent {
     // durable audit record required for every request sent to a model.
     this.trace?.("model.response", { url, status: response.status, body: completeBody() });
   }
-  private async runOpenAICompatible(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool): Promise<string> {
+  private async runOpenAICompatible(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort): Promise<string> {
     const messages: Array<Record<string, unknown>> = [{ role: "system", content: this.agent.systemPrompt }, { role: "user", content: instruction }];
     const definitions = tools.map((tool) => ({ type: "function", function: { name: tool.key, description: tool.description || tool.key, parameters: tool.inputSchema || { type: "object", properties: {} } } }));
     for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
       let content = "";
       const toolCalls = new Map<number, { id?: string; function: { name?: string; arguments: string } }>();
       await this.streamRequest(`${this.agent.baseUrl}${this.agent.endpoint || "/chat/completions"}`, { "Content-Type": "application/json", Authorization: `Bearer ${key}` }, {
-        model: this.agent.model, messages, tools: definitions, max_tokens: this.agent.maxTokens
+        model: this.agent.model, messages, tools: definitions, max_tokens: this.agent.maxTokens, reasoning_effort: reasoningEffort
       }, (chunk) => {
         const delta = (chunk.choices as Array<{ delta?: { content?: string; tool_calls?: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }> } }> | undefined)?.[0]?.delta;
         if (!delta) return;
-        if (typeof delta.content === "string") {
-          content += delta.content;
-          this.trace?.("model.output.delta", { text: delta.content, turn: turn + 1 });
+          const reasoning = (delta as typeof delta & { reasoning_content?: string }).reasoning_content;
+          if (typeof reasoning === "string") {
+            this.trace?.("model.output.delta", { text: reasoning, kind: "thinking", turn: turn + 1 });
+          }
+          if (typeof delta.content === "string") {
+            content += delta.content;
+            this.trace?.("model.output.delta", { text: delta.content, kind: "answer", turn: turn + 1 });
         }
         for (const partial of delta.tool_calls || []) {
           const index = partial.index ?? 0;
@@ -149,8 +154,89 @@ export class ModelToolAgent {
     }
     throw new Error(`模型工具调用超过最大轮数（${MAX_TOOL_TURNS}）`);
   }
-  private async runGoogle(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool): Promise<string> {
-    type Part = { text?: string; functionCall?: { name?: string; args?: Record<string, unknown> }; functionResponse?: { name?: string; response?: unknown }; thoughtSignature?: string };
+
+  private async runOpenAIResponses(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort): Promise<string> {
+    type InputItem = Record<string, unknown>;
+    type FunctionCall = { callId: string; itemId?: string; name: string; arguments: string };
+    const input: InputItem[] = [{ role: "user", content: instruction }];
+    const definitions = tools.map((tool) => ({ type: "function", name: tool.key, description: tool.description || tool.key, parameters: tool.inputSchema || { type: "object", properties: {} }, strict: false }));
+    for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+      let answer = "";
+      let summaryDeltaSeen = false;
+      let thinkingDeltaSeen = false;
+      let responseOutput: InputItem[] = [];
+      const calls = new Map<string, FunctionCall>();
+      await this.streamRequest(`${this.agent.baseUrl}${this.agent.endpoint || "/responses"}`, { "Content-Type": "application/json", Authorization: `Bearer ${key}` }, {
+        model: this.agent.model,
+        instructions: this.agent.systemPrompt,
+        input,
+        tools: definitions,
+        max_output_tokens: this.agent.maxTokens,
+        reasoning: { effort: reasoningEffort, summary: "auto" }
+      }, (event) => {
+        const type = typeof event.type === "string" ? event.type : "";
+        if (type === "response.output_text.delta" && typeof event.delta === "string") {
+          answer += event.delta;
+          this.trace?.("model.output.delta", { text: event.delta, kind: "answer", turn: turn + 1 });
+        }
+        if (type === "response.output_text.done" && !answer && typeof event.text === "string") {
+          answer = event.text;
+          this.trace?.("model.output.delta", { text: event.text, kind: "answer", turn: turn + 1 });
+        }
+        if (type === "response.reasoning_summary_text.delta" && typeof event.delta === "string") {
+          summaryDeltaSeen = true;
+          this.trace?.("model.output.delta", { text: event.delta, kind: "summary", turn: turn + 1 });
+        }
+        if (type === "response.reasoning_summary_text.done" && !summaryDeltaSeen && typeof event.text === "string") {
+          this.trace?.("model.output.delta", { text: event.text, kind: "summary", turn: turn + 1 });
+        }
+        if (type === "response.reasoning_text.delta" && typeof event.delta === "string") {
+          thinkingDeltaSeen = true;
+          this.trace?.("model.output.delta", { text: event.delta, kind: "thinking", turn: turn + 1 });
+        }
+        if (type === "response.reasoning_text.done" && !thinkingDeltaSeen && typeof event.text === "string") {
+          this.trace?.("model.output.delta", { text: event.text, kind: "thinking", turn: turn + 1 });
+        }
+        if (type === "response.output_item.added" || type === "response.output_item.done") {
+          const item = event.item as { type?: string; call_id?: string; name?: string; arguments?: string } | undefined;
+          if (item?.type === "function_call" && item.call_id) {
+            const previous = calls.get(item.call_id);
+            calls.set(item.call_id, { callId: item.call_id, itemId: typeof (item as { id?: unknown }).id === "string" ? (item as { id: string }).id : previous?.itemId, name: item.name || previous?.name || "", arguments: item.arguments || previous?.arguments || "" });
+          }
+        }
+        if (type === "response.function_call_arguments.delta" && typeof event.delta === "string") {
+          const call = [...calls.values()].find((candidate) => candidate.itemId === event.item_id) || (typeof event.call_id === "string" ? calls.get(event.call_id) : undefined);
+          if (call) {
+            call.arguments += event.delta;
+            calls.set(call.callId, call);
+          }
+        }
+        if (type === "response.completed") {
+          const response = event.response as { output?: Array<{ type?: string; call_id?: string; name?: string; arguments?: string; [key: string]: unknown }> } | undefined;
+          responseOutput = (response?.output || []) as InputItem[];
+          for (const item of response?.output || []) {
+            if (item.type === "function_call" && item.call_id && item.name) calls.set(item.call_id, { callId: item.call_id, name: item.name, arguments: item.arguments || "" });
+          }
+        }
+      }, () => ({ output: [{ type: "message", content: answer || undefined }, ...[...calls.values()].map((call) => ({ type: "function_call", call_id: call.callId, name: call.name, arguments: call.arguments }))] }));
+      const functionCalls = [...calls.values()].filter((call) => call.name && call.callId);
+      if (!functionCalls.length) return answer.trim() || "已完成。";
+      if (answer) this.trace?.("model.output.reset", { turn: turn + 1, reason: "tool_call" });
+      if (responseOutput.length) input.push(...responseOutput);
+      for (const call of functionCalls) {
+        let args: Record<string, unknown> = {};
+        try { args = JSON.parse(call.arguments || "{}"); } catch { args = { _error: "模型返回了无法解析的工具参数" }; }
+        if ("_error" in args) throw new Error("模型返回了无法解析的工具参数，请提高 maxTokens 或重试");
+        if (!responseOutput.length) input.push({ type: "function_call", call_id: call.callId, name: call.name, arguments: call.arguments });
+        let result: unknown;
+        try { result = await execute(call.name, args); } catch (error) { result = { error: error instanceof Error ? error.message : String(error) }; }
+        input.push({ type: "function_call_output", call_id: call.callId, output: JSON.stringify(result) });
+      }
+    }
+    throw new Error(`模型工具调用超过最大轮数（${MAX_TOOL_TURNS}）`);
+  }
+  private async runGoogle(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high"): Promise<string> {
+    type Part = { text?: string; thought?: boolean; functionCall?: { name?: string; args?: Record<string, unknown> }; functionResponse?: { name?: string; response?: unknown }; thoughtSignature?: string };
     const contents: Array<{ role: "user" | "model"; parts: Part[] }> = [{ role: "user", parts: [{ text: instruction }] }];
     const definitions = tools.map((tool) => ({ name: tool.key, description: tool.description || tool.key, parameters: toGoogleSchema(tool.inputSchema || { type: "object", properties: {} }) }));
     for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
@@ -160,14 +246,14 @@ export class ModelToolAgent {
         systemInstruction: { parts: [{ text: this.agent.systemPrompt }] },
         contents,
         tools: [{ functionDeclarations: definitions }],
-        generationConfig: { maxOutputTokens: this.agent.maxTokens }
+        generationConfig: { maxOutputTokens: this.agent.maxTokens, thinkingConfig: this.googleThinkingConfig(reasoningEffort) }
       };
       await this.streamGoogleRequest(`${this.agent.baseUrl}${this.agent.endpoint || `/models/${encodeURIComponent(this.agent.model || "gemini-2.5-flash")}:streamGenerateContent`}`, key, body, (chunk) => {
         const parts = (chunk.candidates as Array<{ content?: { parts?: Part[] } }> | undefined)?.[0]?.content?.parts || [];
         for (const part of parts) {
           if (typeof part.text === "string") {
             text += part.text;
-            this.trace?.("model.output.delta", { text: part.text, turn: turn + 1 });
+            this.trace?.("model.output.delta", { text: part.text, kind: part.thought ? "thinking" : "answer", turn: turn + 1 });
           }
           if (part.functionCall?.name) {
             const name = part.functionCall.name;
@@ -196,6 +282,13 @@ export class ModelToolAgent {
       }
     }
     throw new Error(`模型工具调用超过最大轮数（${MAX_TOOL_TURNS}）`);
+  }
+
+  private googleThinkingConfig(effort: ReasoningEffort): Record<string, unknown> {
+    const model = this.agent.model.toLowerCase();
+    if (model.includes("gemini-3")) return { thinkingLevel: effort === "none" ? "minimal" : effort };
+    const budget = effort === "none" ? 0 : effort === "low" ? 1024 : effort === "medium" ? 4096 : 8192;
+    return { thinkingBudget: budget, includeThoughts: true };
   }
   private async streamGoogleRequest(url: string, key: string, body: unknown, onChunk: (chunk: Record<string, unknown>) => void, completeBody: () => unknown): Promise<void> {
     const requestUrl = `${url}${url.includes("?") ? "&" : "?"}alt=sse`;
@@ -229,7 +322,7 @@ export class ModelToolAgent {
     if (buffer.trim()) consume(buffer);
     this.trace?.("model.response", { url, status: response.status, body: completeBody() });
   }
-  private async runAnthropic(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool): Promise<string> {
+  private async runAnthropic(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high"): Promise<string> {
     const messages: Array<Record<string, unknown>> = [{ role: "user", content: instruction }];
     const definitions = tools.map((tool) => ({ name: tool.key, description: tool.description || tool.key, input_schema: tool.inputSchema || { type: "object", properties: {} } }));
     for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
@@ -237,7 +330,12 @@ export class ModelToolAgent {
       await this.streamRequest(`${this.agent.baseUrl}${this.agent.endpoint || "/v1/messages"}`, {
         "Content-Type": "application/json", "x-api-key": key, "anthropic-version": this.agent.anthropicVersion || "2023-06-01"
       }, {
-        model: this.agent.model, max_tokens: this.agent.maxTokens, system: this.agent.systemPrompt, messages, tools: definitions
+        model: this.agent.model,
+        max_tokens: this.agent.maxTokens,
+        system: this.agent.systemPrompt,
+        messages,
+        tools: definitions,
+        ...this.anthropicThinkingConfig(reasoningEffort)
       }, (event) => {
         const type = event.type;
         const index = typeof event.index === "number" ? event.index : 0;
@@ -250,9 +348,12 @@ export class ModelToolAgent {
         if (type === "content_block_delta") {
           const current = blocks.get(index) || {};
           const delta = event.delta as { type?: string; text?: string; partial_json?: string } | undefined;
+          if (delta?.type === "thinking_delta" && typeof (delta as typeof delta & { thinking?: string }).thinking === "string") {
+            this.trace?.("model.output.delta", { text: (delta as typeof delta & { thinking: string }).thinking, kind: "thinking", turn: turn + 1 });
+          }
           if (delta?.type === "text_delta" && typeof delta.text === "string") {
             current.text = (current.text || "") + delta.text;
-            this.trace?.("model.output.delta", { text: delta.text, turn: turn + 1 });
+            this.trace?.("model.output.delta", { text: delta.text, kind: "answer", turn: turn + 1 });
           }
           if (delta?.type === "input_json_delta" && typeof delta.partial_json === "string") current.inputJson = (current.inputJson || "") + delta.partial_json;
           blocks.set(index, current);
@@ -289,5 +390,14 @@ export class ModelToolAgent {
   private parseToolInput(input: string | undefined): Record<string, unknown> {
     try { return JSON.parse(input || "{}") as Record<string, unknown>; }
     catch { return { _error: "模型返回了无法解析的工具参数" }; }
+  }
+
+  private anthropicThinkingConfig(effort: ReasoningEffort): Record<string, unknown> {
+    if (effort === "none") return {};
+    const model = this.agent.model.toLowerCase();
+    const adaptive = /claude-(?:opus|sonnet|haiku)-(?:4-6|4-7|4-8|5)/.test(model);
+    if (adaptive) return { thinking: { type: "adaptive" }, output_config: { effort } };
+    const budget = effort === "low" ? 1024 : effort === "medium" ? 4096 : 8192;
+    return { thinking: { type: "enabled", budget_tokens: Math.min(budget, Math.max(1024, this.agent.maxTokens - 1)) } };
   }
 }

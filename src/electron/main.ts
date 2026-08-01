@@ -8,6 +8,7 @@ import { AuditStore } from "../audit.js";
 import { SecAgentRuntime, type TraceEvent } from "../runtime.js";
 import { SessionStore, type AssistantActivity, type SessionData, type ToolCallRecord } from "../session-store.js";
 import { sendSpeechAudio, startSpeech, stopSpeech } from "./speech.js";
+import type { ReasoningEffort } from "../types.js";
 import { listGoogleModels } from "../google-models.js";
 
 let windowRef: BrowserWindow | undefined;
@@ -100,29 +101,29 @@ ipcMain.handle("settings:save", (_event, payload: SettingsPayload) => {
 ipcMain.handle("speech:start", () => startSpeech(windowRef));
 ipcMain.handle("speech:stop", () => { stopSpeech(); return { ok: true }; });
 ipcMain.on("speech:audio", (_event, samples: Float32Array) => sendSpeechAudio(samples));
-ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId?: string) => {
+ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId?: string, reasoningEffort: ReasoningEffort = "high") => {
   const sessionStore = store();
   const before = sessionStore.get(id);
   sessionStore.appendMessage(id, "user", text);
   const { workspace, config } = loadConfig(DEFAULT_WORKSPACE);
   useConfiguredModel(config, modelId);
+  const selectedReasoningEffort: ReasoningEffort = ["none", "low", "medium", "high"].includes(reasoningEffort) ? reasoningEffort : "high";
   const audit = new AuditStore(workspace);
   let traceSequence = 0;
   const toolCalls: ToolCallRecord[] = [];
   const activities: AssistantActivity[] = [];
-  const streamedTurns = new Map<number, string>();
   const trace = (event: Omit<TraceEvent, "sequence" | "at"> | TraceEvent) => {
     // The main process owns the sequence so its own request/error events and runtime events share
     // one strictly ordered timeline.
     const ordered: TraceEvent = { ...event, sequence: ++traceSequence, at: new Date().toISOString() };
     if (ordered.stage === "model.output.delta") {
-      const data = ordered.data as { text?: unknown; turn?: unknown };
-      if (typeof data.text === "string" && typeof data.turn === "number") streamedTurns.set(data.turn, (streamedTurns.get(data.turn) || "") + data.text);
-    }
-    if (ordered.stage === "model.output.reset") {
-      const data = ordered.data as { turn?: unknown };
-      const content = typeof data.turn === "number" ? streamedTurns.get(data.turn) : undefined;
-      if (content) activities.push({ kind: "text", content });
+      const data = ordered.data as { text?: unknown; kind?: unknown; turn?: unknown };
+      const kind = data.kind === "thinking" || data.kind === "summary" ? data.kind : undefined;
+      if (kind && typeof data.text === "string") {
+        const last = activities.at(-1);
+        if (last?.kind === kind) last.content += data.text;
+        else activities.push({ kind, content: data.text, ...(typeof data.turn === "number" ? { turn: data.turn } : {}) });
+      }
     }
     if (ordered.stage === "mcp.tools/call" || ordered.stage === "secagent.tools/call") {
       const data = ordered.data as { name?: unknown; arguments?: unknown };
@@ -148,7 +149,7 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
     logMain("ipc.sessions.send", { sessionId: id, text });
     trace({ stage: "user.request", data: { text } });
     const runtime = new SecAgentRuntime(config, audit, loadEnabledSkills(config), trace);
-    const result = await runtime.run(historyInput(before, text));
+    const result = await runtime.run(historyInput(before, text), selectedReasoningEffort);
     sessionStore.appendMessage(id, "assistant", result.message, toolCalls, activities);
     trace({ stage: "assistant.response", data: { text: result.message } });
     return sessionStore.get(id);

@@ -37,6 +37,15 @@ GEMINI_API_KEY=...
 在 `secagent.yaml` 的 `agent` 区块选择协议、模型和端点：
 
 ```yaml
+# OpenAI Responses 协议
+agent:
+  provider: openai-responses
+  model: gpt-5
+  apiKeyEnv: OPENAI_API_KEY
+  baseUrl: https://api.openai.com/v1
+  endpoint: /responses
+  maxTokens: 16384
+
 # OpenAI 或任何兼容 Chat Completions 的服务
 agent:
   provider: openai-compatible
@@ -85,6 +94,8 @@ agent:
 #   endpoint: ""
 #   maxTokens: 16384
 ```
+
+桌面端输入框右侧的模型菜单可以分别选择模型和推理强度（不思考、低、中、高）。OpenAI Responses 会将其映射到 `reasoning.effort`；Anthropic 和 Gemini 会映射到各自的 thinking 配置。Responses、Anthropic thinking 和 Gemini thought summary 的流式内容会按时间顺序显示在工具执行过程内，最终答案仍单独显示。
 
 模型可直接调用所有已发现的 MCP 工具，以及 Pi 风格的 `read`、`write`、`edit`、`bash` 四个本地工具；每次调用仍会写入本地审计。
 

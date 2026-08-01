@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { SecAgentConfig } from "./types.js";
+import type { ReasoningEffort, SecAgentConfig } from "./types.js";
 import { AuditStore } from "./audit.js";
 import { McpRegistry } from "./mcp-adapter.js";
 import { ModelToolAgent } from "./model-provider.js";
@@ -24,7 +24,7 @@ export class SecAgentRuntime {
     this.registry = new McpRegistry(config);
     this.agent = new ModelToolAgent(config, skills, (stage, data) => this.emit(stage, data));
   }
-  async run(input: string): Promise<RunResult> {
+  async run(input: string, reasoningEffort: ReasoningEffort = "high"): Promise<RunResult> {
     const mcpTools = await this.registry.discover();
     const hiddenTools = new Set(mcpTools.filter((tool) => tool.hidden).map((tool) => tool.key));
     const tools = [
@@ -36,7 +36,7 @@ export class SecAgentRuntime {
     this.emit("mcp.tools/list", mcpTools.map((tool) => ({ key: tool.key, server: tool.server, name: tool.name, description: tool.description, hidden: tool.hidden, inputSchema: tool.inputSchema })));
     this.emit("secagent.skills/list", this.skills.map((skill) => ({ name: skill.name, description: skill.description })));
     this.emit("model.agent.request", { provider: this.config.agent.provider, model: this.config.agent.model, baseUrl: this.config.agent.baseUrl, instruction: input });
-    const message = await this.agent.run(input, tools, async (key, args) => this.callTool(input, key, args, hiddenTools));
+    const message = await this.agent.run(input, tools, async (key, args) => this.callTool(input, key, args, hiddenTools), reasoningEffort);
     this.emit("model.agent.result", { message });
     return { kind: "completed", message };
   }

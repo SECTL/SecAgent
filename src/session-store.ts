@@ -5,7 +5,7 @@ import path from "node:path";
 export interface SessionMeta { id: string; title: string; createdAt: string; updatedAt: string }
 export interface ToolCallRecord { name: string; arguments: unknown; result?: unknown }
 export type AssistantActivity =
-  | { kind: "text"; content: string }
+  | { kind: "thinking" | "summary" | "answer"; content: string; turn?: number }
   | { kind: "tool"; name: string; arguments: unknown; result?: unknown };
 export interface SessionMessage { id: string; role: "user" | "assistant"; content: string; createdAt: string; toolCalls?: ToolCallRecord[]; activities?: AssistantActivity[] }
 export interface SessionData { meta: SessionMeta; messages: SessionMessage[] }

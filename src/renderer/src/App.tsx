@@ -22,6 +22,8 @@ const traceLabel: Record<string, string> = {
   "runtime.error": "运行出错"
 };
 
+const reasoningEffortLabels: Record<ReasoningEffort, string> = { none: "不思考", low: "低", medium: "中", high: "高" };
+
 function toolTitle(name: string): string {
   return name.replace(/__/g, " · ").replace(/_/g, " ");
 }
@@ -42,7 +44,7 @@ function SettingsApp() {
     ? { provider, apiKey: "", apiKeyConfigured: false, apiKeyEnv: "GEMINI_API_KEY", baseUrl: "https://generativelanguage.googleapis.com/v1beta", endpoint: "", model: "" }
     : provider === "anthropic"
       ? { provider, apiKey: "", apiKeyConfigured: false, apiKeyEnv: "ANTHROPIC_API_KEY", baseUrl: "https://api.anthropic.com", endpoint: "/v1/messages" }
-      : { provider, apiKey: "", apiKeyConfigured: false, apiKeyEnv: "OPENAI_API_KEY", baseUrl: "https://api.openai.com/v1", endpoint: "/chat/completions" });
+      : { provider, apiKey: "", apiKeyConfigured: false, apiKeyEnv: "OPENAI_API_KEY", baseUrl: "https://api.openai.com/v1", endpoint: provider === "openai-responses" ? "/responses" : "/chat/completions" });
   const updateServer = (name: string, patch: Partial<McpServerConfig>) => setSettings((current) => current && { ...current, mcp: { servers: Object.fromEntries(Object.entries(current.mcp.servers).map(([key, server]) => [key, key === name ? { ...server, ...patch } : server])) } });
   const renameServer = (oldName: string, newName: string) => {
     const name = newName.trim();
@@ -60,7 +62,7 @@ function SettingsApp() {
     <section className="settings-section"><div className="section-title"><div><h2>模型</h2><p>Google Gemini 填写 API Key 即可自动获取常用文本模型；模型名称可留空。</p></div><button className="secondary-button" onClick={() => setSettings((current) => current && { ...current, models: [...current.models, emptyModel()] })}>+ 添加模型</button></div>
       <div className="settings-cards">{settings.models.map((model, index) => <article className="settings-card" key={model.id}>
         <div className="card-heading"><strong>{model.name || model.model || "未命名模型"}</strong>{settings.models.length > 1 && <button className="text-button danger" onClick={() => setSettings((current) => current && { ...current, models: current.models.filter((_, item) => item !== index) })}>删除</button>}</div>
-        <div className="form-grid"><label>显示名称<input value={model.name || ""} onChange={(event) => updateModel(index, { name: event.target.value })} /></label><label>模型 ID<input value={model.id} onChange={(event) => updateModel(index, { id: event.target.value })} /></label><label>协议<select value={model.provider} onChange={(event) => selectProvider(index, event.target.value as ModelProfile["provider"])}><option value="openai-compatible">OpenAI 兼容</option><option value="anthropic">Anthropic</option><option value="google">Google Gemini</option></select></label><label>{model.provider === "google" ? "模型名称（可选，留空自动获取）" : "模型名称"}<input value={model.model} placeholder={model.provider === "google" ? "保存后自动使用可用 Gemini 文本模型" : ""} onChange={(event) => updateModel(index, { model: event.target.value })} /></label><label>{model.provider === "google" ? "Google AI Studio API Key" : "API Key"}<input type="password" placeholder={model.apiKeyConfigured ? "已配置（留空则保持不变）" : "粘贴你的 key"} value={model.apiKey || ""} onChange={(event) => updateModel(index, { apiKey: event.target.value })} /></label><label>API Key 环境变量<input value={model.apiKeyEnv} onChange={(event) => updateModel(index, { apiKeyEnv: event.target.value })} /></label><label>Base URL<input value={model.baseUrl} onChange={(event) => updateModel(index, { baseUrl: event.target.value })} /></label><label>Endpoint<input value={model.endpoint || ""} onChange={(event) => updateModel(index, { endpoint: event.target.value })} /></label><label>最大 Tokens<input type="number" min="1" value={model.maxTokens || 16384} onChange={(event) => updateModel(index, { maxTokens: Number(event.target.value) })} /></label></div>
+        <div className="form-grid"><label>显示名称<input value={model.name || ""} onChange={(event) => updateModel(index, { name: event.target.value })} /></label><label>模型 ID<input value={model.id} onChange={(event) => updateModel(index, { id: event.target.value })} /></label><label>协议<select value={model.provider} onChange={(event) => selectProvider(index, event.target.value as ModelProfile["provider"])}><option value="openai-responses">OpenAI Responses</option><option value="openai-compatible">OpenAI Chat 兼容</option><option value="anthropic">Anthropic</option><option value="google">Google Gemini</option></select></label><label>{model.provider === "google" ? "模型名称（可选，留空自动获取）" : "模型名称"}<input value={model.model} placeholder={model.provider === "google" ? "保存后自动使用可用 Gemini 文本模型" : ""} onChange={(event) => updateModel(index, { model: event.target.value })} /></label><label>{model.provider === "google" ? "Google AI Studio API Key" : "API Key"}<input type="password" placeholder={model.apiKeyConfigured ? "已配置（留空则保持不变）" : "粘贴你的 key"} value={model.apiKey || ""} onChange={(event) => updateModel(index, { apiKey: event.target.value })} /></label><label>API Key 环境变量<input value={model.apiKeyEnv} onChange={(event) => updateModel(index, { apiKeyEnv: event.target.value })} /></label><label>Base URL<input value={model.baseUrl} onChange={(event) => updateModel(index, { baseUrl: event.target.value })} /></label><label>Endpoint<input value={model.endpoint || ""} onChange={(event) => updateModel(index, { endpoint: event.target.value })} /></label><label>最大 Tokens<input type="number" min="1" value={model.maxTokens || 16384} onChange={(event) => updateModel(index, { maxTokens: Number(event.target.value) })} /></label></div>
       </article>)}</div>
     </section>
     <section className="settings-section"><div className="section-title"><div><h2>MCP 服务</h2><p>管理可被 SecAgent 发现和调用的 MCP 服务。</p></div><button className="secondary-button" onClick={() => setSettings((current) => current && { ...current, mcp: { servers: { ...current.mcp.servers, [`mcp-${Object.keys(current.mcp.servers).length + 1}`]: emptyMcp() } } })}>+ 添加服务</button></div>
@@ -73,28 +75,27 @@ function AnimatedDetails({ className, summary, children, autoOpen = false, summa
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
-    if (autoOpen) setOpen(true);
-    else setOpen(false);
+    setOpen(autoOpen);
   }, [autoOpen]);
 
-  const expanded = autoOpen || open;
+  const expanded = open;
   return <div className={`${className} animated-details ${expanded ? "is-open" : ""}`}>
-    <button ref={summaryRef} type="button" className="details-summary" aria-expanded={expanded} onClick={() => { if (!autoOpen) setOpen((current) => !current); }}>
+    <button ref={summaryRef} type="button" className="details-summary" aria-expanded={expanded} onClick={() => setOpen((current) => !current)}>
       {summary}
     </button>
     <div className="details-panel" aria-hidden={!expanded}><div className="details-panel-inner">{children}</div></div>
   </div>;
 }
 
-function MessageActivities({ activities, elapsedSeconds, isExecuting = false, summaryRef }: { activities: AssistantActivity[]; elapsedSeconds?: number; isExecuting?: boolean; summaryRef?: { current: HTMLButtonElement | null } }) {
+function MessageActivities({ activities, elapsedSeconds, isExecuting = false, activeStepKind, summaryRef }: { activities: AssistantActivity[]; elapsedSeconds?: number; isExecuting?: boolean; activeStepKind?: string; summaryRef?: { current: HTMLButtonElement | null } }) {
   if (!activities.length && !isExecuting) return null;
   const toolCount = activities.filter((activity) => activity.kind === "tool").length;
   const pending = activities.some((activity) => activity.kind === "tool" && !("result" in activity));
   const toolCountLabel = toolCount === 1 ? "一个" : `${toolCount}`;
   return <AnimatedDetails className="execution-summary" autoOpen={isExecuting} summaryRef={summaryRef} summary={<><span>{isExecuting || pending ? "正在执行" : elapsedSeconds ? `用时${elapsedSeconds}秒` : "本轮完成"}，共调用了{toolCountLabel}个工具</span><img className="execution-chevron" src="/session-chevron.svg" alt="" /></>}>
     <div className="message-tool-calls">
-      {activities.map((activity, index) => activity.kind === "text"
-        ? <AnimatedDetails className="intermediate-output" key={`text-${index}`} autoOpen summary={<><span className="activity-dot">·</span><span>模型思考</span><img className="details-chevron" src="/session-chevron.svg" alt="" /></>}><div className="activity-content"><ReactMarkdown remarkPlugins={[remarkGfm]}>{activity.content}</ReactMarkdown></div></AnimatedDetails>
+      {activities.map((activity, index) => activity.kind !== "tool"
+        ? <AnimatedDetails className={`intermediate-output ${activity.kind}`} key={`${activity.kind}-${index}`} autoOpen={isExecuting && activeStepKind === "thinking" && index === activities.length - 1 && activity.kind === "thinking"} summary={<><span className="activity-dot">·</span><span>{activity.kind === "thinking" ? "推理" : activity.kind === "summary" ? "中间摘要" : "中间内容"}</span><img className="details-chevron" src="/session-chevron.svg" alt="" /></>}><div className="activity-content"><ReactMarkdown remarkPlugins={[remarkGfm]}>{activity.content}</ReactMarkdown></div></AnimatedDetails>
         : <AnimatedDetails className="message-tool" key={`${activity.name}-${index}`} summary={<><span className="activity-dot">·</span><span className="tool-name">{toolTitle(activity.name)}</span><span className="tool-state">{"result" in activity ? "已完成" : "调用中"}</span><img className="details-chevron" src="/session-chevron.svg" alt="" /></>}>
           <div className="tool-detail"><div><p>参数</p><pre>{JSON.stringify(activity.arguments, null, 2)}</pre></div><div><p>工具结果</p><pre>{"result" in activity ? JSON.stringify(activity.result, null, 2) : "正在等待返回…"}</pre></div></div>
         </AnimatedDetails>)}
@@ -113,6 +114,8 @@ export function App() {
   const [session, setSession] = useState<SessionData | null>(null);
   const [draft, setDraft] = useState("");
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [modelSubmenu, setModelSubmenu] = useState<"model" | "effort" | null>(null);
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("high");
   const [sending, setSending] = useState(false);
   const [finishing, setFinishing] = useState(false);
   const [recording, setRecording] = useState(false);
@@ -192,7 +195,7 @@ export function App() {
 
   useEffect(() => {
     const closeOnOutsideClick = (event: PointerEvent) => {
-      if (!modelMenuEnd.current?.contains(event.target as Node)) setModelMenuOpen(false);
+      if (!modelMenuEnd.current?.contains(event.target as Node)) { setModelMenuOpen(false); setModelSubmenu(null); }
     };
     document.addEventListener("pointerdown", closeOnOutsideClick);
     return () => document.removeEventListener("pointerdown", closeOnOutsideClick);
@@ -201,7 +204,7 @@ export function App() {
   const activeTrace = useMemo(() => trace.filter((item) => item.sessionId === session?.meta.id), [trace, session?.meta.id]);
   const finalStreamStart = useMemo(() => activeTrace.reduce((start, item, index) => item.stage === "model.output.reset" ? index + 1 : start, 0), [activeTrace]);
   const streamingOutput = useMemo(() => activeTrace.slice(finalStreamStart).filter((item) => item.stage === "model.output.delta")
-    .map((item) => (item.data as { text?: string }).text || "").join(""), [activeTrace]);
+    .map((item) => { const data = item.data as { text?: string; kind?: string }; return data.kind === "answer" || !data.kind ? data.text || "" : ""; }).join(""), [activeTrace, finalStreamStart]);
   useEffect(() => {
     if (!sending || !streamingOutput || !messagesRef.current || !executionSummaryRef.current) return;
     const messages = messagesRef.current;
@@ -239,16 +242,15 @@ export function App() {
   }, [activeTrace]);
   const traceActivities = useMemo(() => {
     const activities: AssistantActivity[] = [];
-    const partialTurns = new Map<number, string>();
     for (const item of activeTrace) {
       if (item.stage === "model.output.delta") {
-        const data = item.data as { text?: unknown; turn?: unknown };
-        if (typeof data.text === "string" && typeof data.turn === "number") partialTurns.set(data.turn, (partialTurns.get(data.turn) || "") + data.text);
-      }
-      if (item.stage === "model.output.reset") {
-        const data = item.data as { turn?: unknown };
-        const content = typeof data.turn === "number" ? partialTurns.get(data.turn) : undefined;
-        if (content) activities.push({ kind: "text", content });
+        const data = item.data as { text?: unknown; kind?: unknown; turn?: unknown };
+        const kind = data.kind === "thinking" || data.kind === "summary" ? data.kind : undefined;
+        if (kind && typeof data.text === "string") {
+          const last = activities.at(-1);
+          if (last?.kind === kind) last.content += data.text;
+          else activities.push({ kind, content: data.text, ...(typeof data.turn === "number" ? { turn: data.turn } : {}) });
+        }
       }
       if (item.stage === "mcp.tools/call" || item.stage === "secagent.tools/call") {
         const data = item.data as { name?: unknown; arguments?: unknown };
@@ -263,6 +265,12 @@ export function App() {
       }
     }
     return activities;
+  }, [activeTrace]);
+  const activeStepKind = useMemo(() => {
+    const last = [...activeTrace].reverse().find((item) => item.stage === "model.output.delta" || item.stage === "mcp.tools/call" || item.stage === "mcp.tools/result" || item.stage === "secagent.tools/call" || item.stage === "secagent.tools/result");
+    if (!last) return undefined;
+    if (last.stage === "model.output.delta") return (last.data as { kind?: string }).kind || "answer";
+    return "tool";
   }, [activeTrace]);
   const latestAssistantId = useMemo(() => session?.messages.filter((message) => message.role === "assistant").at(-1)?.id, [session?.messages]);
   const changeSession = async (id: string) => { if (bridge) { setSession(await bridge.getSession(id)); setTrace([]); } };
@@ -299,7 +307,7 @@ export function App() {
     let completed = false;
     try {
       if (bridge) {
-        const response = await bridge.sendMessage(session.meta.id, text, selectedModelId);
+        const response = await bridge.sendMessage(session.meta.id, text, selectedModelId, reasoningEffort);
         setSession(response);
         setSessions(await bridge.listSessions());
         completed = true;
@@ -390,19 +398,25 @@ export function App() {
           {session?.messages.length === 0 && <div className="empty-state"><h2>开始一个课堂操作</h2><p>例如：查询张三积分，或给张三加 2 分。</p></div>}
           {session?.messages.map((message) => {
             const activities = message.activities?.length ? message.activities : message.toolCalls?.length ? message.toolCalls.map((call) => ({ kind: "tool" as const, ...call })) : message.id === latestAssistantId ? traceActivities : [];
-            return <article className={`message ${message.role}`} key={message.id}><div className="message-content"><div className="message-meta">{message.role === "user" ? "教师" : "SecAgent"} · {new Date(message.createdAt).toLocaleTimeString()}</div>{message.role === "assistant" && <MessageActivities activities={activities} elapsedSeconds={message.id === latestAssistantId ? executionSeconds : undefined} isExecuting={finishing && message.id === latestAssistantId} summaryRef={finishing && message.id === latestAssistantId ? executionSummaryRef : undefined} />}<div className="bubble-row"><div className="avatar">{message.role === "user" ? "你" : <img src="/icon.svg" alt="SecAgent" />}</div><div className="bubble">{message.role === "assistant" ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown> : message.content}</div></div></div></article>;
+            return <article className={`message ${message.role}`} key={message.id}><div className="message-content"><div className="message-meta">{message.role === "user" ? "教师" : "SecAgent"} · {new Date(message.createdAt).toLocaleTimeString()}</div>{message.role === "assistant" && <MessageActivities activities={activities} elapsedSeconds={message.id === latestAssistantId ? executionSeconds : undefined} isExecuting={finishing && message.id === latestAssistantId} activeStepKind={message.id === latestAssistantId ? activeStepKind : undefined} summaryRef={finishing && message.id === latestAssistantId ? executionSummaryRef : undefined} />}<div className="bubble-row"><div className="avatar">{message.role === "user" ? "你" : <img src="/icon.svg" alt="SecAgent" />}</div><div ref={message.role === "assistant" && message.id === latestAssistantId ? answerContentRef : undefined} className={`bubble ${message.role === "assistant" ? "markdown-bubble" : ""}`}>{message.role === "assistant" ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown> : message.content}</div></div></div></article>;
           })}
-          {sending && !finishing && <article className="message assistant"><div className="message-content"><div className="message-meta">SecAgent · 正在生成</div><MessageActivities activities={traceActivities} elapsedSeconds={executionSeconds} isExecuting summaryRef={executionSummaryRef} /><div className="bubble-row"><div className="avatar"><img src="/icon.svg" alt="SecAgent" /></div><div className="bubble loading">{streamingOutput ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingOutput}</ReactMarkdown> : "正在调用模型与工具…"}</div></div></div></article>}
+          {sending && !finishing && <article className="message assistant"><div className="message-content"><div className="message-meta">SecAgent · 正在生成</div><MessageActivities activities={traceActivities} elapsedSeconds={executionSeconds} isExecuting activeStepKind={activeStepKind} summaryRef={executionSummaryRef} /><div className="bubble-row"><div className="avatar"><img src="/icon.svg" alt="SecAgent" /></div><div className="bubble loading markdown-bubble">{streamingOutput ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingOutput}</ReactMarkdown> : "正在调用模型与工具…"}</div></div></div></article>}
           <div />
         </div>
         <form className="composer" onSubmit={send}>
           <div className="composer-actions"><button type="button" className="icon-button" aria-label="添加图片"><img className="composer-icon" src="/image-icon.svg" alt="" /></button><button type="button" className={`icon-button mic-button ${recording ? "recording" : ""}`} aria-label={recording ? "停止语音输入" : "语音输入"} aria-pressed={recording} onClick={() => void toggleRecording()}><img className="composer-icon" src="/mic-icon.svg" alt="" /></button></div>
           <textarea ref={textareaRef} value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={speechStatus || "问任何问题..."} rows={1} readOnly={recording} disabled={!session || sending} />
           <div className="model-menu" ref={modelMenuEnd}>
-            <button type="button" className="model-picker" aria-label="选择模型" aria-expanded={modelMenuOpen} onClick={() => setModelMenuOpen((open) => !open)}><span className="model-name">{models.find((model) => model.id === selectedModelId)?.name || "未配置模型"}</span><img className={`model-chevron ${modelMenuOpen ? "open" : ""}`} src="/session-chevron.svg" alt="" /></button>
-            <div className={`model-options ${modelMenuOpen ? "open" : ""}`} role="listbox">
-              {models.map((model) => <button type="button" className={`model-option ${model.id === selectedModelId ? "selected" : ""}`} role="option" aria-selected={model.id === selectedModelId} key={model.id} onClick={() => { setSelectedModelId(model.id); setModelMenuOpen(false); }}>{model.name}</button>)}
-            </div>
+            <button type="button" className="model-picker" aria-label="选择模型和推理强度" aria-expanded={modelMenuOpen} onClick={() => { setModelMenuOpen((open) => !open); setModelSubmenu(null); }}>
+              <span className="model-picker-copy"><strong>{models.find((model) => model.id === selectedModelId)?.name || "未配置模型"}</strong><small>推理强度 · {reasoningEffortLabels[reasoningEffort]}</small></span>
+              <img className={`model-chevron ${modelMenuOpen ? "open" : ""}`} src="/session-chevron.svg" alt="" />
+            </button>
+            {modelMenuOpen && <div className="model-options" role="menu">
+              <button type="button" className={`model-setting-row ${modelSubmenu === "model" ? "selected" : ""}`} onClick={() => setModelSubmenu((current) => current === "model" ? null : "model")}><span>模型</span><span className="model-setting-value">{models.find((model) => model.id === selectedModelId)?.name || "未配置模型"}<span className="model-row-chevron">›</span></span></button>
+              {modelSubmenu === "model" && <div className="model-submenu" role="listbox">{models.map((model) => <button type="button" className={`model-option ${model.id === selectedModelId ? "selected" : ""}`} role="option" aria-selected={model.id === selectedModelId} key={model.id} onClick={() => { setSelectedModelId(model.id); setModelSubmenu(null); }}>{model.name}</button>)}</div>}
+              <button type="button" className={`model-setting-row ${modelSubmenu === "effort" ? "selected" : ""}`} onClick={() => setModelSubmenu((current) => current === "effort" ? null : "effort")}><span>推理强度</span><span className="model-setting-value">{reasoningEffortLabels[reasoningEffort]}<span className="model-row-chevron">›</span></span></button>
+              {modelSubmenu === "effort" && <div className="model-submenu" role="listbox">{(Object.keys(reasoningEffortLabels) as ReasoningEffort[]).map((effort) => <button type="button" className={`model-option ${effort === reasoningEffort ? "selected" : ""}`} role="option" aria-selected={effort === reasoningEffort} key={effort} onClick={() => { setReasoningEffort(effort); setModelSubmenu(null); }}>{reasoningEffortLabels[effort]}</button>)}</div>}
+            </div>}
           </div>
           <button className="send-button" type="submit" aria-label="发送" disabled={!draft.trim() || !session || sending}>↑</button>
         </form>

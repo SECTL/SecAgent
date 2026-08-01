@@ -9,7 +9,7 @@ export interface McpServerConfig {
 export interface ModelProfile {
   id: string;
   name?: string;
-  provider: "openai-compatible" | "anthropic" | "google";
+  provider: "openai-compatible" | "openai-responses" | "anthropic" | "google";
   model: string;
   apiKeyEnv: string;
   baseUrl: string;
@@ -19,7 +19,7 @@ export interface ModelProfile {
 }
 
 export interface AgentConfig {
-  provider: "openai-compatible" | "anthropic" | "google";
+  provider: "openai-compatible" | "openai-responses" | "anthropic" | "google";
   model: string;
   apiKeyEnv: string;
   baseUrl: string;
@@ -29,6 +29,8 @@ export interface AgentConfig {
   systemPrompt: string;
   models?: ModelProfile[];
 }
+
+export type ReasoningEffort = "none" | "low" | "medium" | "high";
 
 export interface SecAgentConfig {
   version: number;
