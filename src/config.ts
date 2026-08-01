@@ -32,22 +32,23 @@ const template = (workspace: string): SecAgentConfig => ({
 
 export function configPath(workspace: string): string { return path.join(workspace, "secagent.yaml"); }
 
-export function initializeWorkspace(workspace: string): void {
+/**
+ * Prepare only the directory structure needed by the app.
+ *
+ * This is intentionally non-destructive: it never recreates deleted workspace
+ * files or restores default Skills.
+ */
+export function ensureWorkspaceDirectories(workspace: string): void {
   fs.mkdirSync(workspace, { recursive: true });
-  for (const part of ["skills/secscore", "skills/class-schedule", "skills/random-picker", "mcp", "plugins", "sessions", "audit"]) {
+  for (const part of ["skills", "mcp", "plugins", "sessions", "audit"]) {
     fs.mkdirSync(path.join(workspace, part), { recursive: true });
   }
+}
+
+export function initializeWorkspace(workspace: string): void {
+  ensureWorkspaceDirectories(workspace);
   const file = configPath(workspace);
   if (!fs.existsSync(file)) fs.writeFileSync(file, YAML.stringify(template(workspace)), "utf8");
-  const skills: Record<string, string> = {
-    secscore: "---\nname: SecScore\ndescription: 处理学生查询、积分加减分和撤销。\n---\n# SecScore\n\n使用已提供的 MCP 工具获取真实结果。\n",
-    "class-schedule": "---\nname: Class Schedule\ndescription: 处理课程查询和换课。\n---\n# Class Schedule\n\n使用已提供的 MCP 工具获取真实结果。\n",
-    "random-picker": "---\nname: Random Picker\ndescription: 在指定班级或范围内随机抽取学生。\n---\n# Random Picker\n\n结果不修改外部系统。\n"
-  };
-  for (const [name, content] of Object.entries(skills)) {
-    const filePath = path.join(workspace, "skills", name, "SKILL.md");
-    if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, content, "utf8");
-  }
   const mcpFile = path.join(workspace, "mcp", "secscore-server.json");
   if (!fs.existsSync(mcpFile)) fs.writeFileSync(mcpFile, JSON.stringify({ name: "secscore", transport: "http", url: "http://127.0.0.1:3901/mcp", tools: ["list_students", "find_students", "add_score", "undo_score"] }, null, 2) + "\n");
   const envFile = path.join(workspace, ".env");

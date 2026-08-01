@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, Menu, session } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { DEFAULT_WORKSPACE } from "../paths.js";
-import { configuredModels, initializeWorkspace, loadConfig, readSettings, saveSettings, useConfiguredModel, type SettingsPayload } from "../config.js";
+import { configuredModels, loadConfig, readSettings, saveSettings, useConfiguredModel, type SettingsPayload } from "../config.js";
 import { loadEnabledSkills } from "../skills.js";
 import { AuditStore } from "../audit.js";
 import { SecAgentRuntime, type TraceEvent } from "../runtime.js";
@@ -167,7 +167,6 @@ app.whenReady().then(() => {
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
     callback(permission === "media");
   });
-  initializeWorkspace(DEFAULT_WORKSPACE);
   createApplicationMenu();
   if (process.platform === "darwin") app.dock?.setIcon(appIconPath());
   logMain("app.ready");

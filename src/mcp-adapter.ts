@@ -15,7 +15,7 @@ export interface RegisteredMcpTool extends McpToolDefinition { key: string; serv
 /** Minimal JSON-RPC client for HTTP MCP servers configured by the workspace. */
 export class HttpMcpClient {
   private requestId = 0;
-  constructor(private server: McpServerConfig) {
+  constructor(private server: McpServerConfig, private serverName = "MCP 服务") {
     if (server.transport !== "http" || !server.url) throw new Error("该 MCP 配置不是有效的 HTTP 服务");
   }
   private async request(method: string, params?: Record<string, unknown>): Promise<RpcResponse> {
@@ -29,7 +29,7 @@ export class HttpMcpClient {
       });
     } catch (error) {
       const reason = error instanceof Error && error.name === "TimeoutError" ? "连接超时" : "无法连接";
-      throw new Error(`${reason} SecScore MCP：${this.server.url}。请在 SecScore 的“系统设置 → 关于”页，滚动到“MCP 服务”并以管理员权限启动。`);
+      throw new Error(`${reason} ${this.serverName} MCP：${this.server.url}。请确认对应的 MCP 服务已启动，并检查“系统设置 → 关于 → MCP 服务”中的地址。`);
     }
     if (!response.ok) throw new Error(`MCP HTTP 请求失败：${response.status} ${response.statusText}`);
     return await response.json() as RpcResponse;
@@ -58,7 +58,7 @@ export class McpRegistry {
     for (const [name, server] of Object.entries(config.mcp.servers)) {
       if (!server.enabled) continue;
       if (server.transport !== "http") throw new Error(`暂不支持把 ${name} 的 ${server.transport} MCP 暴露给模型`);
-      this.clients.set(name, new HttpMcpClient(server));
+      this.clients.set(name, new HttpMcpClient(server, name));
     }
   }
   async discover(): Promise<RegisteredMcpTool[]> {
@@ -87,7 +87,7 @@ interface UndoScoreResult { event_uuid: string; student_id: number; student_name
 
 export class SecScoreMcpAdapter {
   private client: HttpMcpClient;
-  constructor(server: McpServerConfig) { this.client = new HttpMcpClient(server); }
+  constructor(server: McpServerConfig) { this.client = new HttpMcpClient(server, "secscore"); }
   async listStudents(): Promise<Student[]> {
     const payload = await this.client.callTool("list_students", { limit: 1000 }) as { students?: SecScoreStudent[] };
     return this.toStudents(payload);

@@ -122,9 +122,11 @@ export function App() {
   const [speechStatus, setSpeechStatus] = useState("");
   const [trace, setTrace] = useState<TraceEvent[]>([]);
   const messagesRef = useRef<HTMLDivElement>(null);
+  const answerContentRef = useRef<HTMLDivElement>(null);
   const executionSummaryRef = useRef<HTMLButtonElement>(null);
   const answerScrollPhase = useRef<"follow-bottom" | "settling" | "locked">("follow-bottom");
   const answerScrollLockTimer = useRef<number | undefined>(undefined);
+  const answerStartScrollPending = useRef(false);
   const modelMenuEnd = useRef<HTMLDivElement>(null);
   const initializing = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -232,6 +234,20 @@ export function App() {
       console.debug("[SecAgent scroll] summary-locked", { scrollTop: messages.scrollTop });
     }, 320);
   }, [streamingOutput, sending]);
+  useEffect(() => {
+    if (finishing || !answerStartScrollPending.current || !messagesRef.current || !answerContentRef.current) return;
+    answerStartScrollPending.current = false;
+    if (answerScrollLockTimer.current !== undefined) window.clearTimeout(answerScrollLockTimer.current);
+    answerScrollLockTimer.current = undefined;
+    answerScrollPhase.current = "locked";
+    const messages = messagesRef.current;
+    const answer = answerContentRef.current;
+    requestAnimationFrame(() => {
+      const target = Math.max(0, messages.scrollTop + answer.getBoundingClientRect().top - messages.getBoundingClientRect().top - 12);
+      messages.scrollTo({ top: target, behavior: "auto" });
+      console.debug("[SecAgent scroll] completed-answer-start", { targetScrollTop: target, scrollTop: messages.scrollTop });
+    });
+  }, [finishing]);
   const timelineTrace = useMemo(() => activeTrace.filter((item) => item.stage !== "model.output.delta"), [activeTrace]);
   const executionSeconds = useMemo(() => {
     const start = activeTrace.find((item) => item.stage === "user.request");
@@ -311,6 +327,7 @@ export function App() {
         setSession(response);
         setSessions(await bridge.listSessions());
         completed = true;
+        answerStartScrollPending.current = true;
         setFinishing(true);
       }
     } finally {
