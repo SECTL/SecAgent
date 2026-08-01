@@ -1,3 +1,4 @@
+verifyDepsBeforeRun: warn
 allowBuilds:
   electron: true
   esbuild: true
