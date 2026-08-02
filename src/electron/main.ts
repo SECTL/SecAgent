@@ -248,7 +248,8 @@ app.whenReady().then(async () => {
   pluginManager = new PluginManager(DEFAULT_WORKSPACE);
   await pluginManager.initialize();
   secAgentHttpServer = new SecAgentHttpServer(pluginManager, marketplace);
-  await secAgentHttpServer.start();
+  try { await secAgentHttpServer.start(); }
+  catch (error) { logMain("secagent-http.error", { message: error instanceof Error ? error.message : String(error), port: 42189 }); }
   pluginManager.onChanged(() => {
     const list = pluginManager?.list() || [];
     windowRef?.webContents.send("plugins:changed", list);
