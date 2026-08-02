@@ -15,10 +15,12 @@ import { listGoogleModels } from "../google-models.js";
 import { synthesizeSpeech } from "./tts.js";
 import { PluginManager } from "../plugin-manager.js";
 import { MarketplaceClient, type MarketplacePlugin, type MarketplaceVersion } from "../marketplace.js";
+import { SecAgentHttpServer } from "../secagent-http.js";
 
 let windowRef: BrowserWindow | undefined;
 let settingsWindow: BrowserWindow | undefined;
 let pluginManager: PluginManager | undefined;
+let secAgentHttpServer: SecAgentHttpServer | undefined;
 const marketplace = new MarketplaceClient();
 
 function appIconPath(): string {
@@ -72,8 +74,8 @@ function openSettings(oobeOrMenuItem: boolean | Electron.MenuItem = false, _wind
     return;
   }
   settingsWindow = new BrowserWindow({
-    width: 900,
-    height: 720,
+    width: 1120,
+    height: 760,
     minWidth: 720,
     minHeight: 560,
     title: "设置",
@@ -245,6 +247,8 @@ app.whenReady().then(async () => {
   initializeWorkspace(DEFAULT_WORKSPACE);
   pluginManager = new PluginManager(DEFAULT_WORKSPACE);
   await pluginManager.initialize();
+  secAgentHttpServer = new SecAgentHttpServer(pluginManager, marketplace);
+  await secAgentHttpServer.start();
   pluginManager.onChanged(() => {
     const list = pluginManager?.list() || [];
     windowRef?.webContents.send("plugins:changed", list);
@@ -263,5 +267,5 @@ app.whenReady().then(async () => {
   if (needsOnboarding) openSettings(true);
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
-app.on("before-quit", () => { void pluginManager?.shutdown(); });
+app.on("before-quit", () => { void secAgentHttpServer?.stop(); void pluginManager?.shutdown(); });
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });

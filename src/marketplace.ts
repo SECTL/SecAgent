@@ -4,13 +4,15 @@ import os from "node:os";
 import path from "node:path";
 import { PluginManager } from "./plugin-manager.js";
 
-export interface MarketplaceVersion { version: string; minHostApiVersion: number; assetUrl: string; sha256: string; permissions: string[]; platforms: string[] }
+export interface MarketplaceVersion { version: string; minHostApiVersion: number; assetUrl: string; sha256: string; signature?: string; permissions: string[]; platforms: string[] }
 export interface MarketplacePlugin { id: string; name: string; description: string; repository: string; versions: MarketplaceVersion[] }
 export interface MarketplaceIndex { schemaVersion: 1; generatedAt: string; plugins: MarketplacePlugin[]; signature?: string }
 
 /** Fetches the signed marketplace index and installs release assets after SHA-256 verification. */
+export const DEFAULT_MARKETPLACE_INDEX_URL = "https://raw.githubusercontent.com/SECTL/secagent-plugin-marketplace/main/index.json";
+
 export class MarketplaceClient {
-  constructor(private readonly indexUrl = process.env.SECAGENT_PLUGIN_MARKET_URL || "", private readonly publicKey = process.env.SECAGENT_MARKET_PUBLIC_KEY || "") {}
+  constructor(private readonly indexUrl = process.env.SECAGENT_PLUGIN_MARKET_URL || DEFAULT_MARKETPLACE_INDEX_URL, private readonly publicKey = process.env.SECAGENT_MARKET_PUBLIC_KEY || "") {}
   async list(): Promise<MarketplacePlugin[]> {
     if (!this.indexUrl) throw new Error("未配置插件市场地址。请设置 SECAGENT_PLUGIN_MARKET_URL。");
     if (!this.indexUrl.startsWith("https://")) throw new Error("插件市场必须使用 HTTPS 地址");
