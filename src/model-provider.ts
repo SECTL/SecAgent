@@ -1,13 +1,35 @@
-import type { ReasoningEffort, SecAgentConfig } from "./types.js";
+import type { ChatAttachment, ReasoningEffort, SecAgentConfig } from "./types.js";
 import type { RegisteredMcpTool } from "./mcp-adapter.js";
 import type { LoadedSkill } from "./skills.js";
 
 type ExecuteTool = (key: string, args: Record<string, unknown>) => Promise<unknown>;
 export type AgentTool = Pick<RegisteredMcpTool, "key" | "description" | "inputSchema">;
-export interface ConversationMessage { role: "user" | "assistant"; content: string }
+export interface ConversationMessage { role: "user" | "assistant"; content: string; attachments?: ChatAttachment[] }
 type ModelTrace = (stage: string, data: unknown) => void;
 
-const MAX_TOOL_TURNS = 32;
+// Tool execution is intentionally unbounded. The model may need more than a fixed
+// number of discovery/read/write turns for complex external applications.
+
+function dataUrlParts(attachment: ChatAttachment): { mediaType: string; data: string } {
+  const match = attachment.dataUrl.match(/^data:([^;,]+);base64,(.*)$/s);
+  return { mediaType: match?.[1] || attachment.mimeType, data: match?.[2] || attachment.dataUrl };
+}
+
+function openAIContent(message: ConversationMessage): string | Array<Record<string, unknown>> {
+  if (!message.attachments?.length) return message.content;
+  return [
+    ...(message.content ? [{ type: "text", text: message.content }] : []),
+    ...message.attachments.map((attachment) => ({ type: "image_url", image_url: { url: attachment.dataUrl } }))
+  ];
+}
+
+function responsesContent(message: ConversationMessage): string | Array<Record<string, unknown>> {
+  if (!message.attachments?.length) return message.content;
+  return [
+    ...(message.content ? [{ type: "input_text", text: message.content }] : []),
+    ...message.attachments.map((attachment) => ({ type: "input_image", image_url: attachment.dataUrl }))
+  ];
+}
 
 function toGoogleSchema(input: unknown): Record<string, unknown> {
   const source = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
@@ -34,7 +56,8 @@ export class ModelToolAgent {
     const skillCatalog = skills.length
       ? `\n\n## 可用 Skills\n${skills.map((skill) => `- ${skill.name}: ${skill.description}（入口文件：${skill.relativePath || skill.path}）`).join("\n")}`
       : "";
-    this.agent = { ...config.agent, systemPrompt: `${config.agent.systemPrompt}${skillCatalog}` };
+    const operationRules = `\n\n## 外部应用操作硬性规则\n涉及 ClassIsland/CI 时，禁止调用 bash、shell、PowerShell 或直接读写 CI 文件；必须使用 ClassIsland Connector 工具和对应 Skill。不要用 bash 生成 GUID、查询日期或验证文件。日期和时间从 ClassIsland 状态工具返回的 localDate/localDateTime 获取；GUID 使用合法 GUID 字符串并在写入后读取验证。若 Connector 返回错误，必须修正参数后重试，不能把 written 之前的结果当成成功。`;
+    this.agent = { ...config.agent, systemPrompt: `${config.agent.systemPrompt}${operationRules}${skillCatalog}` };
   }
   async run(instruction: string, tools: AgentTool[], execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high", conversation?: ConversationMessage[]): Promise<string> {
     if (!tools.length) throw new Error("没有已启用且可发现的 MCP 工具");
@@ -111,9 +134,9 @@ export class ModelToolAgent {
   }
   private async runOpenAICompatible(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort, conversation?: ConversationMessage[]): Promise<string> {
     const history = conversation?.length ? conversation : [{ role: "user" as const, content: instruction }];
-    const messages: Array<Record<string, unknown>> = [{ role: "system", content: this.agent.systemPrompt }, ...history.map((message) => ({ role: message.role, content: message.content }))];
+    const messages: Array<Record<string, unknown>> = [{ role: "system", content: this.agent.systemPrompt }, ...history.map((message) => ({ role: message.role, content: openAIContent(message) }))];
     const definitions = tools.map((tool) => ({ type: "function", function: { name: tool.key, description: tool.description || tool.key, parameters: tool.inputSchema || { type: "object", properties: {} } } }));
-    for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+    for (let turn = 0; ; turn++) {
       let content = "";
       const toolCalls = new Map<number, { id?: string; function: { name?: string; arguments: string } }>();
       await this.streamRequest(`${this.agent.baseUrl}${this.agent.endpoint || "/chat/completions"}`, { "Content-Type": "application/json", Authorization: `Bearer ${key}` }, {
@@ -154,16 +177,16 @@ export class ModelToolAgent {
         messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result) });
       }
     }
-    throw new Error(`模型工具调用超过最大轮数（${MAX_TOOL_TURNS}）`);
+    throw new Error("工具调用循环意外结束");
   }
 
   private async runOpenAIResponses(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort, conversation?: ConversationMessage[]): Promise<string> {
     type InputItem = Record<string, unknown>;
     type FunctionCall = { callId: string; itemId?: string; name: string; arguments: string };
     const history = conversation?.length ? conversation : [{ role: "user" as const, content: instruction }];
-    const input: InputItem[] = history.map((message) => ({ role: message.role, content: message.content }));
+    const input: InputItem[] = history.map((message) => ({ role: message.role, content: responsesContent(message) }));
     const definitions = tools.map((tool) => ({ type: "function", name: tool.key, description: tool.description || tool.key, parameters: tool.inputSchema || { type: "object", properties: {} }, strict: false }));
-    for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+    for (let turn = 0; ; turn++) {
       let answer = "";
       let summaryDeltaSeen = false;
       let thinkingDeltaSeen = false;
@@ -236,14 +259,20 @@ export class ModelToolAgent {
         input.push({ type: "function_call_output", call_id: call.callId, output: JSON.stringify(result) });
       }
     }
-    throw new Error(`模型工具调用超过最大轮数（${MAX_TOOL_TURNS}）`);
+    throw new Error("工具调用循环意外结束");
   }
   private async runGoogle(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high", conversation?: ConversationMessage[]): Promise<string> {
-    type Part = { text?: string; thought?: boolean; functionCall?: { name?: string; args?: Record<string, unknown> }; functionResponse?: { name?: string; response?: unknown }; thoughtSignature?: string };
+    type Part = { text?: string; thought?: boolean; inlineData?: { mimeType: string; data: string }; functionCall?: { name?: string; args?: Record<string, unknown> }; functionResponse?: { name?: string; response?: unknown }; thoughtSignature?: string };
     const history = conversation?.length ? conversation : [{ role: "user" as const, content: instruction }];
-    const contents: Array<{ role: "user" | "model"; parts: Part[] }> = history.map((message) => ({ role: message.role === "assistant" ? "model" : "user", parts: [{ text: message.content }] }));
+    const contents: Array<{ role: "user" | "model"; parts: Part[] }> = history.map((message) => ({
+      role: message.role === "assistant" ? "model" : "user",
+      parts: [
+        ...(message.content ? [{ text: message.content }] : []),
+        ...(message.attachments || []).map((attachment) => { const image = dataUrlParts(attachment); return { inlineData: { mimeType: image.mediaType, data: image.data } }; })
+      ]
+    }));
     const definitions = tools.map((tool) => ({ name: tool.key, description: tool.description || tool.key, parameters: toGoogleSchema(tool.inputSchema || { type: "object", properties: {} }) }));
-    for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+    for (let turn = 0; ; turn++) {
       let text = "";
       const calls = new Map<string, { name: string; args: Record<string, unknown>; thoughtSignature?: string }>();
       const body = {
@@ -285,7 +314,7 @@ export class ModelToolAgent {
         contents.push({ role: "user", parts: [{ functionResponse: { name: call.name, response: result } }] });
       }
     }
-    throw new Error(`模型工具调用超过最大轮数（${MAX_TOOL_TURNS}）`);
+    throw new Error("工具调用循环意外结束");
   }
 
   private googleThinkingConfig(effort: ReasoningEffort): Record<string, unknown> {
@@ -330,10 +359,13 @@ export class ModelToolAgent {
     // The desktop session supplies structured turns. Keep the single-string fallback for CLI
     // callers that do not have a persisted conversation.
     const messages: Array<Record<string, unknown>> = conversation?.length
-      ? conversation.map((message) => ({ role: message.role, content: message.content }))
+      ? conversation.map((message) => ({ role: message.role, content: message.attachments?.length ? [
+        ...(message.content ? [{ type: "text", text: message.content }] : []),
+        ...(message.attachments || []).map((attachment) => { const image = dataUrlParts(attachment); return { type: "image", source: { type: "base64", media_type: image.mediaType, data: image.data } }; })
+      ] : message.content }))
       : [{ role: "user", content: instruction }];
     const definitions = tools.map((tool) => ({ name: tool.key, description: tool.description || tool.key, input_schema: tool.inputSchema || { type: "object", properties: {} } }));
-    for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+    for (let turn = 0; ; turn++) {
       const blocks = new Map<number, { type?: string; id?: string; name?: string; text?: string; inputJson?: string; input?: Record<string, unknown> }>();
       await this.streamRequest(`${this.agent.baseUrl}${this.agent.endpoint || "/v1/messages"}`, {
         "Content-Type": "application/json", "x-api-key": key, "anthropic-version": this.agent.anthropicVersion || "2023-06-01"
@@ -393,7 +425,7 @@ export class ModelToolAgent {
       }
       messages.push({ role: "user", content: results });
     }
-    throw new Error(`模型工具调用超过最大轮数（${MAX_TOOL_TURNS}）`);
+    throw new Error("工具调用循环意外结束");
   }
   private parseToolInput(input: string | undefined): Record<string, unknown> {
     try { return JSON.parse(input || "{}") as Record<string, unknown>; }

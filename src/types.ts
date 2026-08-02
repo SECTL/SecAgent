@@ -32,6 +32,15 @@ export interface AgentConfig {
 
 export type ReasoningEffort = "none" | "low" | "medium" | "high";
 
+/** An image selected in the desktop composer, persisted with the user message. */
+export interface ChatAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  dataUrl: string;
+  size: number;
+}
+
 export interface SecAgentConfig {
   version: number;
   workspace: string;

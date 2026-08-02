@@ -10,7 +10,7 @@ import { SecAgentRuntime, type TraceEvent } from "../runtime.js";
 import type { ConversationMessage } from "../model-provider.js";
 import { SessionStore, type AssistantActivity, type SessionData, type ToolCallRecord } from "../session-store.js";
 import { sendSpeechAudio, startSpeech, stopSpeech } from "./speech.js";
-import type { ReasoningEffort } from "../types.js";
+import type { ChatAttachment, ReasoningEffort } from "../types.js";
 import { listGoogleModels } from "../google-models.js";
 import { synthesizeSpeech } from "./tts.js";
 import { PluginManager } from "../plugin-manager.js";
@@ -106,15 +106,27 @@ function historyInput(session: SessionData, current: string): string {
   return history ? `以下是当前会话的历史，请结合上下文理解最后一条新消息。\n\n${history}\n\n教师的新消息：${current}` : current;
 }
 
-function conversationInput(session: SessionData, current: string): ConversationMessage[] {
-  const history = session.messages.slice(-20).map((message) => ({ role: message.role, content: message.content }));
+function conversationInput(session: SessionData, current: string, attachments: ChatAttachment[] = []): ConversationMessage[] {
+  const history = session.messages.slice(-20).map((message) => ({ role: message.role, content: message.content, ...(message.attachments?.length ? { attachments: message.attachments } : {}) }));
   // Anthropic requires a conversation to start with a user turn. A 20-message window can
   // otherwise start at an assistant turn when older messages were truncated.
   if (history[0]?.role === "assistant") history.shift();
   return [
     ...history,
-    { role: "user", content: current }
+    { role: "user", content: current, ...(attachments.length ? { attachments } : {}) }
   ];
+}
+
+function normalizeAttachments(value: unknown): ChatAttachment[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): ChatAttachment[] => {
+    if (!item || typeof item !== "object") return [];
+    const candidate = item as Partial<ChatAttachment>;
+    if (typeof candidate.id !== "string" || typeof candidate.name !== "string" || typeof candidate.mimeType !== "string" || !candidate.mimeType.startsWith("image/") || typeof candidate.dataUrl !== "string" || !candidate.dataUrl.startsWith("data:image/")) return [];
+    const size = typeof candidate.size === "number" && Number.isFinite(candidate.size) ? candidate.size : 0;
+    if (size > 12 * 1024 * 1024 || candidate.dataUrl.length > 16 * 1024 * 1024) return [];
+    return [{ id: candidate.id, name: candidate.name, mimeType: candidate.mimeType, dataUrl: candidate.dataUrl, size }];
+  }).slice(0, 4);
 }
 
 ipcMain.handle("sessions:list", () => { logMain("ipc.sessions.list"); return store().list(); });
@@ -165,10 +177,12 @@ ipcMain.handle("tts:synthesize", async (_event, text: string) => {
   return audio.toString("base64");
 });
 ipcMain.on("speech:audio", (_event, samples: Float32Array) => sendSpeechAudio(samples));
-ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId?: string, reasoningEffort: ReasoningEffort = "high") => {
+ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId?: string, reasoningEffort: ReasoningEffort = "high", rawAttachments?: unknown) => {
+  const attachments = normalizeAttachments(rawAttachments);
+  if (typeof text !== "string" || (!text.trim() && !attachments.length)) throw new Error("消息不能为空");
   const sessionStore = store();
   const before = sessionStore.get(id);
-  sessionStore.appendMessage(id, "user", text);
+  sessionStore.appendMessage(id, "user", text, undefined, undefined, attachments);
   const { workspace, config } = loadConfig(DEFAULT_WORKSPACE);
   useConfiguredModel(config, modelId);
   const selectedReasoningEffort: ReasoningEffort = ["none", "low", "medium", "high"].includes(reasoningEffort) ? reasoningEffort : "high";
@@ -214,7 +228,7 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
     trace({ stage: "user.request", data: { text } });
     const skills = [...loadEnabledSkills(config), ...(pluginManager?.getSkills() || [])];
     const runtime = new SecAgentRuntime(config, audit, skills, trace, pluginManager);
-    const result = await runtime.run(historyInput(before, text), selectedReasoningEffort, conversationInput(before, text));
+    const result = await runtime.run(historyInput(before, text), selectedReasoningEffort, conversationInput(before, text, attachments));
     sessionStore.appendMessage(id, "assistant", result.message, toolCalls, activities);
     trace({ stage: "assistant.response", data: { text: result.message } });
     return sessionStore.get(id);

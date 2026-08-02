@@ -1,4 +1,5 @@
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import type { ClipboardEvent as ReactClipboardEvent, DragEvent as ReactDragEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { LoaderCircle, Volume2 } from "lucide-react";
@@ -137,6 +138,16 @@ function MessageActivities({ activities, elapsedSeconds, isExecuting = false, ac
   </AnimatedDetails>;
 }
 
+function AttachmentStrip({ attachments, removable = false, onRemove }: { attachments: ChatAttachment[]; removable?: boolean; onRemove?: (id: string) => void }) {
+  if (!attachments.length) return null;
+  return <div className={`attachment-strip ${removable ? "composer-attachment-strip" : "message-attachment-strip"}`}>
+    {attachments.map((attachment) => <div className="attachment-card" key={attachment.id} title={attachment.name}>
+      <img src={attachment.dataUrl} alt={attachment.name} />
+      {removable && <button type="button" className="attachment-remove" aria-label={`移除 ${attachment.name}`} onClick={() => onRemove?.(attachment.id)}>×</button>}
+    </div>)}
+  </div>;
+}
+
 export function App() {
   const bridge = window.secagent;
   if (new URLSearchParams(window.location.search).has("settings")) return <SettingsApp />;
@@ -147,6 +158,9 @@ export function App() {
   const [allSessionsOpen, setAllSessionsOpen] = useState(false);
   const [session, setSession] = useState<SessionData | null>(null);
   const [draft, setDraft] = useState("");
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  const [attachmentError, setAttachmentError] = useState("");
+  const [composerDragging, setComposerDragging] = useState(false);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [modelSubmenu, setModelSubmenu] = useState<"model" | "effort" | null>(null);
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("high");
@@ -167,6 +181,7 @@ export function App() {
   const modelMenuEnd = useRef<HTMLDivElement>(null);
   const initializing = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<{ context: AudioContext; stream: MediaStream; source: MediaStreamAudioSourceNode; processor: ScriptProcessorNode } | undefined>(undefined);
   const speechInsert = useRef({ start: 0, end: 0 });
   const speechAudio = useRef<HTMLAudioElement | null>(null);
@@ -388,11 +403,52 @@ export function App() {
       setSessions(remaining);
     }
   };
+
+  const addImageFiles = async (files: File[] | FileList) => {
+    const imageFiles = Array.from(files).filter((file) => file.type.startsWith("image/"));
+    if (!imageFiles.length) {
+      setAttachmentError("这里只支持图片文件");
+      return;
+    }
+    const available = Math.max(0, 4 - attachments.length);
+    if (!available) {
+      setAttachmentError("最多添加 4 张图片");
+      return;
+    }
+    const accepted = imageFiles.slice(0, available);
+    const tooLarge = accepted.filter((file) => file.size > 12 * 1024 * 1024);
+    if (tooLarge.length) setAttachmentError("单张图片不能超过 12 MB");
+    const readable = accepted.filter((file) => file.size <= 12 * 1024 * 1024);
+    const next = await Promise.all(readable.map((file) => new Promise<ChatAttachment | null>((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(typeof reader.result === "string" ? { id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, name: file.name || "图片", mimeType: file.type, dataUrl: reader.result, size: file.size } : null);
+      reader.onerror = () => resolve(null);
+      reader.readAsDataURL(file);
+    })));
+    const valid = next.filter((item): item is ChatAttachment => Boolean(item));
+    if (valid.length) {
+      setAttachments((current) => [...current, ...valid].slice(0, 4));
+      setDraft((current) => current || "\u200b");
+      setAttachmentError(tooLarge.length ? "部分图片因大小限制未添加" : "");
+    }
+  };
+  const handlePaste = (event: ReactClipboardEvent<HTMLElement>) => {
+    const files = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith("image/"));
+    if (!files.length) return;
+    event.preventDefault();
+    void addImageFiles(files);
+  };
+  const handleDrop = (event: ReactDragEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setComposerDragging(false);
+    void addImageFiles(Array.from(event.dataTransfer.files));
+  };
   const send = async (event: FormEvent) => {
     event.preventDefault();
-    const text = draft.trim();
-    if (!text || !session || sending) return;
-    const optimisticMessage: SessionMessage = { id: `pending-${Date.now()}`, role: "user", content: text, createdAt: new Date().toISOString() };
+    const text = draft.replace(/\u200b/g, "").trim();
+    if ((!text && !attachments.length) || !session || sending) return;
+    const sentAttachments = attachments;
+    const optimisticMessage: SessionMessage = { id: `pending-${Date.now()}`, role: "user", content: text, attachments: sentAttachments, createdAt: new Date().toISOString() };
     setSession((current) => current ? { ...current, messages: [...current.messages, optimisticMessage] } : current);
     if (answerScrollLockTimer.current !== undefined) window.clearTimeout(answerScrollLockTimer.current);
     answerScrollLockTimer.current = undefined;
@@ -404,11 +460,11 @@ export function App() {
       console.debug("[SecAgent scroll] user-message", { currentScrollTop: messages.scrollTop, nextScrollTop, maxScrollTop: nextScrollTop });
       messages.scrollTo({ top: nextScrollTop, behavior: "smooth" });
     });
-    setDraft(""); setTrace([]); setFinishing(false); setSending(true);
+    setDraft(""); setAttachments([]); setAttachmentError(""); setTrace([]); setFinishing(false); setSending(true);
     let completed = false;
     try {
       if (bridge) {
-        const response = await bridge.sendMessage(session.meta.id, text, selectedModelId, reasoningEffort);
+        const response = await bridge.sendMessage(session.meta.id, text, selectedModelId, reasoningEffort, sentAttachments);
         setSession(response);
         setSessions(await bridge.listSessions());
         completed = true;
@@ -509,7 +565,7 @@ export function App() {
           {sending && !finishing && <article className="message assistant"><div className="message-content"><div className="message-meta">SecAgent · 正在生成</div><MessageActivities activities={traceActivities} elapsedSeconds={executionSeconds} isExecuting activeStepKind={activeStepKind} summaryRef={executionSummaryRef} /><div className="bubble-row"><div className="avatar"><img src="/icon.svg" alt="SecAgent" /></div><div className="bubble loading markdown-bubble">{streamingOutput ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingOutput}</ReactMarkdown> : "正在调用模型与工具…"}</div></div></div></article>}
           <div />
         </div>
-        <form className="composer" onSubmit={send}>
+        <form className={`composer ${composerDragging ? "dragging" : ""}`} onSubmit={send} onClick={(event) => { if ((event.target as Element).closest('.icon-button img[src="/image-icon.svg"]')) fileInputRef.current?.click(); }} onPaste={handlePaste} onDragEnter={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); setComposerDragging(true); } }} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setComposerDragging(false); }} onDrop={handleDrop}><input ref={fileInputRef} className="visually-hidden" type="file" accept="image/*" multiple onChange={(event) => { void addImageFiles(event.target.files || []); event.target.value = ""; }} />{attachments.length > 0 && <div className="composer-attachments"><AttachmentStrip attachments={attachments} removable onRemove={(id) => setAttachments((current) => current.filter((attachment) => attachment.id !== id))} /></div>}{attachmentError && <div className="attachment-error">{attachmentError}</div>}
           <div className="composer-actions"><button type="button" className="icon-button" aria-label="添加图片"><img className="composer-icon" src="/image-icon.svg" alt="" /></button><button type="button" className={`icon-button mic-button ${recording ? "recording" : ""}`} aria-label={recording ? "停止语音输入" : "语音输入"} aria-pressed={recording} onClick={() => void toggleRecording()}><img className="composer-icon" src="/mic-icon.svg" alt="" /></button></div>
           <textarea ref={textareaRef} value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={speechStatus || "问任何问题..."} rows={1} readOnly={recording} disabled={!session || sending} />
           <div className="model-menu" ref={modelMenuEnd}>

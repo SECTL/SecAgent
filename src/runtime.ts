@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import type { ReasoningEffort, SecAgentConfig } from "./types.js";
 import { AuditStore } from "./audit.js";
 import { McpRegistry } from "./mcp-adapter.js";
@@ -35,7 +37,7 @@ export class SecAgentRuntime {
       ...mcpTools.filter((tool) => !hiddenTools.has(tool.key)),
       ...pluginTools.filter((tool) => !hiddenTools.has(tool.key)),
       ...piTools,
-      { key: "secagent__read_skill", description: "读取指定 Skill 的完整操作说明。仅当需要该 Skill 的详细流程、约束或示例时调用。", inputSchema: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", description: "Skill 名称，必须来自系统提示词中的可用 Skills 目录。" } } } },
+      { key: "secagent__read_skill", description: "读取指定 Skill 或其 Skill 目录内专题 Markdown 的完整操作说明。仅当需要该 Skill 的详细流程、约束或示例时调用。", inputSchema: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", description: "Skill 名称，必须来自系统提示词中的可用 Skills 目录。" }, file: { type: "string", description: "可选；Skill 目录内的相对 Markdown 文件名，例如 components.md。" } } } },
       { key: "secagent__call_hidden_tool", description: "调用 Skill 约定的隐藏 MCP 工具。工具名称和参数格式应严格遵循 Skill 正文或模型已知的其他契约。", inputSchema: { type: "object", additionalProperties: false, required: ["name", "arguments"], properties: { name: { type: "string", description: "隐藏工具的完整 key，例如 secscore__add_score。" }, arguments: { type: "object", description: "按照工具契约填写的参数。" } } } }
     ];
     this.emit("mcp.tools/list", [...mcpTools.map((tool) => ({ key: tool.key, server: tool.server, name: tool.name, description: tool.description, hidden: tool.hidden, inputSchema: tool.inputSchema })), ...pluginTools.map((tool) => ({ ...tool, source: "plugin" }))]);
@@ -91,10 +93,22 @@ export class SecAgentRuntime {
     const name = typeof args.name === "string" ? args.name : "";
     const skill = this.skills.find((item) => item.name === name);
     if (!skill) throw new Error(`未找到已启用的 Skill：${name}`);
-    const result = { name: skill.name, path: skill.path, content: skill.content };
-    this.emit("secagent.tools/call", { name: "read_skill", arguments: { name } });
+    const requestedFile = typeof args.file === "string" ? args.file : "";
+    let filePath = skill.path;
+    let content = skill.content;
+    if (requestedFile) {
+      if (!requestedFile.toLowerCase().endsWith(".md") || path.basename(requestedFile) !== requestedFile) throw new Error("Skill 专题文件只能是当前 Skill 目录内的 Markdown 文件名。");
+      const candidate = path.resolve(path.dirname(skill.path), requestedFile);
+      const skillDirectory = path.resolve(path.dirname(skill.path));
+      if (!candidate.startsWith(`${skillDirectory}${path.sep}`) || !fs.existsSync(candidate)) throw new Error(`找不到 Skill 专题文件：${requestedFile}`);
+      filePath = candidate;
+      content = fs.readFileSync(candidate, "utf8");
+    }
+    const result = { name: skill.name, path: filePath, content };
+    const auditParams = requestedFile ? { name, file: requestedFile } : { name };
+    this.emit("secagent.tools/call", { name: "read_skill", arguments: auditParams });
     this.emit("secagent.tools/result", { name: "read_skill", result });
-    this.audit.log({ id: randomUUID(), status: "completed", tool: "secagent.read_skill", request, params: { name }, result: { name: skill.name, path: skill.path } });
+    this.audit.log({ id: randomUUID(), status: "completed", tool: "secagent.read_skill", request, params: auditParams, result: { name: skill.name, path: filePath } });
     return result;
   }
   private emit(stage: string, data: unknown): void {
