@@ -1,4 +1,11 @@
-verifyDepsBeforeRun: warn
+packages: []
+
 allowBuilds:
   electron: true
   esbuild: true
+
+onlyBuiltDependencies:
+  - electron
+  - esbuild
+
+verifyDepsBeforeRun: warn

@@ -11,13 +11,14 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && electron-vite build",
     "build:cli": "tsc -p tsconfig.json",
-    "dev": "electron-vite dev",
+    "dev": "node scripts/dev-launcher.mjs",
     "dev:cli": "tsx src/index.ts",
-    "start": "electron-vite preview",
+    "start": "node scripts/dev-launcher.mjs",
     "test": "node --test dist/**/*.test.js"
   },
   "dependencies": {
     "@andresaya/edge-tts": "^1.8.0",
+    "adm-zip": "^0.5.18",
     "lucide-react": "^0.468.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
@@ -32,8 +33,9 @@
     "@vitejs/plugin-react": "^5.2.0",
     "electron": "^39.8.10",
     "electron-vite": "^5.0.0",
+    "rollup": "4.52.5",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
-    "vite": "^7.3.6"
+    "vite": "^6.4.1"
   }
 }

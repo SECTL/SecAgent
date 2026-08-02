@@ -9,6 +9,9 @@ interface ModelProfile { id: string; name?: string; provider: "openai-compatible
 interface McpServerConfig { transport: "stdio" | "http"; command?: string; args?: string[]; url?: string; enabled: boolean }
 interface SettingsPayload { models: ModelProfile[]; tts: { voice: string; rate: string }; mcp: { servers: Record<string, McpServerConfig> } }
 interface SkillSummary { name: string; description: string; path: string }
+interface PluginStatus { id: string; name: string; version: string; enabled: boolean; state: "inactive" | "starting" | "ready" | "error"; message?: string; settingsPages: Array<{ id: string; title: string; description?: string }> }
+interface MarketplaceVersion { version: string; minHostApiVersion: number; assetUrl: string; sha256: string; permissions: string[]; platforms: string[] }
+interface MarketplacePlugin { id: string; name: string; description: string; repository: string; versions: MarketplaceVersion[] }
 interface Window {
   secagent: {
     listSessions(): Promise<SessionMeta[]>;
@@ -17,6 +20,12 @@ interface Window {
     saveSettings(payload: SettingsPayload): Promise<SettingsPayload>;
     listSkills(): Promise<SkillSummary[]>;
     openSkillsDirectory(): Promise<string>;
+    listPlugins(): Promise<PluginStatus[]>;
+    setPluginEnabled(id: string, enabled: boolean): Promise<PluginStatus[]>;
+    reloadPlugin(id: string): Promise<PluginStatus[]>;
+    installPlugin(): Promise<PluginStatus[]>;
+    listMarketplace(): Promise<MarketplacePlugin[]>;
+    installMarketplaceVersion(version: MarketplaceVersion): Promise<PluginStatus[]>;
     createSession(): Promise<SessionData>;
     deleteSession(id: string): Promise<SessionMeta[]>;
     getSession(id: string): Promise<SessionData>;
@@ -28,5 +37,6 @@ interface Window {
     synthesizeSpeech(text: string): Promise<string>;
     onSpeechEvent(listener: (event: unknown) => void): () => void;
     onSettingsChanged(listener: (settings: SettingsPayload) => void): () => void;
+    onPluginsChanged(listener: (plugins: PluginStatus[]) => void): () => void;
   };
 }

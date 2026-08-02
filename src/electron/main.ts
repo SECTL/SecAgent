@@ -1,6 +1,7 @@
-import { app, BrowserWindow, ipcMain, Menu, session, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, session, shell } from "electron";
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { DEFAULT_WORKSPACE } from "../paths.js";
 import { configuredModels, configPath, initializeWorkspace, isOnboardingComplete, loadConfig, markOnboardingComplete, readSettings, saveSettings, useConfiguredModel, type SettingsPayload } from "../config.js";
 import { loadEnabledSkills } from "../skills.js";
@@ -11,13 +12,32 @@ import { sendSpeechAudio, startSpeech, stopSpeech } from "./speech.js";
 import type { ReasoningEffort } from "../types.js";
 import { listGoogleModels } from "../google-models.js";
 import { synthesizeSpeech } from "./tts.js";
+import { PluginManager } from "../plugin-manager.js";
+import { MarketplaceClient, type MarketplacePlugin, type MarketplaceVersion } from "../marketplace.js";
 
 let windowRef: BrowserWindow | undefined;
 let settingsWindow: BrowserWindow | undefined;
+let pluginManager: PluginManager | undefined;
+const marketplace = new MarketplaceClient();
 
 function appIconPath(): string {
   const bundledIcon = path.join(__dirname, "../renderer/icon.png");
   return fs.existsSync(bundledIcon) ? bundledIcon : path.join(process.cwd(), "src/renderer/public/icon.png");
+}
+
+function installFileRendererAssetFallback(): void {
+  const publicAssets = new Set(["icon.svg", "icon.png", "session-chevron.svg", "image-icon.svg", "mic-icon.svg"]);
+  session.defaultSession.webRequest.onBeforeRequest({ urls: ["file:///*"] }, (details, callback) => {
+    try {
+      const requestedPath = new URL(details.url).pathname;
+      const assetName = path.basename(requestedPath);
+      if (!publicAssets.has(assetName)) return callback({});
+      if (requestedPath !== `/${assetName}`) return callback({});
+      const assetPath = path.join(__dirname, "../renderer", assetName);
+      if (fs.existsSync(assetPath)) return callback({ redirectURL: pathToFileURL(assetPath).href });
+    } catch { /* Let Chromium report the original request if it cannot be parsed. */ }
+    callback({});
+  });
 }
 
 function logMain(stage: string, data: unknown = {}): void {
@@ -107,6 +127,17 @@ ipcMain.handle("settings:open-skills", async () => {
   if (error) throw new Error(error);
   return directory;
 });
+ipcMain.handle("plugins:list", () => pluginManager?.list() || []);
+ipcMain.handle("plugins:set-enabled", async (_event, id: string, enabled: boolean) => { await pluginManager?.setEnabled(id, enabled); return pluginManager?.list() || []; });
+ipcMain.handle("plugins:reload", async (_event, id: string) => { await pluginManager?.reload(id); return pluginManager?.list() || []; });
+ipcMain.handle("plugins:install", async () => {
+  const result = await dialog.showOpenDialog(settingsWindow || windowRef!, { properties: ["openFile"], filters: [{ name: "SecAgent plugin", extensions: ["zip"] }] });
+  if (result.canceled || !result.filePaths[0]) return pluginManager?.list() || [];
+  await pluginManager?.install(result.filePaths[0]);
+  return pluginManager?.list() || [];
+});
+ipcMain.handle("marketplace:list", () => marketplace.list());
+ipcMain.handle("marketplace:install", async (_event, version: MarketplaceVersion) => { if (!pluginManager) throw new Error("插件管理器尚未启动"); await marketplace.install(pluginManager, version); return pluginManager.list(); });
 ipcMain.handle("settings:save", (_event, payload: SettingsPayload) => {
   const saved = saveSettings(DEFAULT_WORKSPACE, payload);
   markOnboardingComplete(DEFAULT_WORKSPACE);
@@ -169,7 +200,8 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
   try {
     logMain("ipc.sessions.send", { sessionId: id, text });
     trace({ stage: "user.request", data: { text } });
-    const runtime = new SecAgentRuntime(config, audit, loadEnabledSkills(config), trace);
+    const skills = [...loadEnabledSkills(config), ...(pluginManager?.getSkills() || [])];
+    const runtime = new SecAgentRuntime(config, audit, skills, trace, pluginManager);
     const result = await runtime.run(historyInput(before, text), selectedReasoningEffort);
     sessionStore.appendMessage(id, "assistant", result.message, toolCalls, activities);
     trace({ stage: "assistant.response", data: { text: result.message } });
@@ -182,14 +214,22 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
   } finally { audit.close(); }
 });
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   const needsOnboarding = !fs.existsSync(configPath(DEFAULT_WORKSPACE)) || !isOnboardingComplete(DEFAULT_WORKSPACE);
   initializeWorkspace(DEFAULT_WORKSPACE);
+  pluginManager = new PluginManager(DEFAULT_WORKSPACE);
+  await pluginManager.initialize();
+  pluginManager.onChanged(() => {
+    const list = pluginManager?.list() || [];
+    windowRef?.webContents.send("plugins:changed", list);
+    settingsWindow?.webContents.send("plugins:changed", list);
+  });
   // Electron otherwise rejects getUserMedia requests in some desktop environments.
   // Speech audio is only used by the local recognizer and is never sent to a server.
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
     callback(permission === "media");
   });
+  installFileRendererAssetFallback();
   createApplicationMenu();
   if (process.platform === "darwin") app.dock?.setIcon(appIconPath());
   logMain("app.ready");
@@ -197,4 +237,5 @@ app.whenReady().then(() => {
   if (needsOnboarding) openSettings(true);
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
+app.on("before-quit", () => { void pluginManager?.shutdown(); });
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });

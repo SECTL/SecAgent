@@ -7,6 +7,12 @@ contextBridge.exposeInMainWorld("secagent", {
   listSkills: () => ipcRenderer.invoke("settings:skills"),
   openSkillsDirectory: () => ipcRenderer.invoke("settings:open-skills"),
   saveSettings: (payload: unknown) => ipcRenderer.invoke("settings:save", payload),
+  listPlugins: () => ipcRenderer.invoke("plugins:list"),
+  setPluginEnabled: (id: string, enabled: boolean) => ipcRenderer.invoke("plugins:set-enabled", id, enabled),
+  reloadPlugin: (id: string) => ipcRenderer.invoke("plugins:reload", id),
+  installPlugin: () => ipcRenderer.invoke("plugins:install"),
+  listMarketplace: () => ipcRenderer.invoke("marketplace:list"),
+  installMarketplaceVersion: (version: unknown) => ipcRenderer.invoke("marketplace:install", version),
   createSession: () => ipcRenderer.invoke("sessions:create"),
   deleteSession: (id: string) => ipcRenderer.invoke("sessions:delete", id),
   getSession: (id: string) => ipcRenderer.invoke("sessions:get", id),
@@ -29,5 +35,10 @@ contextBridge.exposeInMainWorld("secagent", {
     const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
     ipcRenderer.on("settings:changed", wrapped);
     return () => ipcRenderer.removeListener("settings:changed", wrapped);
+  },
+  onPluginsChanged: (listener: (plugins: unknown) => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
+    ipcRenderer.on("plugins:changed", wrapped);
+    return () => ipcRenderer.removeListener("plugins:changed", wrapped);
   }
 });

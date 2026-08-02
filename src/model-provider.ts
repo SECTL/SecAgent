@@ -31,7 +31,7 @@ export class ModelToolAgent {
   private agent: SecAgentConfig["agent"];
   constructor(config: SecAgentConfig, skills: LoadedSkill[], private trace?: ModelTrace) {
     const skillCatalog = skills.length
-      ? `\n\n## 可用 Skills\n${skills.map((skill) => `- ${skill.name}: ${skill.description}`).join("\n")}`
+      ? `\n\n## 可用 Skills\n${skills.map((skill) => `- ${skill.name}: ${skill.description}（入口文件：${skill.relativePath || skill.path}）`).join("\n")}`
       : "";
     this.agent = { ...config.agent, systemPrompt: `${config.agent.systemPrompt}${skillCatalog}` };
   }

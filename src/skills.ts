@@ -3,7 +3,7 @@ import path from "node:path";
 import YAML from "yaml";
 import type { SecAgentConfig } from "./types.js";
 
-export interface LoadedSkill { name: string; description: string; path: string; content: string }
+export interface LoadedSkill { name: string; description: string; path: string; relativePath?: string; content: string }
 
 const MAX_SCAN_DEPTH = 3;
 
@@ -22,8 +22,8 @@ function skillMetadata(content: string, file: string): { name?: string; descript
   return { name: metadata?.name?.trim() || undefined, description: metadata?.description?.trim() || "未提供描述。" };
 }
 
-export function loadEnabledSkills(config: SecAgentConfig): LoadedSkill[] {
-  const files = discoverSkillFiles(config.workspace);
+export function loadEnabledSkills(config: SecAgentConfig, additionalFiles: string[] = []): LoadedSkill[] {
+  const files = [...discoverSkillFiles(config.workspace), ...additionalFiles].filter((file, index, all) => all.indexOf(file) === index);
   const names = new Map<string, string>();
   return files.map((file) => {
     const baseName = path.basename(path.dirname(file));
@@ -32,7 +32,7 @@ export function loadEnabledSkills(config: SecAgentConfig): LoadedSkill[] {
     const requestedName = metadata.name || baseName;
     const name = names.has(requestedName) ? path.relative(config.workspace, path.dirname(file)) : requestedName;
     names.set(name, file);
-    return { name, description: metadata.description, path: file, content };
+    return { name, description: metadata.description, path: file, relativePath: path.relative(config.workspace, file).replace(/\\/g, "/"), content };
   });
 }
 

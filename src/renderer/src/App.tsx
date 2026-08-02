@@ -44,10 +44,17 @@ function SettingsApp() {
   const bridge = window.secagent;
   const isOobe = new URLSearchParams(window.location.search).get("oobe") === "1";
   const [settings, setSettings] = useState<SettingsPayload | null>(null);
+  const [plugins, setPlugins] = useState<PluginStatus[]>([]);
+  const [marketPlugins, setMarketPlugins] = useState<MarketplacePlugin[]>([]);
+  const [marketError, setMarketError] = useState("");
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
 
   useEffect(() => { void bridge.getSettings().then(setSettings).catch((reason) => setError(String(reason))); }, [bridge]);
+  useEffect(() => {
+    void bridge.listPlugins().then(setPlugins).catch((reason) => setError(String(reason)));
+    return bridge.onPluginsChanged(setPlugins);
+  }, [bridge]);
   if (!settings) return <main className="settings-shell"><p>正在读取配置…</p></main>;
   const updateModel = (index: number, patch: Partial<ModelProfile>) => setSettings((current) => current && { ...current, models: current.models.map((model, item) => item === index ? { ...model, ...patch } : model) });
   const selectProvider = (index: number, provider: ModelProfile["provider"]) => updateModel(index, provider === "google"
@@ -67,6 +74,7 @@ function SettingsApp() {
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
   };
   return <main className={`settings-shell ${isOobe ? "oobe-shell" : ""}`}>
+    {!isOobe && <nav className="settings-nav" aria-label="Settings navigation"><a href="#settings-tts">朗读</a><a href="#settings-models">模型</a><a href="#settings-mcp">MCP 服务</a><a href="#settings-plugins">插件</a>{plugins.flatMap((plugin) => plugin.settingsPages.map((page) => <a key={`${plugin.id}-${page.id}`} href={`#plugin-${plugin.id}-${page.id}`}>{page.title}</a>))}</nav>}
     {isOobe && <>
       <header className="oobe-header"><p className="eyebrow">WELCOME TO SECAGENT</p><h1>先配置一个大模型</h1><p>完成模型配置后就可以开始使用。其他设置暂时不用处理，之后随时可以回来修改。</p><button className="primary-button" onClick={() => void save()}>保存并开始使用</button></header>
       <div className="oobe-intro"><strong>只需要完成这一项</strong><span>选择模型协议，填写模型名称和 API Key。MCP、语音及其他高级设置不会影响首次使用。</span></div>
@@ -84,6 +92,15 @@ function SettingsApp() {
     </section>
     <section className="settings-section"><div className="section-title"><div><h2>MCP 服务</h2><p>管理可被 SecAgent 发现和调用的 MCP 服务。</p></div><button className="secondary-button" onClick={() => setSettings((current) => current && { ...current, mcp: { servers: { ...current.mcp.servers, [`mcp-${Object.keys(current.mcp.servers).length + 1}`]: emptyMcp() } } })}>+ 添加服务</button></div>
       <div className="settings-cards">{Object.entries(settings.mcp.servers).map(([name, server]) => <article className="settings-card" key={name}><div className="card-heading"><input className="server-name" value={name} onChange={(event) => renameServer(name, event.target.value)} />{Object.keys(settings.mcp.servers).length > 1 && <button className="text-button danger" onClick={() => setSettings((current) => { if (!current) return current; const servers = { ...current.mcp.servers }; delete servers[name]; return { ...current, mcp: { servers } }; })}>删除</button>}</div><div className="form-grid"><label>传输方式<select value={server.transport} onChange={(event) => updateServer(name, { transport: event.target.value as McpServerConfig["transport"] })}><option value="http">HTTP</option><option value="stdio">stdio</option></select></label><label className="checkbox-label"><input type="checkbox" checked={server.enabled} onChange={(event) => updateServer(name, { enabled: event.target.checked })} /> 启用</label>{server.transport === "http" ? <label>服务 URL<input value={server.url || ""} onChange={(event) => updateServer(name, { url: event.target.value })} /></label> : <><label>启动命令<input value={server.command || ""} onChange={(event) => updateServer(name, { command: event.target.value })} /></label><label>参数（每行一个）<textarea value={(server.args || []).join("\n")} onChange={(event) => updateServer(name, { args: event.target.value.split(/\r?\n/).filter(Boolean) })} rows={3} /></label></>}</div></article>)}</div>
+    </section>
+    <section id="settings-plugins" className="settings-section">
+      <div className="section-title"><div><h2>插件</h2><p>插件可在运行时自行注册 Skill 和工具；连接成功后再注册只是推荐的开发实践。</p></div><div className="section-actions"><button className="secondary-button" onClick={() => void bridge.listMarketplace().then((items) => { setMarketPlugins(items); setMarketError(""); }).catch((reason) => setMarketError(reason instanceof Error ? reason.message : String(reason)))}>浏览市场</button><button className="secondary-button" onClick={() => void bridge.installPlugin()}>安装本地 zip</button></div></div>
+      {marketError && <div className="settings-error">{marketError}</div>}{marketPlugins.length > 0 && <div className="settings-cards market-cards">{marketPlugins.map((plugin) => { const version = plugin.versions[0]; return <article className="settings-card" key={plugin.id}><div className="card-heading"><strong>{plugin.name}</strong><button className="secondary-button" onClick={() => void bridge.installMarketplaceVersion(version)}>安装 v{version.version}</button></div><p className="plugin-meta">{plugin.description}</p><p className="plugin-meta">权限：{version.permissions.join("、")}</p></article>; })}</div>}
+      <div className="settings-cards">{plugins.length === 0 && <article className="settings-card"><p className="plugin-empty">还没有已安装的插件。</p></article>}{plugins.map((plugin) => <article className="settings-card" key={plugin.id}>
+        <div className="card-heading"><div><strong>{plugin.name}</strong><span className={`plugin-state ${plugin.state}`}>{plugin.state === "ready" ? "已就绪" : plugin.state === "error" ? "错误" : plugin.state === "starting" ? "启动中" : "未启用"}</span></div><div className="section-actions"><button className="secondary-button" onClick={() => void bridge.reloadPlugin(plugin.id)}>重新加载</button><label className="plugin-toggle"><input type="checkbox" checked={plugin.enabled} onChange={(event) => void bridge.setPluginEnabled(plugin.id, event.target.checked)} /> 启用</label></div></div>
+        <p className="plugin-meta">{plugin.id} · v{plugin.version}</p>{plugin.message && <p className={`plugin-message ${plugin.state}`}>{plugin.message}</p>}
+        {plugin.settingsPages.map((page) => <div id={`plugin-${plugin.id}-${page.id}`} className="plugin-page" key={page.id}><h3>{page.title}</h3><p>{page.description || "插件设置页面"}</p><p>连接状态：<mark className={plugin.state}>{plugin.message || (plugin.state === "ready" ? "已就绪" : "未连接")}</mark></p></div>)}
+      </article>)}</div>
     </section>
   </main>;
 }
