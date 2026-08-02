@@ -1,5 +1,34 @@
 # SecAgent CLI
 
+## CLI 调试 Agent
+
+CLI 的每次 `run` 都会持久化为一个会话，并默认实时打印模型思考片段、工具调用、工具返回结果和最终回答。模型请求失败时会保存错误消息并返回非零退出码。
+
+```bash
+cd SecAgent
+npm install
+npm run build:cli
+
+# 初始化工作区，并在 .env 中填写模型密钥
+node dist/index.js init --workspace ./demo-workspace
+
+# 执行单条消息；命令结束时会打印 [session] <会话 ID>
+node dist/index.js run "查询李明当前积分" --workspace ./demo-workspace
+
+# 查看历史会话，复制会话 ID
+node dist/index.js sessions list --workspace ./demo-workspace
+
+# 接着指定历史会话运行
+node dist/index.js run "把刚才的结果总结一下" --session <会话 ID> --workspace ./demo-workspace
+
+# 进入交互式续聊；不指定 --session 时默认打开最近会话
+node dist/index.js chat --session <会话 ID> --workspace ./demo-workspace
+```
+
+交互式 `chat` 中输入 `:history` 查看当前会话，输入 `:use <会话 ID>` 切换会话，输入 `exit` 退出。需要完整的模型请求/响应原始事件时，加上 `--verbose`；普通模式已经会打印思考和工具过程。
+
+会话文件位于工作区的 `sessions/<会话 ID>/session.json`，运行时事件位于同目录的 `runtime.jsonl`，因此 CLI 和桌面端可以共享历史会话。
+
 SecAgent：把自然语言转换为工具调用。
 
 ```bash
