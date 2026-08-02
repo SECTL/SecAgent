@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, session } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, session, shell } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { DEFAULT_WORKSPACE } from "../paths.js";
@@ -96,6 +96,17 @@ ipcMain.handle("models:list", async () => {
   return configuredModels(config, googleModels);
 });
 ipcMain.handle("settings:get", () => readSettings(DEFAULT_WORKSPACE));
+ipcMain.handle("settings:skills", () => {
+  const { config } = loadConfig(DEFAULT_WORKSPACE);
+  return loadEnabledSkills(config).map((skill) => ({ name: skill.name, description: skill.description, path: skill.path }));
+});
+ipcMain.handle("settings:open-skills", async () => {
+  const directory = path.join(DEFAULT_WORKSPACE, "skills");
+  fs.mkdirSync(directory, { recursive: true });
+  const error = await shell.openPath(directory);
+  if (error) throw new Error(error);
+  return directory;
+});
 ipcMain.handle("settings:save", (_event, payload: SettingsPayload) => {
   const saved = saveSettings(DEFAULT_WORKSPACE, payload);
   markOnboardingComplete(DEFAULT_WORKSPACE);

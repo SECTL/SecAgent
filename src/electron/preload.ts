@@ -4,6 +4,8 @@ contextBridge.exposeInMainWorld("secagent", {
   listSessions: () => ipcRenderer.invoke("sessions:list"),
   listModels: () => ipcRenderer.invoke("models:list"),
   getSettings: () => ipcRenderer.invoke("settings:get"),
+  listSkills: () => ipcRenderer.invoke("settings:skills"),
+  openSkillsDirectory: () => ipcRenderer.invoke("settings:open-skills"),
   saveSettings: (payload: unknown) => ipcRenderer.invoke("settings:save", payload),
   createSession: () => ipcRenderer.invoke("sessions:create"),
   deleteSession: (id: string) => ipcRenderer.invoke("sessions:delete", id),

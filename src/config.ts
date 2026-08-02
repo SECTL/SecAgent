@@ -160,6 +160,10 @@ export interface ModelOption {
   provider: SecAgentConfig["agent"]["provider"];
 }
 
+function commaValues(value: string | undefined): string[] {
+  return (value || "").split(",").map((item) => item.trim()).filter(Boolean);
+}
+
 export function configuredModels(config: SecAgentConfig, googleModels: GoogleModelInfo[] = []): ModelOption[] {
   const profiles = config.agent.models?.length ? config.agent.models : [{ id: "default", name: config.agent.model, model: config.agent.model, provider: config.agent.provider, apiKeyEnv: config.agent.apiKeyEnv, baseUrl: config.agent.baseUrl } as ModelProfile];
   const options: ModelOption[] = [];
@@ -167,8 +171,15 @@ export function configuredModels(config: SecAgentConfig, googleModels: GoogleMod
   for (const profile of profiles) {
     if (profile.provider === "google" && googleSeen) continue;
     if (profile.provider === "google") googleSeen = true;
+    const configuredNames = commaValues(profile.name);
+    const configuredModelNames = commaValues(profile.model);
     if (profile.provider !== "google" || !googleModels.length) {
-      options.push({ id: profile.id, name: profile.name || profile.model || "Google Gemini（自动选择）", model: profile.model, provider: profile.provider });
+      const modelNames = configuredModelNames.length ? configuredModelNames : [""];
+      modelNames.forEach((modelName, index) => options.push({ id: index ? `${profile.id}#${index}` : profile.id, name: configuredNames[index] || configuredNames[0] || modelName || "Google Gemini（自动选择）", model: modelName, provider: profile.provider }));
+      continue;
+    }
+    if (configuredModelNames.length) {
+      configuredModelNames.forEach((modelName, index) => options.push({ id: index ? `${profile.id}#${index}` : profile.id, name: configuredNames[index] || configuredNames[0] || modelName, model: modelName, provider: profile.provider }));
       continue;
     }
     for (const model of googleModels) {
@@ -185,10 +196,12 @@ export function useConfiguredModel(config: SecAgentConfig, id?: string): void {
   const dynamicPrefix = "google:";
   const separator = id.startsWith(dynamicPrefix) ? id.indexOf(":", dynamicPrefix.length) : -1;
   const dynamicModel = separator > 0 ? id.slice(separator + 1) : undefined;
-  const profileId = separator > 0 ? id.slice(dynamicPrefix.length, separator) : id;
+  const profileId = separator > 0 ? id.slice(dynamicPrefix.length, separator) : id.split("#")[0];
+  const profileIndex = id.includes("#") ? Number(id.slice(id.indexOf("#") + 1)) : 0;
   const selected = config.agent.models.find((model) => model.id === profileId) ?? (id === "default" ? config.agent.models[0] : undefined);
   if (!selected) throw new Error(`未找到配置模型：${id}`);
-  config.agent = { ...config.agent, ...selected, model: dynamicModel || selected.model || DEFAULT_GOOGLE_MODEL, maxTokens: selected.maxTokens || config.agent.maxTokens, systemPrompt: config.agent.systemPrompt, models: config.agent.models };
+  const selectedModels = commaValues(selected.model);
+  config.agent = { ...config.agent, ...selected, model: dynamicModel || selectedModels[profileIndex] || selectedModels[0] || DEFAULT_GOOGLE_MODEL, maxTokens: selected.maxTokens || config.agent.maxTokens, systemPrompt: config.agent.systemPrompt, models: config.agent.models };
 }
 
 export interface SettingsPayload {
