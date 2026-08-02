@@ -4,6 +4,7 @@ import type { LoadedSkill } from "./skills.js";
 
 type ExecuteTool = (key: string, args: Record<string, unknown>) => Promise<unknown>;
 export type AgentTool = Pick<RegisteredMcpTool, "key" | "description" | "inputSchema">;
+export interface ConversationMessage { role: "user" | "assistant"; content: string }
 type ModelTrace = (stage: string, data: unknown) => void;
 
 const MAX_TOOL_TURNS = 32;
@@ -35,14 +36,14 @@ export class ModelToolAgent {
       : "";
     this.agent = { ...config.agent, systemPrompt: `${config.agent.systemPrompt}${skillCatalog}` };
   }
-  async run(instruction: string, tools: AgentTool[], execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high"): Promise<string> {
+  async run(instruction: string, tools: AgentTool[], execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high", conversation?: ConversationMessage[]): Promise<string> {
     if (!tools.length) throw new Error("没有已启用且可发现的 MCP 工具");
     const key = process.env[this.agent.apiKeyEnv];
     if (!key) throw new Error(`未配置模型密钥环境变量 ${this.agent.apiKeyEnv}。请设置后重试；密钥不要写入 secagent.yaml。`);
-    if (this.agent.provider === "anthropic") return this.runAnthropic(instruction, tools, key, execute, reasoningEffort);
-    if (this.agent.provider === "google") return this.runGoogle(instruction, tools, key, execute, reasoningEffort);
-    if (this.agent.provider === "openai-responses") return this.runOpenAIResponses(instruction, tools, key, execute, reasoningEffort);
-    return this.runOpenAICompatible(instruction, tools, key, execute, reasoningEffort);
+    if (this.agent.provider === "anthropic") return this.runAnthropic(instruction, tools, key, execute, reasoningEffort, conversation);
+    if (this.agent.provider === "google") return this.runGoogle(instruction, tools, key, execute, reasoningEffort, conversation);
+    if (this.agent.provider === "openai-responses") return this.runOpenAIResponses(instruction, tools, key, execute, reasoningEffort, conversation);
+    return this.runOpenAICompatible(instruction, tools, key, execute, reasoningEffort, conversation);
   }
   private async request(url: string, headers: Record<string, string>, body: unknown): Promise<unknown> {
     this.trace?.("model.request", { url, body });
@@ -108,8 +109,9 @@ export class ModelToolAgent {
     // durable audit record required for every request sent to a model.
     this.trace?.("model.response", { url, status: response.status, body: completeBody() });
   }
-  private async runOpenAICompatible(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort): Promise<string> {
-    const messages: Array<Record<string, unknown>> = [{ role: "system", content: this.agent.systemPrompt }, { role: "user", content: instruction }];
+  private async runOpenAICompatible(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort, conversation?: ConversationMessage[]): Promise<string> {
+    const history = conversation?.length ? conversation : [{ role: "user" as const, content: instruction }];
+    const messages: Array<Record<string, unknown>> = [{ role: "system", content: this.agent.systemPrompt }, ...history.map((message) => ({ role: message.role, content: message.content }))];
     const definitions = tools.map((tool) => ({ type: "function", function: { name: tool.key, description: tool.description || tool.key, parameters: tool.inputSchema || { type: "object", properties: {} } } }));
     for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
       let content = "";
@@ -155,10 +157,11 @@ export class ModelToolAgent {
     throw new Error(`模型工具调用超过最大轮数（${MAX_TOOL_TURNS}）`);
   }
 
-  private async runOpenAIResponses(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort): Promise<string> {
+  private async runOpenAIResponses(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort, conversation?: ConversationMessage[]): Promise<string> {
     type InputItem = Record<string, unknown>;
     type FunctionCall = { callId: string; itemId?: string; name: string; arguments: string };
-    const input: InputItem[] = [{ role: "user", content: instruction }];
+    const history = conversation?.length ? conversation : [{ role: "user" as const, content: instruction }];
+    const input: InputItem[] = history.map((message) => ({ role: message.role, content: message.content }));
     const definitions = tools.map((tool) => ({ type: "function", name: tool.key, description: tool.description || tool.key, parameters: tool.inputSchema || { type: "object", properties: {} }, strict: false }));
     for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
       let answer = "";
@@ -235,9 +238,10 @@ export class ModelToolAgent {
     }
     throw new Error(`模型工具调用超过最大轮数（${MAX_TOOL_TURNS}）`);
   }
-  private async runGoogle(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high"): Promise<string> {
+  private async runGoogle(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high", conversation?: ConversationMessage[]): Promise<string> {
     type Part = { text?: string; thought?: boolean; functionCall?: { name?: string; args?: Record<string, unknown> }; functionResponse?: { name?: string; response?: unknown }; thoughtSignature?: string };
-    const contents: Array<{ role: "user" | "model"; parts: Part[] }> = [{ role: "user", parts: [{ text: instruction }] }];
+    const history = conversation?.length ? conversation : [{ role: "user" as const, content: instruction }];
+    const contents: Array<{ role: "user" | "model"; parts: Part[] }> = history.map((message) => ({ role: message.role === "assistant" ? "model" : "user", parts: [{ text: message.content }] }));
     const definitions = tools.map((tool) => ({ name: tool.key, description: tool.description || tool.key, parameters: toGoogleSchema(tool.inputSchema || { type: "object", properties: {} }) }));
     for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
       let text = "";
@@ -322,8 +326,12 @@ export class ModelToolAgent {
     if (buffer.trim()) consume(buffer);
     this.trace?.("model.response", { url, status: response.status, body: completeBody() });
   }
-  private async runAnthropic(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high"): Promise<string> {
-    const messages: Array<Record<string, unknown>> = [{ role: "user", content: instruction }];
+  private async runAnthropic(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high", conversation?: ConversationMessage[]): Promise<string> {
+    // The desktop session supplies structured turns. Keep the single-string fallback for CLI
+    // callers that do not have a persisted conversation.
+    const messages: Array<Record<string, unknown>> = conversation?.length
+      ? conversation.map((message) => ({ role: message.role, content: message.content }))
+      : [{ role: "user", content: instruction }];
     const definitions = tools.map((tool) => ({ name: tool.key, description: tool.description || tool.key, input_schema: tool.inputSchema || { type: "object", properties: {} } }));
     for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
       const blocks = new Map<number, { type?: string; id?: string; name?: string; text?: string; inputJson?: string; input?: Record<string, unknown> }>();

@@ -3,6 +3,7 @@ import type { ReasoningEffort, SecAgentConfig } from "./types.js";
 import { AuditStore } from "./audit.js";
 import { McpRegistry } from "./mcp-adapter.js";
 import { ModelToolAgent } from "./model-provider.js";
+import type { ConversationMessage } from "./model-provider.js";
 import type { LoadedSkill } from "./skills.js";
 import { callPiTool, piTools } from "./pi-tools.js";
 import { PluginManager } from "./plugin-manager.js";
@@ -25,8 +26,9 @@ export class SecAgentRuntime {
     this.registry = new McpRegistry(config);
     this.agent = new ModelToolAgent(config, skills, (stage, data) => this.emit(stage, data));
   }
-  async run(input: string, reasoningEffort: ReasoningEffort = "high"): Promise<RunResult> {
+  async run(input: string, reasoningEffort: ReasoningEffort = "high", conversation?: ConversationMessage[]): Promise<RunResult> {
     const mcpTools = await this.registry.discover();
+    for (const error of this.registry.getDiscoveryErrors()) this.emit("mcp.tools/error", error);
     const pluginTools = this.plugins?.getTools() || [];
     const hiddenTools = new Set([...mcpTools, ...pluginTools].filter((tool) => tool.hidden).map((tool) => tool.key));
     const tools = [
@@ -39,7 +41,7 @@ export class SecAgentRuntime {
     this.emit("mcp.tools/list", [...mcpTools.map((tool) => ({ key: tool.key, server: tool.server, name: tool.name, description: tool.description, hidden: tool.hidden, inputSchema: tool.inputSchema })), ...pluginTools.map((tool) => ({ ...tool, source: "plugin" }))]);
     this.emit("secagent.skills/list", this.skills.map((skill) => ({ name: skill.name, description: skill.description })));
     this.emit("model.agent.request", { provider: this.config.agent.provider, model: this.config.agent.model, baseUrl: this.config.agent.baseUrl, instruction: input });
-    const message = await this.agent.run(input, tools, async (key, args) => this.callTool(input, key, args, hiddenTools), reasoningEffort);
+    const message = await this.agent.run(input, tools, async (key, args) => this.callTool(input, key, args, hiddenTools), reasoningEffort, conversation);
     this.emit("model.agent.result", { message });
     return { kind: "completed", message };
   }

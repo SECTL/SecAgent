@@ -11,6 +11,7 @@ interface RpcResponse { result?: McpToolResult; error?: { message?: string } }
 /** `hidden` is a SecAgent MCP extension: hidden tools remain callable but are omitted from model tool definitions. */
 export interface McpToolDefinition { name: string; description?: string; inputSchema?: Record<string, unknown>; hidden?: boolean }
 export interface RegisteredMcpTool extends McpToolDefinition { key: string; server: string }
+export interface McpDiscoveryError { server: string; message: string }
 
 /** Minimal JSON-RPC client for HTTP MCP servers configured by the workspace. */
 export class HttpMcpClient {
@@ -54,24 +55,40 @@ export class HttpMcpClient {
 export class McpRegistry {
   private clients = new Map<string, HttpMcpClient>();
   private tools = new Map<string, RegisteredMcpTool>();
+  private configurationErrors: McpDiscoveryError[] = [];
+  private discoveryErrors: McpDiscoveryError[] = [];
   constructor(config: SecAgentConfig) {
     for (const [name, server] of Object.entries(config.mcp.servers)) {
       if (!server.enabled) continue;
-      if (server.transport !== "http") throw new Error(`暂不支持把 ${name} 的 ${server.transport} MCP 暴露给模型`);
-      this.clients.set(name, new HttpMcpClient(server, name));
+      if (server.transport !== "http") {
+        this.configurationErrors.push({ server: name, message: `暂不支持 ${server.transport} MCP` });
+        continue;
+      }
+      try {
+        this.clients.set(name, new HttpMcpClient(server, name));
+      } catch (error) {
+        this.configurationErrors.push({ server: name, message: error instanceof Error ? error.message : String(error) });
+      }
     }
   }
   async discover(): Promise<RegisteredMcpTool[]> {
     this.tools.clear();
+    this.discoveryErrors = [...this.configurationErrors];
     for (const [server, client] of this.clients) {
-      for (const tool of await client.listTools()) {
-        const key = `${server}__${tool.name}`;
-        const registered = { ...tool, key, server };
-        this.tools.set(key, registered);
+      try {
+        for (const tool of await client.listTools()) {
+          const key = `${server}__${tool.name}`;
+          const registered = { ...tool, key, server };
+          this.tools.set(key, registered);
+        }
+      } catch (error) {
+        // An unavailable optional MCP must not prevent the model request itself.
+        this.discoveryErrors.push({ server, message: error instanceof Error ? error.message : String(error) });
       }
     }
     return [...this.tools.values()];
   }
+  getDiscoveryErrors(): McpDiscoveryError[] { return [...this.discoveryErrors]; }
   async call(key: string, args: Record<string, unknown>): Promise<unknown> {
     const tool = this.tools.get(key);
     if (!tool) throw new Error(`模型请求了未注册工具：${key}`);

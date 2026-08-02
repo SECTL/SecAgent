@@ -7,6 +7,7 @@ import { configuredModels, configPath, initializeWorkspace, isOnboardingComplete
 import { loadEnabledSkills } from "../skills.js";
 import { AuditStore } from "../audit.js";
 import { SecAgentRuntime, type TraceEvent } from "../runtime.js";
+import type { ConversationMessage } from "../model-provider.js";
 import { SessionStore, type AssistantActivity, type SessionData, type ToolCallRecord } from "../session-store.js";
 import { sendSpeechAudio, startSpeech, stopSpeech } from "./speech.js";
 import type { ReasoningEffort } from "../types.js";
@@ -103,6 +104,17 @@ function store(): SessionStore { return new SessionStore(DEFAULT_WORKSPACE); }
 function historyInput(session: SessionData, current: string): string {
   const history = session.messages.slice(-20).map((message) => `${message.role === "user" ? "教师" : "SecAgent"}：${message.content}`).join("\n");
   return history ? `以下是当前会话的历史，请结合上下文理解最后一条新消息。\n\n${history}\n\n教师的新消息：${current}` : current;
+}
+
+function conversationInput(session: SessionData, current: string): ConversationMessage[] {
+  const history = session.messages.slice(-20).map((message) => ({ role: message.role, content: message.content }));
+  // Anthropic requires a conversation to start with a user turn. A 20-message window can
+  // otherwise start at an assistant turn when older messages were truncated.
+  if (history[0]?.role === "assistant") history.shift();
+  return [
+    ...history,
+    { role: "user", content: current }
+  ];
 }
 
 ipcMain.handle("sessions:list", () => { logMain("ipc.sessions.list"); return store().list(); });
@@ -202,7 +214,7 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
     trace({ stage: "user.request", data: { text } });
     const skills = [...loadEnabledSkills(config), ...(pluginManager?.getSkills() || [])];
     const runtime = new SecAgentRuntime(config, audit, skills, trace, pluginManager);
-    const result = await runtime.run(historyInput(before, text), selectedReasoningEffort);
+    const result = await runtime.run(historyInput(before, text), selectedReasoningEffort, conversationInput(before, text));
     sessionStore.appendMessage(id, "assistant", result.message, toolCalls, activities);
     trace({ stage: "assistant.response", data: { text: result.message } });
     return sessionStore.get(id);
