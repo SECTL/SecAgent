@@ -49,18 +49,39 @@ function logMain(stage: string, data: unknown = {}): void {
   fs.appendFileSync(path.join(logDir, "electron-main.jsonl"), JSON.stringify({ at: new Date().toISOString(), stage, data }) + "\n", "utf8");
 }
 
+function windowChromeOptions(): Electron.BrowserWindowConstructorOptions {
+  if (process.platform === "darwin") {
+    return { titleBarStyle: "hidden", trafficLightPosition: { x: 16, y: 21 } };
+  }
+  if (process.platform === "win32") {
+    return {
+      titleBarStyle: "hidden",
+      titleBarOverlay: { color: "#ffffff", symbolColor: "#171717", height: 57 },
+      autoHideMenuBar: true
+    };
+  }
+  return {};
+}
+
+function configureWindowChrome(window: BrowserWindow): void {
+  if (process.platform !== "win32") return;
+  // Keep the application menu alive for CmdOrCtrl+, and Ctrl+Shift+I while hiding its UI.
+  window.setAutoHideMenuBar(true);
+  window.setMenuBarVisibility(false);
+}
+
 function createWindow(): void {
   windowRef = new BrowserWindow({
     width: 1120,
     height: 760,
     minWidth: 820,
     minHeight: 560,
-    title: "",
-    titleBarStyle: process.platform === "darwin" ? "hidden" : "default",
-    ...(process.platform === "darwin" ? { trafficLightPosition: { x: 16, y: 21 } } : {}),
+    title: "SecAgent",
+    ...windowChromeOptions(),
     icon: appIconPath(),
     webPreferences: { preload: path.join(__dirname, "../preload/preload.cjs"), contextIsolation: true, nodeIntegration: false }
   });
+  configureWindowChrome(windowRef);
   logMain("window.created");
   if (process.env.ELECTRON_RENDERER_URL) windowRef.loadURL(process.env.ELECTRON_RENDERER_URL);
   else windowRef.loadFile(path.join(__dirname, "../renderer/index.html"));
@@ -78,12 +99,16 @@ function openSettings(oobeOrMenuItem: boolean | Electron.MenuItem = false, _wind
     height: 760,
     minWidth: 720,
     minHeight: 560,
-    title: "设置",
+    title: "SecAgent设置",
     parent: windowRef,
     modal: false,
+    ...windowChromeOptions(),
     icon: appIconPath(),
     webPreferences: { preload: path.join(__dirname, "../preload/preload.cjs"), contextIsolation: true, nodeIntegration: false }
   });
+  configureWindowChrome(settingsWindow);
+  settingsWindow.on("page-title-updated", (event) => { event.preventDefault(); });
+  settingsWindow.setTitle("SecAgent设置");
   const query = oobe ? "?settings=1&oobe=1" : "?settings=1";
   if (process.env.ELECTRON_RENDERER_URL) settingsWindow.loadURL(`${process.env.ELECTRON_RENDERER_URL}${query}`);
   else settingsWindow.loadFile(path.join(__dirname, "../renderer/index.html"), { query: oobe ? { settings: "1", oobe: "1" } : { settings: "1" } });

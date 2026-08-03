@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 
 contextBridge.exposeInMainWorld("secagent", {
+  platform: process.platform,
   listSessions: () => ipcRenderer.invoke("sessions:list"),
   listModels: () => ipcRenderer.invoke("models:list"),
   getSettings: () => ipcRenderer.invoke("settings:get"),

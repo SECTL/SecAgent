@@ -50,12 +50,39 @@ function SettingsApp() {
   const [marketError, setMarketError] = useState("");
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
+  const settingsLoaded = useRef(false);
+  const skipAutosave = useRef(true);
+  const [activePage, setActivePage] = useState(() => {
+    const hash = window.location.hash.replace(/^#/, "");
+    const builtInPage = ["settings-tts", "settings-models", "settings-mcp", "settings-plugins"].includes(hash);
+    return isOobe ? "settings-models" : (builtInPage || hash.startsWith("plugin-") ? hash : "settings-tts");
+  });
 
-  useEffect(() => { void bridge.getSettings().then(setSettings).catch((reason) => setError(String(reason))); }, [bridge]);
+  useEffect(() => {
+    let disposed = false;
+    void bridge.getSettings().then((value) => {
+      if (disposed) return;
+      settingsLoaded.current = true;
+      setSettings(value);
+    }).catch((reason) => { if (!disposed) setError(String(reason)); });
+    return () => { disposed = true; };
+  }, [bridge]);
   useEffect(() => {
     void bridge.listPlugins().then(setPlugins).catch((reason) => setError(String(reason)));
     return bridge.onPluginsChanged(setPlugins);
   }, [bridge]);
+  useEffect(() => {
+    if (isOobe || !settings || !settingsLoaded.current) return;
+    if (skipAutosave.current) {
+      skipAutosave.current = false;
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setError("");
+      void bridge.saveSettings(settings).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [bridge, isOobe, settings]);
   if (!settings) return <main className="settings-shell"><p>正在读取配置…</p></main>;
   const updateModel = (index: number, patch: Partial<ModelProfile>) => setSettings((current) => current && { ...current, models: current.models.map((model, item) => item === index ? { ...model, ...patch } : model) });
   const selectProvider = (index: number, provider: ModelProfile["provider"]) => updateModel(index, provider === "google"
@@ -74,27 +101,27 @@ function SettingsApp() {
     try { const result = await bridge.saveSettings(settings); setSettings(result); setSaved(true); setTimeout(() => setSaved(false), 2200); }
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
   };
-  return <main className={`settings-shell ${isOobe ? "oobe-shell" : ""}`}>
-    {!isOobe && <nav className="settings-nav" aria-label="Settings navigation"><a href="#settings-tts">朗读</a><a href="#settings-models">模型</a><a href="#settings-mcp">MCP 服务</a><a href="#settings-plugins">插件</a>{plugins.flatMap((plugin) => plugin.settingsPages.map((page) => <a key={`${plugin.id}-${page.id}`} href={`#plugin-${plugin.id}-${page.id}`}>{page.title}</a>))}</nav>}
+  return <main className={`settings-shell has-window-title ${isOobe ? "oobe-shell" : ""} ${bridge.platform === "darwin" ? "macos-settings" : ""} ${bridge.platform === "win32" ? "windows-settings" : ""}`}>
+    <div className="settings-window-title">SecAgent设置</div>
+    {!isOobe && <nav className="settings-nav" aria-label="Settings navigation"><button type="button" className={activePage === "settings-tts" ? "active" : ""} aria-current={activePage === "settings-tts" ? "page" : undefined} onClick={() => { setActivePage("settings-tts"); window.history.replaceState(null, "", "#settings-tts"); }}>朗读</button><button type="button" className={activePage === "settings-models" ? "active" : ""} aria-current={activePage === "settings-models" ? "page" : undefined} onClick={() => { setActivePage("settings-models"); window.history.replaceState(null, "", "#settings-models"); }}>模型</button><button type="button" className={activePage === "settings-mcp" ? "active" : ""} aria-current={activePage === "settings-mcp" ? "page" : undefined} onClick={() => { setActivePage("settings-mcp"); window.history.replaceState(null, "", "#settings-mcp"); }}>MCP 服务</button><button type="button" className={activePage === "settings-plugins" ? "active" : ""} aria-current={activePage === "settings-plugins" ? "page" : undefined} onClick={() => { setActivePage("settings-plugins"); window.history.replaceState(null, "", "#settings-plugins"); }}>插件</button>{plugins.flatMap((plugin) => plugin.settingsPages.map((page) => { const pageId = `plugin-${plugin.id}-${page.id}`; return <button type="button" className={activePage === pageId ? "active" : ""} aria-current={activePage === pageId ? "page" : undefined} key={pageId} onClick={() => { setActivePage(pageId); window.history.replaceState(null, "", `#${pageId}`); }}>{page.title}</button>; }))}</nav>}
     {isOobe && <>
       <header className="oobe-header"><p className="eyebrow">WELCOME TO SECAGENT</p><h1>先配置一个大模型</h1><p>完成模型配置后就可以开始使用。其他设置暂时不用处理，之后随时可以回来修改。</p><button className="primary-button" onClick={() => void save()}>保存并开始使用</button></header>
       <div className="oobe-intro"><strong>只需要完成这一项</strong><span>选择模型协议，填写模型名称和 API Key。MCP、语音及其他高级设置不会影响首次使用。</span></div>
     </>}
-    <header className="settings-header"><div><p className="eyebrow">SECAGENT</p><h1>设置</h1><p>修改后立即写入工作目录的 secagent.yaml。</p></div><button className="primary-button" onClick={() => void save()}>保存设置</button></header>
-    {error && <div className="settings-error">{error}</div>}{saved && <div className="settings-success">设置已保存，下一次请求立即生效。</div>}
-    <section className="settings-section"><div className="section-title"><div><h2>朗读</h2><p>右键消息气泡选择“朗读”。语音由 Microsoft Edge 在线生成，不需要 API Key。</p></div></div>
+    {error && <div className="settings-error">{error}</div>}{isOobe && saved && <div className="settings-success">设置已保存，下一次请求立即生效。</div>}
+    <section id="settings-tts" className={`settings-section ${isOobe || activePage === "settings-tts" ? "settings-section-active" : ""}`}><div className="section-title"><div><h2>朗读</h2><p>右键消息气泡选择“朗读”。语音由 Microsoft Edge 在线生成，不需要 API Key。</p></div></div>
       <article className="settings-card"><div className="form-grid"><label>语音音色<select value={settings.tts.voice} onChange={(event) => setSettings((current) => current && { ...current, tts: { ...current.tts, voice: event.target.value } })}>{ttsVoices.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>语速<select value={settings.tts.rate} onChange={(event) => setSettings((current) => current && { ...current, tts: { ...current.tts, rate: event.target.value } })}>{ttsRates.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div></article>
     </section>
-    <section className="settings-section"><div className="section-title"><div><h2>模型</h2><p>Google Gemini 填写 API Key 即可自动获取常用文本模型；模型名称可留空。</p></div><button className="secondary-button" onClick={() => setSettings((current) => current && { ...current, models: [...current.models, emptyModel()] })}>+ 添加模型</button></div>
+    <section id="settings-models" className={`settings-section ${isOobe || activePage === "settings-models" ? "settings-section-active" : ""}`}><div className="section-title"><div><h2>模型</h2><p>Google Gemini 填写 API Key 即可自动获取常用文本模型；模型名称可留空。</p></div><button className="secondary-button" onClick={() => setSettings((current) => current && { ...current, models: [...current.models, emptyModel()] })}>+ 添加模型</button></div>
       <div className="settings-cards">{settings.models.map((model, index) => <article className="settings-card" key={model.id}>
         <div className="card-heading"><strong>{model.name || model.model || "未命名模型"}</strong>{settings.models.length > 1 && <button className="text-button danger" onClick={() => setSettings((current) => current && { ...current, models: current.models.filter((_, item) => item !== index) })}>删除</button>}</div>
         <div className="form-grid"><label>显示名称<input value={model.name || ""} onChange={(event) => updateModel(index, { name: event.target.value })} /></label><label>模型 ID<input value={model.id} onChange={(event) => updateModel(index, { id: event.target.value })} /></label><label>协议<select value={model.provider} onChange={(event) => selectProvider(index, event.target.value as ModelProfile["provider"])}><option value="openai-responses">OpenAI Responses</option><option value="openai-compatible">OpenAI Chat 兼容</option><option value="anthropic">Anthropic</option><option value="google">Google Gemini</option></select></label><label>{model.provider === "google" ? "模型名称（可选，留空自动获取）" : "模型名称"}<input value={model.model} placeholder={model.provider === "google" ? "保存后自动使用可用 Gemini 文本模型" : ""} onChange={(event) => updateModel(index, { model: event.target.value })} /></label><label>{model.provider === "google" ? "Google AI Studio API Key" : "API Key"}<input type="password" placeholder={model.apiKeyConfigured ? "已配置（留空则保持不变）" : "粘贴你的 key"} value={model.apiKey || ""} onChange={(event) => updateModel(index, { apiKey: event.target.value })} /></label><label>API Key 环境变量<input value={model.apiKeyEnv} onChange={(event) => updateModel(index, { apiKeyEnv: event.target.value })} /></label><label>Base URL<input value={model.baseUrl} onChange={(event) => updateModel(index, { baseUrl: event.target.value })} /></label><label>Endpoint<input value={model.endpoint || ""} onChange={(event) => updateModel(index, { endpoint: event.target.value })} /></label><label>最大 Tokens<input type="number" min="1" value={model.maxTokens || 16384} onChange={(event) => updateModel(index, { maxTokens: Number(event.target.value) })} /></label></div>
       </article>)}</div>
     </section>
-    <section className="settings-section"><div className="section-title"><div><h2>MCP 服务</h2><p>管理可被 SecAgent 发现和调用的 MCP 服务。</p></div><button className="secondary-button" onClick={() => setSettings((current) => current && { ...current, mcp: { servers: { ...current.mcp.servers, [`mcp-${Object.keys(current.mcp.servers).length + 1}`]: emptyMcp() } } })}>+ 添加服务</button></div>
+    <section id="settings-mcp" className={`settings-section ${isOobe || activePage === "settings-mcp" ? "settings-section-active" : ""}`}><div className="section-title"><div><h2>MCP 服务</h2><p>管理可被 SecAgent 发现和调用的 MCP 服务。</p></div><button className="secondary-button" onClick={() => setSettings((current) => current && { ...current, mcp: { servers: { ...current.mcp.servers, [`mcp-${Object.keys(current.mcp.servers).length + 1}`]: emptyMcp() } } })}>+ 添加服务</button></div>
       <div className="settings-cards">{Object.entries(settings.mcp.servers).map(([name, server]) => <article className="settings-card" key={name}><div className="card-heading"><input className="server-name" value={name} onChange={(event) => renameServer(name, event.target.value)} />{Object.keys(settings.mcp.servers).length > 1 && <button className="text-button danger" onClick={() => setSettings((current) => { if (!current) return current; const servers = { ...current.mcp.servers }; delete servers[name]; return { ...current, mcp: { servers } }; })}>删除</button>}</div><div className="form-grid"><label>传输方式<select value={server.transport} onChange={(event) => updateServer(name, { transport: event.target.value as McpServerConfig["transport"] })}><option value="http">HTTP</option><option value="stdio">stdio</option></select></label><label className="checkbox-label"><input type="checkbox" checked={server.enabled} onChange={(event) => updateServer(name, { enabled: event.target.checked })} /> 启用</label>{server.transport === "http" ? <label>服务 URL<input value={server.url || ""} onChange={(event) => updateServer(name, { url: event.target.value })} /></label> : <><label>启动命令<input value={server.command || ""} onChange={(event) => updateServer(name, { command: event.target.value })} /></label><label>参数（每行一个）<textarea value={(server.args || []).join("\n")} onChange={(event) => updateServer(name, { args: event.target.value.split(/\r?\n/).filter(Boolean) })} rows={3} /></label></>}</div></article>)}</div>
     </section>
-    <section id="settings-plugins" className="settings-section">
+    <section id="settings-plugins" className={`settings-section ${isOobe || activePage === "settings-plugins" ? "settings-section-active" : ""}`}>
       <div className="section-title"><div><h2>插件</h2><p>插件可在运行时自行注册 Skill 和工具；连接成功后再注册只是推荐的开发实践。</p></div><div className="section-actions"><button className="secondary-button" onClick={() => void bridge.listMarketplace().then((items) => { setMarketPlugins(items); setMarketError(""); }).catch((reason) => setMarketError(reason instanceof Error ? reason.message : String(reason)))}>浏览市场</button><button className="secondary-button" onClick={() => void bridge.installPlugin()}>安装本地 zip</button></div></div>
       {marketError && <div className="settings-error">{marketError}</div>}{marketPlugins.length > 0 && <div className="settings-cards market-cards">{marketPlugins.map((plugin) => { const version = plugin.versions[0]; return <article className="settings-card" key={plugin.id}><div className="card-heading"><strong>{plugin.name}</strong><button className="secondary-button" onClick={() => void bridge.installMarketplaceVersion(version)}>安装 v{version.version}</button></div><p className="plugin-meta">{plugin.description}</p><p className="plugin-meta">权限：{version.permissions.join("、")}</p></article>; })}</div>}
       <div className="settings-cards">{plugins.length === 0 && <article className="settings-card"><p className="plugin-empty">还没有已安装的插件。</p></article>}{plugins.map((plugin) => <article className="settings-card" key={plugin.id}>
@@ -103,6 +130,10 @@ function SettingsApp() {
         {plugin.settingsPages.map((page) => <div id={`plugin-${plugin.id}-${page.id}`} className="plugin-page" key={page.id}><h3>{page.title}</h3><p>{page.description || "插件设置页面"}</p><p>连接状态：<mark className={plugin.state}>{plugin.message || (plugin.state === "ready" ? "已就绪" : "未连接")}</mark></p></div>)}
       </article>)}</div>
     </section>
+    {!isOobe && plugins.flatMap((plugin) => plugin.settingsPages.map((page) => activePage === `plugin-${plugin.id}-${page.id}` && <section className="settings-section settings-section-active plugin-settings-section" key={`${plugin.id}-${page.id}`}>
+      <div className="section-title"><div><h2>{page.title}</h2><p>{page.description || "插件设置页面"}</p></div></div>
+      <article className="settings-card"><div className="card-heading"><strong>{plugin.name}</strong><span className={`plugin-state ${plugin.state}`}>{plugin.state === "ready" ? "已就绪" : plugin.state === "error" ? "错误" : plugin.state === "starting" ? "启动中" : "未启用"}</span></div><p className="plugin-meta">{plugin.id} · v{plugin.version}</p><p>连接状态：<mark className={plugin.state}>{plugin.message || (plugin.state === "ready" ? "已就绪" : "未连接")}</mark></p></article>
+    </section>))}
   </main>;
 }
 
@@ -523,9 +554,9 @@ export function App() {
   }
 
   return <main className="app-shell">
-    <header className="topbar">
+    <header className={`topbar ${bridge.platform === "darwin" ? "macos" : ""}`}>
       <div className="brand"><span>SecAgent</span></div>
-      <div className="session-menu">
+      <div className={`session-menu ${bridge.platform === "win32" ? "windows" : ""}`}>
         <div className={`session-options ${sessionMenuDismissed ? "dismissed" : ""}`} onMouseEnter={() => setSessionMenuDismissed(false)}>
           <button className="session-trigger" aria-label="选择历史会话"><img className="session-chevron" src="/session-chevron.svg" alt="" /> <span>{session?.meta.title || "问候"}</span></button>
           <div className="session-list" role="menu">

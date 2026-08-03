@@ -15,6 +15,7 @@ interface MarketplaceVersion { version: string; minHostApiVersion: number; asset
 interface MarketplacePlugin { id: string; name: string; description: string; repository: string; versions: MarketplaceVersion[] }
 interface Window {
   secagent: {
+    platform: NodeJS.Platform;
     listSessions(): Promise<SessionMeta[]>;
     listModels(): Promise<ModelOption[]>;
     getSettings(): Promise<SettingsPayload>;
