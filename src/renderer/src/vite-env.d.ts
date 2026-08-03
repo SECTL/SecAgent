@@ -10,9 +10,9 @@ interface ModelProfile { id: string; name?: string; provider: "openai-compatible
 interface McpServerConfig { transport: "stdio" | "http"; command?: string; args?: string[]; url?: string; enabled: boolean }
 interface SettingsPayload { models: ModelProfile[]; tts: { voice: string; rate: string }; mcp: { servers: Record<string, McpServerConfig> } }
 interface SkillSummary { name: string; description: string; path: string }
-interface PluginStatus { id: string; name: string; version: string; enabled: boolean; state: "inactive" | "starting" | "ready" | "error"; message?: string; settingsPages: Array<{ id: string; title: string; description?: string }> }
+interface PluginStatus { id: string; name: string; version: string; icon?: string; enabled: boolean; state: "inactive" | "starting" | "error" | "ready"; message?: string; description?: string; author?: string; repository?: string; permissions?: string[]; readme?: string; settingsPages: Array<{ id: string; title: string; description?: string }> }
 interface MarketplaceVersion { version: string; minHostApiVersion: number; assetUrl: string; sha256: string; permissions: string[]; platforms: string[] }
-interface MarketplacePlugin { id: string; name: string; description: string; repository: string; versions: MarketplaceVersion[] }
+interface MarketplacePlugin { id: string; name: string; description: string; repository: string; icon?: string; readme?: string; versions: MarketplaceVersion[] }
 interface Window {
   secagent: {
     platform: NodeJS.Platform;
@@ -25,6 +25,7 @@ interface Window {
     listPlugins(): Promise<PluginStatus[]>;
     setPluginEnabled(id: string, enabled: boolean): Promise<PluginStatus[]>;
     reloadPlugin(id: string): Promise<PluginStatus[]>;
+    uninstallPlugin(id: string): Promise<PluginStatus[]>;
     installPlugin(): Promise<PluginStatus[]>;
     listMarketplace(): Promise<MarketplacePlugin[]>;
     installMarketplaceVersion(version: MarketplaceVersion): Promise<PluginStatus[]>;

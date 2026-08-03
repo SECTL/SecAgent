@@ -128,7 +128,7 @@ agent:
 
 模型可直接调用所有已发现的 MCP 工具，以及 Pi 风格的 `read`、`write`、`edit`、`bash` 四个本地工具；每次调用仍会写入本地审计。
 
-基础系统提示词固定写在源码中，不从工作区配置读取。SecAgent 会自动扫描工作目录下三层以内、文件名大小写不敏感的 `SKILL.md`。每个 Skill 应在文件开头使用 YAML frontmatter 声明 `name` 和 `description`，两者会进入系统上下文；模型需要完整流程时会调用 `secagent__read_skill` 读取对应文件。Skill 不需要写入 `secagent.yaml`，文件可直接手动编辑。
+基础系统提示词从工作区 `secagent.yaml` 的 `agent.systemPrompt` 读取；新工作区会写入源码中的默认值，配置项为空时也会回退到该默认值。SecAgent 会自动扫描工作目录下三层以内、文件名大小写不敏感的 `SKILL.md`，并将扫描到的 Skill 名称、描述和入口文件追加到系统提示词中。模型需要完整流程时会调用 `secagent__read_skill` 读取对应文件。Skill 不需要写入 `secagent.yaml`，文件可直接手动编辑。
 
 ```md
 ---

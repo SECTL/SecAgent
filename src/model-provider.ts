@@ -52,12 +52,11 @@ function toGoogleSchema(input: unknown): Record<string, unknown> {
 
 export class ModelToolAgent {
   private agent: SecAgentConfig["agent"];
-  constructor(config: SecAgentConfig, skills: LoadedSkill[], private trace?: ModelTrace) {
-    const skillCatalog = skills.length
-      ? `\n\n## 可用 Skills\n${skills.map((skill) => `- ${skill.name}: ${skill.description}（入口文件：${skill.relativePath || skill.path}）`).join("\n")}`
+  constructor(config: SecAgentConfig, _skills: LoadedSkill[], private trace?: ModelTrace) {
+    const skillCatalog = _skills.length
+      ? `\n\n## 可用 Skills\n${_skills.map((skill) => `- ${skill.name}: ${skill.description}（入口文件：${skill.relativePath || skill.path}）`).join("\n")}`
       : "";
-    const operationRules = `\n\n## 外部应用操作硬性规则\n涉及 ClassIsland/CI 时，禁止调用 bash、shell、PowerShell 或直接读写 CI 文件；必须使用 ClassIsland Connector 工具和对应 Skill。不要用 bash 生成 GUID、查询日期或验证文件。日期和时间从 ClassIsland 状态工具返回的 localDate/localDateTime 获取；GUID 使用合法 GUID 字符串并在写入后读取验证。若 Connector 返回错误，必须修正参数后重试，不能把 written 之前的结果当成成功。`;
-    this.agent = { ...config.agent, systemPrompt: `${config.agent.systemPrompt}${operationRules}${skillCatalog}` };
+    this.agent = { ...config.agent, systemPrompt: `${config.agent.systemPrompt}${skillCatalog}` };
   }
   async run(instruction: string, tools: AgentTool[], execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high", conversation?: ConversationMessage[]): Promise<string> {
     if (!tools.length) throw new Error("没有已启用且可发现的 MCP 工具");

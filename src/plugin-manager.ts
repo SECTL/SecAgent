@@ -15,6 +15,11 @@ interface PluginManifest {
   name: string;
   version: string;
   main?: string;
+  icon?: string;
+  description?: string;
+  author?: string;
+  repository?: string;
+  readme?: string;
   permissions?: string[];
   settingsPages?: Array<{ id: string; title: string; description?: string }>;
 }
@@ -63,7 +68,21 @@ export class PluginManager {
     return this.state.plugins.map((installed) => {
       const active = this.active.get(installed.id);
       const manifest = active?.manifest || this.readManifest(path.join(this.installedRoot, installed.id, installed.version));
-      return { id: installed.id, name: manifest?.name || installed.id, version: installed.version, enabled: installed.enabled, state: active?.state || "inactive", message: active?.message, settingsPages: manifest?.settingsPages || [] };
+      return {
+        id: installed.id,
+        name: manifest?.name || installed.id,
+        version: installed.version,
+        icon: manifest ? this.readIcon(path.join(this.installedRoot, installed.id, installed.version), manifest) : undefined,
+        enabled: installed.enabled,
+        state: active?.state || "inactive",
+        message: active?.message,
+        description: manifest?.description,
+        author: manifest?.author,
+        repository: manifest?.repository,
+        permissions: manifest?.permissions || [],
+        readme: manifest ? this.readReadme(path.join(this.installedRoot, installed.id, installed.version), manifest) : undefined,
+        settingsPages: manifest?.settingsPages || []
+      };
     });
   }
 
@@ -95,6 +114,16 @@ export class PluginManager {
     installed.enabled = enabled;
     this.saveState();
     if (enabled) await this.activate(id); else await this.deactivate(id);
+    this.changed();
+  }
+
+  async uninstall(id: string): Promise<void> {
+    const installed = this.state.plugins.find((item) => item.id === id);
+    if (!installed) throw new Error(`未安装插件：${id}`);
+    await this.deactivate(id);
+    this.state.plugins = this.state.plugins.filter((item) => item.id !== id);
+    this.saveState();
+    fs.rmSync(path.join(this.installedRoot, id), { recursive: true, force: true });
     this.changed();
   }
 
@@ -193,11 +222,35 @@ export class PluginManager {
     }
   }
   private readManifest(root: string): PluginManifest | undefined { try { return this.validateManifest(JSON.parse(fs.readFileSync(path.join(root, "secagent-plugin.json"), "utf8"))); } catch { return undefined; } }
+  private readReadme(root: string, manifest: PluginManifest): string | undefined {
+    const requested = manifest.readme || "README.md";
+    try {
+      const file = this.safeRelative(root, requested);
+      return fs.existsSync(file) ? fs.readFileSync(file, "utf8") : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  private readIcon(root: string, manifest: PluginManifest): string | undefined {
+    if (!manifest.icon) return undefined;
+    try {
+      const file = this.safeRelative(root, manifest.icon);
+      const extension = path.extname(file).toLowerCase();
+      const mime = extension === ".svg" ? "image/svg+xml" : extension === ".png" ? "image/png" : extension === ".jpg" || extension === ".jpeg" ? "image/jpeg" : undefined;
+      if (!mime || !fs.existsSync(file)) return undefined;
+      const stat = fs.statSync(file);
+      if (!stat.isFile() || stat.size > 512 * 1024) return undefined;
+      return `data:${mime};base64,${fs.readFileSync(file).toString("base64")}`;
+    } catch {
+      return undefined;
+    }
+  }
   private validateManifest(input: unknown): PluginManifest {
     const data = input as Partial<PluginManifest>;
     if (data.apiVersion !== API_VERSION || !data.id || !/^[a-z][a-z0-9-]*$/.test(data.id) || !data.name || !data.version) throw new Error("无效插件清单：需要 apiVersion=1、合法 id、name 和 version");
     if (data.main && (!data.main.endsWith(".mjs") || data.main.includes(".."))) throw new Error("main 必须是包内 .mjs 文件");
-    return { apiVersion: API_VERSION, id: data.id, name: data.name, version: data.version, main: data.main, permissions: data.permissions || [], settingsPages: data.settingsPages || [] };
+    if (data.icon !== undefined && (typeof data.icon !== "string" || !data.icon || path.isAbsolute(data.icon) || data.icon.includes(".."))) throw new Error("icon 必须是包内的图标文件");
+    return { apiVersion: API_VERSION, id: data.id, name: data.name, version: data.version, main: data.main, icon: data.icon, description: data.description, author: data.author, repository: data.repository, readme: data.readme, permissions: data.permissions || [], settingsPages: data.settingsPages || [] };
   }
   private readState(): PluginStateFile { try { const raw = JSON.parse(fs.readFileSync(this.statePath, "utf8")) as PluginStateFile; return { plugins: Array.isArray(raw.plugins) ? raw.plugins : [] }; } catch { return { plugins: [] }; } }
   private saveState(): void { fs.mkdirSync(path.dirname(this.statePath), { recursive: true }); fs.writeFileSync(this.statePath, `${JSON.stringify(this.state, null, 2)}\n`, "utf8"); }

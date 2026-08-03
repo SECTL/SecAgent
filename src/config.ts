@@ -17,6 +17,7 @@ const template = (workspace: string): SecAgentConfig => ({
   version: 1,
   workspace,
   agent: {
+    systemPrompt: DEFAULT_SYSTEM_PROMPT,
     models: [{
       id: "default",
       name: "gpt-5",
@@ -116,7 +117,9 @@ export function normalizeAndValidate(raw: SecAgentConfig, workspace: string): Se
       systemPrompt: DEFAULT_SYSTEM_PROMPT
     };
   }
-  raw.agent.systemPrompt = DEFAULT_SYSTEM_PROMPT;
+  if (typeof raw.agent.systemPrompt !== "string" || !raw.agent.systemPrompt.trim()) {
+    raw.agent.systemPrompt = DEFAULT_SYSTEM_PROMPT;
+  }
   raw.tts = { voice: raw.tts?.voice || DEFAULT_TTS_VOICE, rate: raw.tts?.rate || DEFAULT_TTS_RATE };
   delete (raw.agent as { systemPromptFile?: unknown }).systemPromptFile;
   if (!raw?.agent?.provider || !["openai-compatible", "openai-responses", "anthropic", "google"].includes(raw.agent.provider)) errors.push("agent.provider 必须是 openai-compatible、openai-responses、anthropic 或 google");

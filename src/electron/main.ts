@@ -181,6 +181,7 @@ ipcMain.handle("settings:open-skills", async () => {
 ipcMain.handle("plugins:list", () => pluginManager?.list() || []);
 ipcMain.handle("plugins:set-enabled", async (_event, id: string, enabled: boolean) => { await pluginManager?.setEnabled(id, enabled); return pluginManager?.list() || []; });
 ipcMain.handle("plugins:reload", async (_event, id: string) => { await pluginManager?.reload(id); return pluginManager?.list() || []; });
+ipcMain.handle("plugins:uninstall", async (_event, id: string) => { await pluginManager?.uninstall(id); return pluginManager?.list() || []; });
 ipcMain.handle("plugins:install", async () => {
   const result = await dialog.showOpenDialog(settingsWindow || windowRef!, { properties: ["openFile"], filters: [{ name: "SecAgent plugin", extensions: ["zip"] }] });
   if (result.canceled || !result.filePaths[0]) return pluginManager?.list() || [];

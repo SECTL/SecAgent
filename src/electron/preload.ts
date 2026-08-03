@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld("secagent", {
   listPlugins: () => ipcRenderer.invoke("plugins:list"),
   setPluginEnabled: (id: string, enabled: boolean) => ipcRenderer.invoke("plugins:set-enabled", id, enabled),
   reloadPlugin: (id: string) => ipcRenderer.invoke("plugins:reload", id),
+  uninstallPlugin: (id: string) => ipcRenderer.invoke("plugins:uninstall", id),
   installPlugin: () => ipcRenderer.invoke("plugins:install"),
   listMarketplace: () => ipcRenderer.invoke("marketplace:list"),
   installMarketplaceVersion: (version: unknown) => ipcRenderer.invoke("marketplace:install", version),

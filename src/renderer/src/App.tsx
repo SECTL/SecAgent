@@ -2,7 +2,7 @@ import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "reac
 import type { ClipboardEvent as ReactClipboardEvent, DragEvent as ReactDragEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { LoaderCircle, Volume2 } from "lucide-react";
+import { CircleAlert, CircleCheck, Download, ExternalLink, LoaderCircle, MoreHorizontal, PackageOpen, Power, RefreshCw, Search, Trash2, Volume2 } from "lucide-react";
 
 type TraceEvent = { sessionId: string; sequence: number; at: string; stage: string; data: unknown };
 
@@ -40,6 +40,167 @@ const ttsVoices = [
   ["zh-CN-YunyangNeural", "云扬（男声，播音）"]
 ] as const;
 const ttsRates = [["-30%", "较慢"], ["-15%", "慢"], ["+0%", "正常"], ["+15%", "快"], ["+30%", "较快"]] as const;
+
+function pluginStateLabel(plugin: PluginStatus): string {
+  return plugin.state === "ready" ? "已加载" : plugin.state === "error" ? "错误" : plugin.state === "starting" ? "启动中" : "已禁用";
+}
+
+function PluginSettingsPanel({
+  plugins,
+  setPlugins,
+  marketPlugins,
+  setMarketPlugins,
+  marketError,
+  setMarketError
+}: {
+  plugins: PluginStatus[];
+  setPlugins: (plugins: PluginStatus[]) => void;
+  marketPlugins: MarketplacePlugin[];
+  setMarketPlugins: (plugins: MarketplacePlugin[]) => void;
+  marketError: string;
+  setMarketError: (message: string) => void;
+}) {
+  const bridge = window.secagent;
+  const [category, setCategory] = useState<"installed" | "market">("installed");
+  const [selectedId, setSelectedId] = useState("");
+  const [filter, setFilter] = useState("");
+  const [detailTab, setDetailTab] = useState<"readme" | "error" | "details">("readme");
+  const [marketLoading, setMarketLoading] = useState(false);
+  const [operationId, setOperationId] = useState("");
+  const [panelError, setPanelError] = useState("");
+
+  const refreshMarket = async () => {
+    setMarketLoading(true);
+    setMarketError("");
+    try {
+      setMarketPlugins(await bridge.listMarketplace());
+    } catch (reason) {
+      setMarketError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setMarketLoading(false);
+    }
+  };
+
+  useEffect(() => { void refreshMarket(); }, []);
+  useEffect(() => {
+    const source = category === "installed" ? plugins : marketPlugins;
+    if (!selectedId || !source.some((plugin) => plugin.id === selectedId)) setSelectedId(source[0]?.id || "");
+    setDetailTab("readme");
+  }, [category, plugins, marketPlugins]);
+
+  const visiblePlugins = useMemo(() => {
+    const keyword = filter.trim().toLocaleLowerCase();
+    const source = category === "installed" ? plugins : marketPlugins;
+    if (!keyword) return source;
+    return source.filter((plugin) => `${plugin.name} ${plugin.id} ${plugin.description}`.toLocaleLowerCase().includes(keyword));
+  }, [category, filter, marketPlugins, plugins]);
+  const installed = plugins.find((plugin) => plugin.id === selectedId);
+  const market = marketPlugins.find((plugin) => plugin.id === selectedId);
+  const selected = category === "installed" ? installed : market;
+  const selectedVersion = market?.versions[0];
+  const selectedReadme = installed?.readme || market?.readme || (market ? `# ${market.name}\n\n${market.description}\n\n该插件的完整 README 请前往项目主页查看。` : "");
+
+  const reportError = (reason: unknown) => setPanelError(reason instanceof Error ? reason.message : String(reason));
+  const installLocal = async () => {
+    setPanelError("");
+    try { setPlugins(await bridge.installPlugin()); setCategory("installed"); }
+    catch (reason) { reportError(reason); }
+  };
+  const installMarket = async () => {
+    if (!selectedVersion || !market) return;
+    setOperationId(market.id); setPanelError("");
+    try { setPlugins(await bridge.installMarketplaceVersion(selectedVersion)); setCategory("installed"); setSelectedId(market.id); }
+    catch (reason) { reportError(reason); }
+    finally { setOperationId(""); }
+  };
+  const uninstall = async () => {
+    if (!installed || !window.confirm(`确定卸载“${installed.name}”吗？`)) return;
+    setOperationId(installed.id); setPanelError("");
+    try {
+      const next = await bridge.uninstallPlugin(installed.id);
+      setPlugins(next);
+      setSelectedId(next[0]?.id || "");
+    } catch (reason) { reportError(reason); }
+    finally { setOperationId(""); }
+  };
+  const toggleEnabled = async () => {
+    if (!installed) return;
+    setOperationId(installed.id); setPanelError("");
+    try { setPlugins(await bridge.setPluginEnabled(installed.id, !installed.enabled)); }
+    catch (reason) { reportError(reason); }
+    finally { setOperationId(""); }
+  };
+  const reload = async () => {
+    if (!installed) return;
+    setOperationId(installed.id); setPanelError("");
+    try { setPlugins(await bridge.reloadPlugin(installed.id)); }
+    catch (reason) { reportError(reason); }
+    finally { setOperationId(""); }
+  };
+
+  return <div className="plugin-catalog">
+    <div className="plugin-catalog-toolbar">
+      <div>
+        <h2>插件</h2>
+        <p>浏览、安装和管理 SecAgent 插件。</p>
+      </div>
+      <div className="plugin-toolbar-actions">
+        <button className="secondary-button" type="button" onClick={() => void installLocal()}><PackageOpen size={15} />本地安装</button>
+        <button className="icon-button settings-icon-button" type="button" title="刷新市场" onClick={() => void refreshMarket()} disabled={marketLoading}><RefreshCw size={16} className={marketLoading ? "spin" : ""} /></button>
+      </div>
+    </div>
+    {(marketError || panelError) && <div className="settings-error plugin-catalog-error">{marketError || panelError}</div>}
+    <div className="plugin-catalog-workspace">
+      <aside className="plugin-catalog-sidebar">
+        <div className="plugin-search"><Search size={16} /><input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="搜索插件…" aria-label="搜索插件" /></div>
+        <div className="plugin-category-tabs" role="tablist" aria-label="插件分类">
+          <button type="button" role="tab" aria-selected={category === "installed"} className={category === "installed" ? "active" : ""} onClick={() => setCategory("installed")}>已安装 <span>{plugins.length}</span></button>
+          <button type="button" role="tab" aria-selected={category === "market"} className={category === "market" ? "active" : ""} onClick={() => setCategory("market")}>市场 <span>{marketPlugins.length}</span></button>
+        </div>
+        <div className="plugin-list" role="listbox" aria-label={category === "installed" ? "已安装插件" : "插件市场"}>
+          {visiblePlugins.map((plugin) => {
+            const local = plugins.find((item) => item.id === plugin.id);
+            const version = "versions" in plugin ? plugin.versions[0]?.version : plugin.version;
+            const state = local ? pluginStateLabel(local) : version ? `v${version}` : "未安装";
+            return <button type="button" role="option" aria-selected={selectedId === plugin.id} className={`plugin-list-item ${selectedId === plugin.id ? "selected" : ""}`} key={plugin.id} onClick={() => setSelectedId(plugin.id)}>
+              <span className="plugin-list-icon">{plugin.icon ? <img src={plugin.icon} alt="" /> : plugin.name.slice(0, 1).toUpperCase()}</span>
+              <span className="plugin-list-copy"><strong>{plugin.name}</strong><small>{plugin.description || plugin.id}</small></span>
+              <span className={`plugin-list-state ${local?.state || "market"}`}>{state}</span>
+            </button>;
+          })}
+          {!visiblePlugins.length && <div className="plugin-list-empty"><PackageOpen size={26} /><span>{category === "installed" ? "还没有安装插件" : marketLoading ? "正在加载市场…" : "没有找到匹配的插件"}</span></div>}
+        </div>
+      </aside>
+      <section className="plugin-detail" aria-label="插件详情">
+        {!selected && <div className="plugin-detail-empty"><PackageOpen size={42} /><h3>选择一个插件</h3><p>从左侧列表选择插件，查看基本信息和 README。</p></div>}
+        {selected && <>
+          <header className="plugin-detail-header">
+            <div className="plugin-detail-identity">
+              <div className="plugin-detail-icon">{selected.icon ? <img src={selected.icon} alt="" /> : selected.name.slice(0, 1).toUpperCase()}</div>
+              <div><h3>{selected.name}</h3><p>{selected.id} <span>·</span> v{installed?.version || selectedVersion?.version || "—"}{installed?.author && <><span> · </span>{installed.author}</>}</p><span className={`plugin-status-pill ${installed?.state || "market"}`}>{installed ? <>{installed.state === "ready" ? <CircleCheck size={14} /> : installed.state === "error" ? <CircleAlert size={14} /> : null}{pluginStateLabel(installed)}</> : <><Download size={14} />市场插件</>}</span></div>
+            </div>
+            <button className="icon-button settings-icon-button" type="button" title="更多操作"><MoreHorizontal size={18} /></button>
+          </header>
+          <div className="plugin-detail-actions">
+            {installed ? <><button className="primary-button" type="button" onClick={() => void toggleEnabled()} disabled={operationId === installed.id}><Power size={15} />{installed.enabled ? "禁用" : "启用"}</button><button className="secondary-button" type="button" onClick={() => void reload()} disabled={operationId === installed.id}><RefreshCw size={15} />重新加载</button><button className="secondary-button danger-button" type="button" onClick={() => void uninstall()} disabled={operationId === installed.id}><Trash2 size={15} />卸载</button></> : <button className="primary-button" type="button" onClick={() => void installMarket()} disabled={!selectedVersion || operationId === market?.id}><Download size={15} />{operationId === market?.id ? "安装中…" : `安装 v${selectedVersion?.version || "—"}`}</button>}
+            {(installed?.repository || market?.repository) && <a className="secondary-button link-button" href={installed?.repository || market?.repository} target="_blank" rel="noreferrer"><ExternalLink size={15} />项目主页</a>}
+          </div>
+          {installed?.message && <div className={`plugin-detail-message ${installed.state}`}><CircleAlert size={16} />{installed.message}</div>}
+          <div className="plugin-detail-tabs" role="tablist">
+            <button type="button" className={detailTab === "readme" ? "active" : ""} onClick={() => setDetailTab("readme")}>概览</button>
+            {installed?.state === "error" && <button type="button" className={detailTab === "error" ? "active" : ""} onClick={() => setDetailTab("error")}>错误信息</button>}
+            <button type="button" className={detailTab === "details" ? "active" : ""} onClick={() => setDetailTab("details")}>权限与设置</button>
+          </div>
+          <div className="plugin-detail-content">
+            {detailTab === "readme" && <div className="plugin-readme"><ReactMarkdown remarkPlugins={[remarkGfm]}>{selectedReadme || "暂无 README。"}</ReactMarkdown></div>}
+            {detailTab === "error" && <div className="plugin-error-panel"><CircleAlert size={20} /><p>{installed?.message || "插件加载时没有报告错误。"}</p></div>}
+            {detailTab === "details" && <div className="plugin-info-grid"><div><small>插件 ID</small><strong>{selected.id}</strong></div><div><small>版本</small><strong>v{installed?.version || selectedVersion?.version || "—"}</strong></div><div><small>权限</small><strong>{(installed?.permissions || selectedVersion?.permissions || []).length ? (installed?.permissions || selectedVersion?.permissions || []).join("、") : "未声明权限"}</strong></div><div><small>设置页面</small><strong>{installed?.settingsPages.length ? installed.settingsPages.map((page) => page.title).join("、") : "无"}</strong></div></div>}
+          </div>
+        </>}
+      </section>
+    </div>
+  </div>;
+}
 
 function SettingsApp() {
   const bridge = window.secagent;
@@ -122,17 +283,14 @@ function SettingsApp() {
       <div className="settings-cards">{Object.entries(settings.mcp.servers).map(([name, server]) => <article className="settings-card" key={name}><div className="card-heading"><input className="server-name" value={name} onChange={(event) => renameServer(name, event.target.value)} />{Object.keys(settings.mcp.servers).length > 1 && <button className="text-button danger" onClick={() => setSettings((current) => { if (!current) return current; const servers = { ...current.mcp.servers }; delete servers[name]; return { ...current, mcp: { servers } }; })}>删除</button>}</div><div className="form-grid"><label>传输方式<select value={server.transport} onChange={(event) => updateServer(name, { transport: event.target.value as McpServerConfig["transport"] })}><option value="http">HTTP</option><option value="stdio">stdio</option></select></label><label className="checkbox-label"><input type="checkbox" checked={server.enabled} onChange={(event) => updateServer(name, { enabled: event.target.checked })} /> 启用</label>{server.transport === "http" ? <label>服务 URL<input value={server.url || ""} onChange={(event) => updateServer(name, { url: event.target.value })} /></label> : <><label>启动命令<input value={server.command || ""} onChange={(event) => updateServer(name, { command: event.target.value })} /></label><label>参数（每行一个）<textarea value={(server.args || []).join("\n")} onChange={(event) => updateServer(name, { args: event.target.value.split(/\r?\n/).filter(Boolean) })} rows={3} /></label></>}</div></article>)}</div>
     </section>
     <section id="settings-plugins" className={`settings-section ${isOobe || activePage === "settings-plugins" ? "settings-section-active" : ""}`}>
-      <div className="section-title"><div><h2>插件</h2><p>插件可在运行时自行注册 Skill 和工具；连接成功后再注册只是推荐的开发实践。</p></div><div className="section-actions"><button className="secondary-button" onClick={() => void bridge.listMarketplace().then((items) => { setMarketPlugins(items); setMarketError(""); }).catch((reason) => setMarketError(reason instanceof Error ? reason.message : String(reason)))}>浏览市场</button><button className="secondary-button" onClick={() => void bridge.installPlugin()}>安装本地 zip</button></div></div>
-      {marketError && <div className="settings-error">{marketError}</div>}{marketPlugins.length > 0 && <div className="settings-cards market-cards">{marketPlugins.map((plugin) => { const version = plugin.versions[0]; return <article className="settings-card" key={plugin.id}><div className="card-heading"><strong>{plugin.name}</strong><button className="secondary-button" onClick={() => void bridge.installMarketplaceVersion(version)}>安装 v{version.version}</button></div><p className="plugin-meta">{plugin.description}</p><p className="plugin-meta">权限：{version.permissions.join("、")}</p></article>; })}</div>}
-      <div className="settings-cards">{plugins.length === 0 && <article className="settings-card"><p className="plugin-empty">还没有已安装的插件。</p></article>}{plugins.map((plugin) => <article className="settings-card" key={plugin.id}>
-        <div className="card-heading"><div><strong>{plugin.name}</strong><span className={`plugin-state ${plugin.state}`}>{plugin.state === "ready" ? "已就绪" : plugin.state === "error" ? "错误" : plugin.state === "starting" ? "启动中" : "未启用"}</span></div><div className="section-actions"><button className="secondary-button" onClick={() => void bridge.reloadPlugin(plugin.id)}>重新加载</button><label className="plugin-toggle"><input type="checkbox" checked={plugin.enabled} onChange={(event) => void bridge.setPluginEnabled(plugin.id, event.target.checked)} /> 启用</label></div></div>
-        <p className="plugin-meta">{plugin.id} · v{plugin.version}</p>{plugin.message && <p className={`plugin-message ${plugin.state}`}>{plugin.message}</p>}
-        {plugin.settingsPages.map((page) => <div id={`plugin-${plugin.id}-${page.id}`} className="plugin-page" key={page.id}><h3>{page.title}</h3><p>{page.description || "插件设置页面"}</p><p>连接状态：<mark className={plugin.state}>{plugin.message || (plugin.state === "ready" ? "已就绪" : "未连接")}</mark></p></div>)}
-      </article>)}</div>
+      <PluginSettingsPanel plugins={plugins} setPlugins={setPlugins} marketPlugins={marketPlugins} setMarketPlugins={setMarketPlugins} marketError={marketError} setMarketError={setMarketError} />
     </section>
     {!isOobe && plugins.flatMap((plugin) => plugin.settingsPages.map((page) => activePage === `plugin-${plugin.id}-${page.id}` && <section className="settings-section settings-section-active plugin-settings-section" key={`${plugin.id}-${page.id}`}>
-      <div className="section-title"><div><h2>{page.title}</h2><p>{page.description || "插件设置页面"}</p></div></div>
-      <article className="settings-card"><div className="card-heading"><strong>{plugin.name}</strong><span className={`plugin-state ${plugin.state}`}>{plugin.state === "ready" ? "已就绪" : plugin.state === "error" ? "错误" : plugin.state === "starting" ? "启动中" : "未启用"}</span></div><p className="plugin-meta">{plugin.id} · v{plugin.version}</p><p>连接状态：<mark className={plugin.state}>{plugin.message || (plugin.state === "ready" ? "已就绪" : "未连接")}</mark></p></article>
+      <div className="section-title"><h2>{page.title}</h2></div>
+      <article className={`settings-card plugin-service-status ${plugin.state}`}>
+        <span>服务状态</span>
+        <strong>{plugin.message || (plugin.state === "ready" ? "已就绪" : "未连接")}</strong>
+      </article>
     </section>))}
   </main>;
 }

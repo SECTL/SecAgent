@@ -61,9 +61,15 @@ export interface PluginStatus {
   id: string;
   name: string;
   version: string;
+  icon?: string;
   enabled: boolean;
   state: "inactive" | "starting" | "ready" | "error";
   message?: string;
+  description?: string;
+  author?: string;
+  repository?: string;
+  permissions?: string[];
+  readme?: string;
   settingsPages: Array<{ id: string; title: string; description?: string }>;
 }
 
