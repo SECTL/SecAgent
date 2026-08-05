@@ -263,6 +263,19 @@ function SettingsApp() {
       skipAutosave.current = false;
       return;
     }
+    // A newly added model is intentionally an incomplete draft. Do not send it
+    // through the strict config validator until the required fields are filled.
+    const hasIncompleteModel = settings.models.some((model) => (
+      !model.id.trim() ||
+      !model.provider ||
+      (model.provider !== "google" && !model.model.trim()) ||
+      !model.apiKeyEnv.trim() ||
+      !model.baseUrl.trim()
+    ));
+    if (hasIncompleteModel) {
+      setError("");
+      return;
+    }
     const timer = window.setTimeout(() => {
       setError("");
       void bridge.saveSettings(settings).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
