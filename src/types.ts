@@ -30,7 +30,7 @@ export interface AgentConfig {
   models?: ModelProfile[];
 }
 
-export type ReasoningEffort = "none" | "low" | "medium" | "high";
+export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 /** An image selected in the desktop composer, persisted with the user message. */
 export interface ChatAttachment {

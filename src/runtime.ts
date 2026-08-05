@@ -53,7 +53,8 @@ export class SecAgentRuntime {
     const result = JSON.parse(record.result) as { event_uuid?: string; student_id?: number };
     if (!result.event_uuid || !Number.isInteger(result.student_id)) throw new Error("该记录不是可撤销的 SecScore 积分操作");
     await this.registry.discover();
-    const response = await this.callTool(`undo ${actionId}`, "secscore__undo_score", { event_uuid: result.event_uuid, student_id: result.student_id });
+    const connectorUndoKey = this.plugins?.getTools().find((tool) => tool.key.endsWith("__undo_score"))?.key;
+    const response = await this.callTool(`undo ${actionId}`, connectorUndoKey || "secscore__undo_score", { event_uuid: result.event_uuid, student_id: result.student_id });
     return { kind: "completed", message: `已请求撤销 ${actionId}：${JSON.stringify(response)}` };
   }
   private async callTool(request: string, key: string, args: Record<string, unknown>, hiddenTools?: Set<string>): Promise<unknown> {

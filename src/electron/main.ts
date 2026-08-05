@@ -1,9 +1,11 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, session, shell } from "electron";
+import { createServer } from "node:http";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { DEFAULT_WORKSPACE } from "../paths.js";
-import { configuredModels, configPath, initializeWorkspace, isOnboardingComplete, loadConfig, markOnboardingComplete, readSettings, saveSettings, useConfiguredModel, type SettingsPayload } from "../config.js";
+import { configuredModels, configPath, initializeWorkspace, isOnboardingComplete, loadConfig, markOnboardingComplete, readSettings, saveSettings, useConfiguredModel, writeWorkspaceEnv, type SettingsPayload } from "../config.js";
 import { loadEnabledSkills } from "../skills.js";
 import { AuditStore } from "../audit.js";
 import { SecAgentRuntime, type TraceEvent } from "../runtime.js";
@@ -164,7 +166,16 @@ ipcMain.handle("models:list", async () => {
   const { config } = loadConfig(DEFAULT_WORKSPACE);
   const googleProfile = config.agent.models?.find((model) => model.provider === "google");
   const googleModels = googleProfile ? await listGoogleModels(process.env[googleProfile.apiKeyEnv] || "", googleProfile.baseUrl).catch(() => []) : [];
-  return configuredModels(config, googleModels);
+  const options = configuredModels(config, googleModels);
+  const token = process.env.SECTL_OFFICIAL_TOKEN;
+  const baseUrl = (process.env.SECTL_OFFICIAL_API_URL || "").replace(/\/$/, "");
+  if (!token || !baseUrl || !config.agent.models?.some((model) => model.id === "sectl-official")) return options;
+  try {
+    const response = await fetch(`${baseUrl}/models`, { headers: { Authorization: `Bearer ${token}` } });
+    const payload = await response.json() as { data?: Array<{ id?: string; name?: string }> };
+    const remote = (payload.data || []).filter((model) => model.id).map((model) => ({ id: `official:sectl-official:${model.id}`, name: model.name || model.id || "官方模型", model: model.id || "", provider: "openai-responses" }));
+    return [...options.filter((option) => option.id !== "sectl-official"), ...remote];
+  } catch { return options; }
 });
 ipcMain.handle("settings:get", () => readSettings(DEFAULT_WORKSPACE));
 ipcMain.handle("settings:skills", () => {
@@ -178,6 +189,74 @@ ipcMain.handle("settings:open-skills", async () => {
   if (error) throw new Error(error);
   return directory;
 });
+ipcMain.handle("official:status", () => { loadConfig(DEFAULT_WORKSPACE); return { loggedIn: Boolean(process.env.SECTL_OFFICIAL_TOKEN), email: process.env.SECTL_OFFICIAL_EMAIL || "" }; });
+ipcMain.handle("official:balance", async () => {
+  loadConfig(DEFAULT_WORKSPACE);
+  const token = process.env.SECTL_OFFICIAL_TOKEN;
+  const baseUrl = (process.env.SECTL_OFFICIAL_API_URL || "").replace(/\/$/, "");
+  if (!token || !baseUrl) return { points: null };
+  const response = await fetch(`${baseUrl}/account`, { headers: { Authorization: `Bearer ${token}` } });
+  const payload = await response.json().catch(() => ({})) as { points?: number; detail?: string };
+  if (!response.ok || typeof payload.points !== "number") throw new Error(payload.detail || "无法获取 Points 余额");
+  return { points: payload.points };
+});
+ipcMain.handle("official:login", async (_event, email: string, password: string) => {
+  loadConfig(DEFAULT_WORKSPACE);
+  const baseUrl = (process.env.SECTL_OFFICIAL_API_URL || "").replace(/\/$/, "");
+  if (!baseUrl) throw new Error("请先在 SecAgent 代码目录 .env 配置 SECTL_OFFICIAL_API_URL");
+  const response = await fetch(`${baseUrl}/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, password, platform_id: process.env.SECTL_OFFICIAL_PLATFORM_ID || "secagent", client_id: process.env.SECTL_OFFICIAL_CLIENT_ID || "secagent-desktop" }) });
+  const payload = await response.json().catch(() => ({})) as { access_token?: string; user?: { email?: string }; detail?: string };
+  if (!response.ok || !payload.access_token) throw new Error(payload.detail || "SECTL 登录失败");
+  writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_TOKEN", payload.access_token);
+  writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_EMAIL", payload.user?.email || email);
+  const current = readSettings(DEFAULT_WORKSPACE);
+  const models = current.models.some((model) => model.id === "sectl-official") ? current.models : [...current.models, { id: "sectl-official", name: "SecAgent 官方服务", provider: "openai-responses" as const, model: "deepseek-v4-flash", apiKeyEnv: "SECTL_OFFICIAL_TOKEN", baseUrl: `${baseUrl}/v1`, endpoint: "/responses", maxTokens: 16384 }];
+  return saveSettings(DEFAULT_WORKSPACE, { ...current, models });
+});
+ipcMain.handle("official:oauth-login", async () => {
+  loadConfig(DEFAULT_WORKSPACE);
+  const relayUrl = (process.env.SECTL_OFFICIAL_API_URL || "").replace(/\/$/, "");
+  const oauthUrl = (process.env.SECTL_OAUTH_API_URL || "https://appwrite.sectl.cn").replace(/\/$/, "");
+  const oauthWebUrl = (process.env.SECTL_OAUTH_WEB_URL || "https://sectl.cn").replace(/\/$/, "");
+  const clientId = process.env.SECTL_OFFICIAL_CLIENT_ID || "";
+  const port = Number(process.env.SECTL_OAUTH_CALLBACK_PORT || 49152);
+  if (!relayUrl) throw new Error("请在 SecAgent 代码目录 .env 配置 SECTL_OFFICIAL_API_URL");
+  if (!clientId) throw new Error("请在 SecAgent 代码目录 .env 配置 SECTL_OFFICIAL_CLIENT_ID");
+  if (!Number.isInteger(port) || port < 49152 || port > 65535) throw new Error("SECTL_OAUTH_CALLBACK_PORT 必须是 49152-65535 的固定端口");
+  const redirectUri = `http://127.0.0.1:${port}/oauth/callback`;
+  const state = crypto.randomBytes(24).toString("base64url");
+  const verifier = crypto.randomBytes(48).toString("base64url");
+  const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
+  const authorize = new URL(`${oauthWebUrl}/oauth/authorize`);
+  authorize.search = new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, response_type: "code", scope: "user:read", state, code_challenge: challenge, code_challenge_method: "S256" }).toString();
+  const callback = await new Promise<{ code: string }>((resolve, reject) => {
+    const server = createServer((request, response) => {
+      const url = new URL(request.url || "/", `http://127.0.0.1:${port}`);
+      if (url.pathname !== "/oauth/callback") { response.writeHead(404); response.end("Not found"); return; }
+      if (url.searchParams.get("state") !== state) { response.writeHead(400); response.end("Invalid state"); reject(new Error("OAuth state 校验失败")); server.close(); return; }
+      const error = url.searchParams.get("error");
+      if (error) { response.writeHead(400, { "Content-Type": "text/html; charset=utf-8" }); response.end("<h2>登录未完成，请返回 SecAgent 重试。</h2>"); reject(new Error(url.searchParams.get("error_description") || error)); server.close(); return; }
+      const code = url.searchParams.get("code");
+      if (!code) { response.writeHead(400); response.end("Missing code"); reject(new Error("OAuth 回调缺少 code")); server.close(); return; }
+      response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }); response.end("<h2>SecAgent 登录成功，可以关闭此页面。</h2>"); resolve({ code }); server.close();
+    });
+    server.on("error", (error) => reject(new Error(`无法监听 OAuth 回调端口 ${port}: ${error.message}`)));
+    server.listen(port, "127.0.0.1", () => { void shell.openExternal(authorize.toString()); });
+    setTimeout(() => { server.close(); reject(new Error("OAuth 登录超时，请重试")); }, 5 * 60 * 1000).unref();
+  });
+  const tokenResponse = await fetch(`${oauthUrl}/api/oauth/token`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ grant_type: "authorization_code", code: callback.code, client_id: clientId, redirect_uri: redirectUri, code_verifier: verifier, device_uuid: crypto.randomUUID() }) });
+  const tokenPayload = await tokenResponse.json().catch(() => ({})) as { access_token?: string; error_description?: string };
+  if (!tokenResponse.ok || !tokenPayload.access_token) throw new Error(tokenPayload.error_description || "SECTL OAuth 换取令牌失败");
+  const relayResponse = await fetch(`${relayUrl}/auth/oauth`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ access_token: tokenPayload.access_token, client_id: clientId, platform_id: process.env.SECTL_OFFICIAL_PLATFORM_ID || clientId }) });
+  const relayPayload = await relayResponse.json().catch(() => ({})) as { access_token?: string; user?: { email?: string }; detail?: string };
+  if (!relayResponse.ok || !relayPayload.access_token) throw new Error(relayPayload.detail || "官方服务登录失败");
+  writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_TOKEN", relayPayload.access_token);
+  writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_EMAIL", relayPayload.user?.email || "SECTL 用户");
+  const current = readSettings(DEFAULT_WORKSPACE);
+  const models = current.models.some((model) => model.id === "sectl-official") ? current.models : [...current.models, { id: "sectl-official", name: "SecAgent 官方服务", provider: "openai-responses" as const, model: "deepseek-v4-flash", apiKeyEnv: "SECTL_OFFICIAL_TOKEN", baseUrl: `${relayUrl}/v1`, endpoint: "/responses", maxTokens: 16384 }];
+  return saveSettings(DEFAULT_WORKSPACE, { ...current, models });
+});
+ipcMain.handle("official:logout", () => { loadConfig(DEFAULT_WORKSPACE); writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_TOKEN", ""); writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_EMAIL", ""); return { loggedIn: false }; });
 ipcMain.handle("plugins:list", () => pluginManager?.list() || []);
 ipcMain.handle("plugins:set-enabled", async (_event, id: string, enabled: boolean) => { await pluginManager?.setEnabled(id, enabled); return pluginManager?.list() || []; });
 ipcMain.handle("plugins:reload", async (_event, id: string) => { await pluginManager?.reload(id); return pluginManager?.list() || []; });
@@ -213,7 +292,7 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
   sessionStore.appendMessage(id, "user", text, undefined, undefined, attachments);
   const { workspace, config } = loadConfig(DEFAULT_WORKSPACE);
   useConfiguredModel(config, modelId);
-  const selectedReasoningEffort: ReasoningEffort = ["none", "low", "medium", "high"].includes(reasoningEffort) ? reasoningEffort : "high";
+  const selectedReasoningEffort: ReasoningEffort = ["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(reasoningEffort) ? reasoningEffort : "high";
   const audit = new AuditStore(workspace);
   let traceSequence = 0;
   const toolCalls: ToolCallRecord[] = [];

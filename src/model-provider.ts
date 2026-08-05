@@ -1,4 +1,15 @@
 import type { ChatAttachment, ReasoningEffort, SecAgentConfig } from "./types.js";
+
+function isDeepSeekV4Model(modelName: string): boolean {
+  return /^(?:deepseek-v4-flash|deepseek-v4-pro)(?:[-_].*)?$/i.test(modelName.trim());
+}
+
+function deepSeekReasoningEffort(effort: ReasoningEffort): "none" | "low" | "high" | "max" {
+  if (effort === "none") return "none";
+  if (effort === "low") return "low";
+  if (effort === "max") return "max";
+  return "high";
+}
 import type { RegisteredMcpTool } from "./mcp-adapter.js";
 import type { LoadedSkill } from "./skills.js";
 
@@ -197,7 +208,7 @@ export class ModelToolAgent {
         input,
         tools: definitions,
         max_output_tokens: this.agent.maxTokens,
-        reasoning: { effort: reasoningEffort, summary: "auto" }
+        reasoning: { effort: isDeepSeekV4Model(this.agent.model) ? deepSeekReasoningEffort(reasoningEffort) : reasoningEffort, summary: "auto" }
       }, (event) => {
         const type = typeof event.type === "string" ? event.type : "";
         if (type === "response.output_text.delta" && typeof event.delta === "string") {
@@ -318,8 +329,8 @@ export class ModelToolAgent {
 
   private googleThinkingConfig(effort: ReasoningEffort): Record<string, unknown> {
     const model = this.agent.model.toLowerCase();
-    if (model.includes("gemini-3")) return { thinkingLevel: effort === "none" ? "minimal" : effort };
-    const budget = effort === "none" ? 0 : effort === "low" ? 1024 : effort === "medium" ? 4096 : 8192;
+    if (model.includes("gemini-3")) return { thinkingLevel: effort === "none" ? "minimal" : effort === "max" || effort === "xhigh" ? "high" : effort };
+    const budget = effort === "none" ? 0 : effort === "minimal" ? 512 : effort === "low" ? 1024 : effort === "medium" ? 4096 : effort === "max" || effort === "xhigh" ? 16384 : 8192;
     return { thinkingBudget: budget, includeThoughts: true };
   }
   private async streamGoogleRequest(url: string, key: string, body: unknown, onChunk: (chunk: Record<string, unknown>) => void, completeBody: () => unknown): Promise<void> {
@@ -435,8 +446,8 @@ export class ModelToolAgent {
     if (effort === "none") return {};
     const model = this.agent.model.toLowerCase();
     const adaptive = /claude-(?:opus|sonnet|haiku)-(?:4-6|4-7|4-8|5)/.test(model);
-    if (adaptive) return { thinking: { type: "adaptive" }, output_config: { effort } };
-    const budget = effort === "low" ? 1024 : effort === "medium" ? 4096 : 8192;
+    if (adaptive) return { thinking: { type: "adaptive" }, output_config: { effort: effort === "max" || effort === "xhigh" ? "high" : effort === "minimal" ? "low" : effort } };
+    const budget = effort === "minimal" ? 512 : effort === "low" ? 1024 : effort === "medium" ? 4096 : effort === "max" || effort === "xhigh" ? 16384 : 8192;
     return { thinking: { type: "enabled", budget_tokens: Math.min(budget, Math.max(1024, this.agent.maxTokens - 1)) } };
   }
 }

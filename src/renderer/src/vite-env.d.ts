@@ -4,7 +4,7 @@ type AssistantActivity = { kind: "thinking" | "summary" | "text"; content: strin
 interface ChatAttachment { id: string; name: string; mimeType: string; dataUrl: string; size: number }
 interface SessionMessage { id: string; role: "user" | "assistant"; content: string; createdAt: string; attachments?: ChatAttachment[]; toolCalls?: ToolCallRecord[]; activities?: AssistantActivity[] }
 interface SessionData { meta: SessionMeta; messages: SessionMessage[] }
-type ReasoningEffort = "none" | "low" | "medium" | "high";
+type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 interface ModelOption { id: string; name: string; model: string; provider: string }
 interface ModelProfile { id: string; name?: string; provider: "openai-compatible" | "openai-responses" | "anthropic" | "google"; model: string; apiKeyEnv: string; apiKey?: string; apiKeyConfigured?: boolean; baseUrl: string; endpoint?: string; anthropicVersion?: string; maxTokens?: number }
 interface McpServerConfig { transport: "stdio" | "http"; command?: string; args?: string[]; url?: string; enabled: boolean }
@@ -19,6 +19,10 @@ interface Window {
     listSessions(): Promise<SessionMeta[]>;
     listModels(): Promise<ModelOption[]>;
     getSettings(): Promise<SettingsPayload>;
+    officialStatus(): Promise<{ loggedIn: boolean; email: string }>;
+    officialBalance(): Promise<{ points: number | null }>;
+    officialOAuthLogin(): Promise<SettingsPayload>;
+    officialLogout(): Promise<{ loggedIn: boolean }>;
     saveSettings(payload: SettingsPayload): Promise<SettingsPayload>;
     listSkills(): Promise<SkillSummary[]>;
     openSkillsDirectory(): Promise<string>;
