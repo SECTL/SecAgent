@@ -174,7 +174,7 @@ ipcMain.handle("models:list", async () => {
     const response = await fetch(`${baseUrl}/models`, { headers: { Authorization: `Bearer ${token}` } });
     const payload = await response.json() as { data?: Array<{ id?: string; name?: string }> };
     const remote = (payload.data || []).filter((model) => model.id).map((model) => ({ id: `official:sectl-official:${model.id}`, name: model.name || model.id || "官方模型", model: model.id || "", provider: "openai-responses" }));
-    return [...options.filter((option) => option.id !== "sectl-official"), ...remote];
+    return [...remote, ...options.filter((option) => option.id !== "sectl-official")];
   } catch { return options; }
 });
 ipcMain.handle("settings:get", () => readSettings(DEFAULT_WORKSPACE));

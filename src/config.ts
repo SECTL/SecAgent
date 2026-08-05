@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
 import { expandPath } from "./paths.js";
-import type { McpServerConfig, ModelProfile, SecAgentConfig } from "./types.js";
+import type { McpServerConfig, ModelProfile, ReasoningEffort, SecAgentConfig } from "./types.js";
 import type { GoogleModelInfo } from "./google-models.js";
 
 export const DEFAULT_GOOGLE_MODEL = "gemini-2.5-flash";
@@ -232,6 +232,8 @@ export interface SettingsPayload {
   models: Array<ModelProfile & { apiKey?: string; apiKeyConfigured?: boolean }>;
   tts: { voice: string; rate: string };
   mcp: { servers: Record<string, McpServerConfig> };
+  defaultModelId?: string;
+  defaultReasoningEffort?: ReasoningEffort;
 }
 
 export function readSettings(workspaceInput: string): SettingsPayload {
@@ -251,7 +253,7 @@ export function readSettings(workspaceInput: string): SettingsPayload {
     }];
   const google = configured.find((model) => model.provider === "google");
   const models = [...configured.filter((model) => model.provider !== "google"), ...(google ? [google] : [])];
-  return { models: models.map((model) => ({ ...model, apiKeyConfigured: Boolean(process.env[model.apiKeyEnv]) })), tts: { voice: config.tts?.voice || DEFAULT_TTS_VOICE, rate: config.tts?.rate || DEFAULT_TTS_RATE }, mcp: config.mcp };
+  return { models: models.map((model) => ({ ...model, apiKeyConfigured: Boolean(process.env[model.apiKeyEnv]) })), tts: { voice: config.tts?.voice || DEFAULT_TTS_VOICE, rate: config.tts?.rate || DEFAULT_TTS_RATE }, mcp: config.mcp, defaultModelId: config.defaults?.modelId, defaultReasoningEffort: config.defaults?.reasoningEffort };
 }
 
 export function saveSettings(workspaceInput: string, payload: SettingsPayload): SettingsPayload {
@@ -278,6 +280,7 @@ export function saveSettings(workspaceInput: string, payload: SettingsPayload): 
   raw.agent = canonicalAgent;
   raw.tts = nextTts;
   raw.mcp = payload.mcp;
+  raw.defaults = { modelId: payload.defaultModelId || undefined, reasoningEffort: payload.defaultReasoningEffort || undefined };
   delete (raw as SecAgentConfig & { policy?: unknown }).policy;
   fs.writeFileSync(file, YAML.stringify(raw), "utf8");
   return readSettings(workspace);

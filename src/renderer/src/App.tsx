@@ -1,4 +1,4 @@
-import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { ClipboardEvent as ReactClipboardEvent, DragEvent as ReactDragEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -33,6 +33,10 @@ function isDeepSeekV4Model(modelName?: string): boolean {
 function reasoningEffortsForModel(model?: ModelOption): ReasoningEffort[] {
   if (isDeepSeekV4Model(model?.model)) return ["none", "low", "high", "max"];
   return ["none", "minimal", "low", "medium", "high", "xhigh"];
+}
+
+function isOfficialModel(model: ModelOption): boolean {
+  return model.id === "sectl-official" || model.id.startsWith("official:");
 }
 
 function toolTitle(name: string): string {
@@ -215,6 +219,7 @@ function SettingsApp() {
   const bridge = window.secagent;
   const isOobe = new URLSearchParams(window.location.search).get("oobe") === "1";
   const [settings, setSettings] = useState<SettingsPayload | null>(null);
+  const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
   const [plugins, setPlugins] = useState<PluginStatus[]>([]);
   const [marketPlugins, setMarketPlugins] = useState<MarketplacePlugin[]>([]);
   const [marketError, setMarketError] = useState("");
@@ -240,6 +245,7 @@ function SettingsApp() {
       settingsLoaded.current = true;
       setSettings(value);
     }).catch((reason) => { if (!disposed) setError(String(reason)); });
+    void bridge.listModels().then(setAvailableModels).catch(() => undefined);
     return () => { disposed = true; };
   }, [bridge]);
   useEffect(() => {
@@ -283,11 +289,14 @@ function SettingsApp() {
   };
   const officialLogin = async () => {
     setError(""); setOfficialBusy(true);
-    try { const next = await bridge.officialOAuthLogin(); setSettings(next); setOfficialLoggedIn(true); setSaved(true); await refreshOfficialPoints(); }
+    try { const next = await bridge.officialOAuthLogin(); setSettings(next); setAvailableModels(await bridge.listModels()); setOfficialLoggedIn(true); setSaved(true); await refreshOfficialPoints(); }
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setOfficialBusy(false); }
   };
   const officialLogout = async () => { await bridge.officialLogout(); setOfficialLoggedIn(false); setOfficialPoints(null); setSettings((current) => current && { ...current, models: current.models.filter((model) => model.id !== "sectl-official") }); };
+  const defaultModel = availableModels.find((model) => model.id === settings.defaultModelId) || availableModels.find((model) => model.id === "sectl-official") || availableModels[0];
+  const defaultReasoningEfforts = reasoningEffortsForModel(defaultModel);
+  const defaultReasoningEffort = defaultReasoningEfforts.includes(settings.defaultReasoningEffort || "high") ? (settings.defaultReasoningEffort || "high") : defaultReasoningEfforts.includes("high") ? "high" : defaultReasoningEfforts[0];
   return <main className={`settings-shell has-window-title ${isOobe ? "oobe-shell" : ""} ${bridge.platform === "darwin" ? "macos-settings" : ""} ${bridge.platform === "win32" ? "windows-settings" : ""}`}>
     <div className="settings-window-title">SecAgent设置</div>
     {!isOobe && <nav className="settings-nav" aria-label="Settings navigation"><button type="button" className={activePage === "settings-tts" ? "active" : ""} aria-current={activePage === "settings-tts" ? "page" : undefined} onClick={() => { setActivePage("settings-tts"); window.history.replaceState(null, "", "#settings-tts"); }}>朗读</button><button type="button" className={activePage === "settings-models" ? "active" : ""} aria-current={activePage === "settings-models" ? "page" : undefined} onClick={() => { setActivePage("settings-models"); window.history.replaceState(null, "", "#settings-models"); }}>模型</button><button type="button" className={activePage === "settings-mcp" ? "active" : ""} aria-current={activePage === "settings-mcp" ? "page" : undefined} onClick={() => { setActivePage("settings-mcp"); window.history.replaceState(null, "", "#settings-mcp"); }}>MCP 服务</button><button type="button" className={activePage === "settings-plugins" ? "active" : ""} aria-current={activePage === "settings-plugins" ? "page" : undefined} onClick={() => { setActivePage("settings-plugins"); window.history.replaceState(null, "", "#settings-plugins"); }}>插件</button>{plugins.flatMap((plugin) => plugin.settingsPages.map((page) => { const pageId = `plugin-${plugin.id}-${page.id}`; return <button type="button" className={activePage === pageId ? "active" : ""} aria-current={activePage === pageId ? "page" : undefined} key={pageId} onClick={() => { setActivePage(pageId); window.history.replaceState(null, "", `#${pageId}`); }}>{page.title}</button>; }))}</nav>}
@@ -300,8 +309,7 @@ function SettingsApp() {
       <article className="settings-card"><div className="form-grid"><label>语音音色<select value={settings.tts.voice} onChange={(event) => setSettings((current) => current && { ...current, tts: { ...current.tts, voice: event.target.value } })}>{ttsVoices.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>语速<select value={settings.tts.rate} onChange={(event) => setSettings((current) => current && { ...current, tts: { ...current.tts, rate: event.target.value } })}>{ttsRates.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div></article>
     </section>
     <section id="settings-models" className={`settings-section ${isOobe || activePage === "settings-models" ? "settings-section-active" : ""}`}><div className="section-title"><div><h2>模型</h2><p>Google Gemini 填写 API Key 即可自动获取常用文本模型；模型名称可留空。</p></div><button className="secondary-button" onClick={() => setSettings((current) => current && { ...current, models: [...current.models, emptyModel()] })}>+ 添加模型</button></div>
-      <article className="settings-card official-service-card"><div className="card-heading"><strong>SecAgent 官方服务</strong>{officialLoggedIn && <button className="text-button danger" onClick={() => void officialLogout()}>退出登录</button>}</div><p>{officialLoggedIn ? `已登录 ${officialEmail} · 模型列表由后端动态获取` : "使用浏览器打开 SECTL 授权页登录，登录完成后自动返回 SecAgent。"}</p>{!officialLoggedIn && <button className="primary-button" type="button" disabled={officialBusy} onClick={() => void officialLogin()}>{officialBusy ? "等待浏览器授权…" : "打开浏览器登录 SECTL"}</button>}</article>
-      {officialLoggedIn && <article className="settings-card points-card"><div className="card-heading"><strong>账户余额</strong><button className="secondary-button" type="button" onClick={() => void refreshOfficialPoints()}>刷新余额</button></div><p className="points-value">{officialPointsBusy ? "读取中…" : officialPoints === null ? "暂不可用" : `${officialPoints.toFixed(6)} Points`}</p></article>}
+      <article className="settings-card official-service-card"><div className="card-heading"><strong>SecAgent 官方服务</strong>{officialLoggedIn && <button className="text-button danger" onClick={() => void officialLogout()}>退出登录</button>}</div><p>{officialLoggedIn ? `已登录 ${officialEmail} · 模型列表由后端动态获取` : "使用浏览器打开 SECTL 授权页登录，登录完成后自动返回 SecAgent。"}</p>{!officialLoggedIn && <button className="primary-button" type="button" disabled={officialBusy} onClick={() => void officialLogin()}>{officialBusy ? "等待浏览器授权…" : "打开浏览器登录 SECTL"}</button>}{officialLoggedIn && <div className="official-balance-row"><span>账户余额</span><strong className="points-value">{officialPointsBusy ? "读取中…" : officialPoints === null ? "暂不可用" : `${officialPoints.toFixed(6)} Points`}</strong><button className="secondary-button" type="button" onClick={() => void refreshOfficialPoints()}>刷新余额</button></div>}<div className="default-model-settings"><label>默认模型<select value={settings.defaultModelId || defaultModel?.id || ""} onChange={(event) => setSettings((current) => current && { ...current, defaultModelId: event.target.value })}>{availableModels.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label><label>默认思考强度<select value={defaultReasoningEffort} onChange={(event) => setSettings((current) => current && { ...current, defaultReasoningEffort: event.target.value as ReasoningEffort })}>{defaultReasoningEfforts.map((effort) => <option key={effort} value={effort}>{reasoningEffortLabels[effort]}</option>)}</select></label></div></article>
       <div className="settings-cards">{settings.models.map((model, index) => <article className="settings-card" key={model.id}>
         <div className="card-heading"><strong>{model.name || model.model || "未命名模型"}</strong>{settings.models.length > 1 && <button className="text-button danger" onClick={() => setSettings((current) => current && { ...current, models: current.models.filter((_, item) => item !== index) })}>删除</button>}</div>
         <div className="form-grid"><label>显示名称<input value={model.name || ""} onChange={(event) => updateModel(index, { name: event.target.value })} /></label><label>模型 ID<input value={model.id} onChange={(event) => updateModel(index, { id: event.target.value })} /></label><label>协议<select value={model.provider} onChange={(event) => selectProvider(index, event.target.value as ModelProfile["provider"])}><option value="openai-responses">OpenAI Responses</option><option value="openai-compatible">OpenAI Chat 兼容</option><option value="anthropic">Anthropic</option><option value="google">Google Gemini</option></select></label><label>{model.provider === "google" ? "模型名称（可选，留空自动获取）" : "模型名称"}<input value={model.model} placeholder={model.provider === "google" ? "保存后自动使用可用 Gemini 文本模型" : ""} onChange={(event) => updateModel(index, { model: event.target.value })} /></label><label>{model.provider === "google" ? "Google AI Studio API Key" : "API Key"}<input type="password" placeholder={model.apiKeyConfigured ? "已配置（留空则保持不变）" : "粘贴你的 key"} value={model.apiKey || ""} onChange={(event) => updateModel(index, { apiKey: event.target.value })} /></label><label>API Key 环境变量<input value={model.apiKeyEnv} onChange={(event) => updateModel(index, { apiKeyEnv: event.target.value })} /></label><label>Base URL<input value={model.baseUrl} onChange={(event) => updateModel(index, { baseUrl: event.target.value })} /></label><label>Endpoint<input value={model.endpoint || ""} onChange={(event) => updateModel(index, { endpoint: event.target.value })} /></label><label>最大 Tokens<input type="number" min="1" value={model.maxTokens || 16384} onChange={(event) => updateModel(index, { maxTokens: Number(event.target.value) })} /></label></div>
@@ -396,6 +404,7 @@ export function App() {
   const answerScrollLockTimer = useRef<number | undefined>(undefined);
   const answerStartScrollPending = useRef(false);
   const modelMenuEnd = useRef<HTMLDivElement>(null);
+  const orderedModels = useMemo(() => [...models.filter(isOfficialModel), ...models.filter((model) => !isOfficialModel(model))], [models]);
   const selectedModel = models.find((model) => model.id === selectedModelId);
   const reasoningEfforts = useMemo(() => reasoningEffortsForModel(selectedModel), [selectedModel]);
   useEffect(() => {
@@ -415,8 +424,10 @@ export function App() {
     void (async () => {
       const [list, configured] = await Promise.all([bridge.listSessions(), bridge.listModels()]);
       const active = list[0] ? await bridge.getSession(list[0].id) : await bridge.createSession();
+      const savedSettings = await bridge.getSettings();
       setModels(configured);
-      setSelectedModelId(configured[0]?.id || "");
+      setSelectedModelId(configured.find((model) => model.id === savedSettings.defaultModelId)?.id || configured[0]?.id || "");
+      setReasoningEffort(savedSettings.defaultReasoningEffort || "high");
       setSessions(await bridge.listSessions());
       setSession(active);
     })();
@@ -427,7 +438,10 @@ export function App() {
     return bridge.onSettingsChanged(() => {
       void bridge.listModels().then((models) => {
         setModels(models);
-        setSelectedModelId((current) => models.some((model) => model.id === current) ? current : models[0]?.id || "");
+        void bridge.getSettings().then((settings) => {
+          setSelectedModelId((current) => models.some((model) => model.id === (settings.defaultModelId || current)) ? (settings.defaultModelId || current) : models[0]?.id || "");
+          setReasoningEffort(settings.defaultReasoningEffort || "high");
+        });
       });
     });
   }, [bridge]);
@@ -796,7 +810,7 @@ export function App() {
             </button>
             {modelMenuOpen && <div className="model-options" role="menu">
               <button type="button" className={`model-setting-row ${modelSubmenu === "model" ? "selected" : ""}`} onClick={() => setModelSubmenu((current) => current === "model" ? null : "model")}><span>模型</span><span className="model-setting-value">{selectedModel?.name || "未配置模型"}<span className="model-row-chevron">›</span></span></button>
-              {modelSubmenu === "model" && <div className="model-submenu" role="listbox">{models.map((model) => <button type="button" className={`model-option ${model.id === selectedModelId ? "selected" : ""}`} role="option" aria-selected={model.id === selectedModelId} key={model.id} onClick={() => { setSelectedModelId(model.id); setModelSubmenu(null); }}>{model.name}</button>)}</div>}
+              {modelSubmenu === "model" && <div className="model-submenu" role="listbox">{orderedModels.map((model, index) => <Fragment key={model.id}>{index > 0 && isOfficialModel(orderedModels[index - 1]) !== isOfficialModel(model) && <div className="model-divider" role="separator" /> }<button type="button" className={`model-option ${model.id === selectedModelId ? "selected" : ""}`} role="option" aria-selected={model.id === selectedModelId} onClick={() => { setSelectedModelId(model.id); setModelSubmenu(null); }}>{model.name}</button></Fragment>)}</div>}
               <button type="button" className={`model-setting-row ${modelSubmenu === "effort" ? "selected" : ""}`} onClick={() => setModelSubmenu((current) => current === "effort" ? null : "effort")}><span>推理强度</span><span className="model-setting-value">{reasoningEffortLabels[reasoningEffort]}<span className="model-row-chevron">›</span></span></button>
               {modelSubmenu === "effort" && <div className="model-submenu" role="listbox">{reasoningEfforts.map((effort) => <button type="button" className={`model-option ${effort === reasoningEffort ? "selected" : ""}`} role="option" aria-selected={effort === reasoningEffort} key={effort} onClick={() => { setReasoningEffort(effort); setModelSubmenu(null); }}>{reasoningEffortLabels[effort]}</button>)}</div>}
             </div>}
