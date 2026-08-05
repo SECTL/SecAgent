@@ -254,6 +254,10 @@ export class ModelToolAgent {
             if (item.type === "function_call" && item.call_id && item.name) calls.set(item.call_id, { callId: item.call_id, name: item.name, arguments: item.arguments || "" });
           }
         }
+        if (type === "response.failed") {
+          const failed = event.response as { error?: { message?: string; code?: string } } | undefined;
+          throw new Error(failed?.error?.message || "妯″瀷璇锋眰澶辫触");
+        }
       }, () => ({ output: [{ type: "message", content: answer || undefined }, ...[...calls.values()].map((call) => ({ type: "function_call", call_id: call.callId, name: call.name, arguments: call.arguments }))] }));
       const functionCalls = [...calls.values()].filter((call) => call.name && call.callId);
       if (!functionCalls.length) return answer.trim() || "已完成。";
