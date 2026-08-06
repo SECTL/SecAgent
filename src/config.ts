@@ -235,7 +235,7 @@ export function useConfiguredModel(config: SecAgentConfig, id?: string): void {
   const dynamicModel = separator > 0 ? id.slice(separator + 1) : undefined;
   const profileId = separator > 0 ? id.slice(dynamicPrefix.length, separator) : id.split("#")[0];
   const profileIndex = id.includes("#") ? Number(id.slice(id.indexOf("#") + 1)) : 0;
-  const selected = config.agent.models.find((model) => model.id === profileId) ?? (id === "default" ? config.agent.models[0] : undefined);
+  const selected = config.agent.models.find((model) => model.id === profileId) ?? (profileId ? config.agent.models.find((model) => model.id.startsWith(`${profileId}:`)) : undefined) ?? (id === "default" ? config.agent.models[0] : undefined);
   if (!selected) throw new Error(`未找到配置模型：${id}`);
   const selectedModels = commaValues(selected.model);
   config.agent = { ...config.agent, ...selected, model: dynamicModel || selectedModels[profileIndex] || selectedModels[0] || DEFAULT_GOOGLE_MODEL, maxTokens: selected.maxTokens || config.agent.maxTokens, systemPrompt: config.agent.systemPrompt, models: config.agent.models };

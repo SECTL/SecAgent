@@ -163,14 +163,24 @@ ipcMain.handle("sessions:list", () => { logMain("ipc.sessions.list"); return sto
 ipcMain.handle("sessions:create", () => { const session = store().create(); logMain("ipc.sessions.create", { sessionId: session.meta.id }); return session; });
 ipcMain.handle("sessions:delete", (_event, id: string) => { store().delete(id); logMain("ipc.sessions.delete", { sessionId: id }); return store().list(); });
 ipcMain.handle("sessions:get", (_event, id: string) => { logMain("ipc.sessions.get", { sessionId: id }); return store().get(id); });
+function officialProvider(baseUrl: string) {
+  return { id: "sectl-official", name: "SecAgent 官方服务", preset: "custom", provider: "openai-responses" as const, apiKeyEnv: "SECTL_OFFICIAL_TOKEN", baseUrl: `${baseUrl}/v1`, endpoint: "/responses", maxTokens: 16384, models: [{ id: "deepseek-v4-flash", name: "DeepSeek V4 Flash" }] };
+}
+
 ipcMain.handle("models:list", async () => {
   const { config } = loadConfig(DEFAULT_WORKSPACE);
   const googleProfile = config.agent.models?.find((model) => model.provider === "google");
   const googleModels = googleProfile ? await listGoogleModels(process.env[googleProfile.apiKeyEnv] || "", googleProfile.baseUrl).catch(() => []) : [];
-  const options = configuredModels(config, googleModels).filter((option) => option.id !== "sectl-official");
+  const options = configuredModels(config, googleModels).filter((option) => option.id !== "sectl-official" && !option.id.startsWith("sectl-official:"));
   const token = process.env.SECTL_OFFICIAL_TOKEN;
   const baseUrl = (process.env.SECTL_OFFICIAL_API_URL || "").replace(/\/$/, "");
-  if (!token || !baseUrl || !config.agent.models?.some((model) => model.id === "sectl-official")) return options;
+  if (!token || !baseUrl) return options;
+  try {
+    const current = readSettings(DEFAULT_WORKSPACE);
+    if (!current.providers.some((provider) => provider.id === "sectl-official")) {
+      saveSettings(DEFAULT_WORKSPACE, { ...current, providers: [...current.providers, officialProvider(baseUrl)] });
+    }
+  } catch { /* 自愈失败不阻塞模型列表 */ }
   try {
     const response = await fetch(`${baseUrl}/models`, { headers: { Authorization: `Bearer ${token}` } });
     const payload = await response.json() as { data?: Array<{ id?: string; name?: string }> };
@@ -226,8 +236,8 @@ ipcMain.handle("official:login", async (_event, email: string, password: string)
   writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_TOKEN", payload.access_token);
   writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_EMAIL", payload.user?.email || email);
   const current = readSettings(DEFAULT_WORKSPACE);
-  const models = current.models.some((model) => model.id === "sectl-official") ? current.models : [...current.models, { id: "sectl-official", name: "SecAgent 官方服务", provider: "openai-responses" as const, model: "deepseek-v4-flash", apiKeyEnv: "SECTL_OFFICIAL_TOKEN", baseUrl: `${baseUrl}/v1`, endpoint: "/responses", maxTokens: 16384 }];
-  return saveSettings(DEFAULT_WORKSPACE, { ...current, models });
+  const providers = current.providers.some((provider) => provider.id === "sectl-official") ? current.providers : [...current.providers, officialProvider(baseUrl)];
+  return saveSettings(DEFAULT_WORKSPACE, { ...current, providers });
 });
 ipcMain.handle("official:oauth-login", async () => {
   loadConfig(DEFAULT_WORKSPACE);
@@ -269,8 +279,8 @@ ipcMain.handle("official:oauth-login", async () => {
   writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_TOKEN", relayPayload.access_token);
   writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_EMAIL", relayPayload.user?.email || "SECTL 用户");
   const current = readSettings(DEFAULT_WORKSPACE);
-  const models = current.models.some((model) => model.id === "sectl-official") ? current.models : [...current.models, { id: "sectl-official", name: "SecAgent 官方服务", provider: "openai-responses" as const, model: "deepseek-v4-flash", apiKeyEnv: "SECTL_OFFICIAL_TOKEN", baseUrl: `${relayUrl}/v1`, endpoint: "/responses", maxTokens: 16384 }];
-  return saveSettings(DEFAULT_WORKSPACE, { ...current, models });
+  const providers = current.providers.some((provider) => provider.id === "sectl-official") ? current.providers : [...current.providers, officialProvider(relayUrl)];
+  return saveSettings(DEFAULT_WORKSPACE, { ...current, providers });
 });
 ipcMain.handle("official:logout", () => { loadConfig(DEFAULT_WORKSPACE); writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_TOKEN", ""); writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_EMAIL", ""); return { loggedIn: false }; });
 ipcMain.handle("plugins:list", () => pluginManager?.list() || []);
