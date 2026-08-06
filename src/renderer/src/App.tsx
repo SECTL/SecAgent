@@ -2,7 +2,7 @@ import { Fragment, FormEvent, useEffect, useMemo, useRef, useState } from "react
 import type { ClipboardEvent as ReactClipboardEvent, DragEvent as ReactDragEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { LoaderCircle, Volume2 } from "lucide-react";
+import { ArrowUp, LoaderCircle, Volume2 } from "lucide-react";
 import { SettingsApp } from "./components/SettingsApp.js";
 import { MessageActivities } from "./components/MessageActivities.js";
 import { AttachmentStrip } from "./components/AttachmentStrip.js";
@@ -48,6 +48,7 @@ export function App() {
     if (!reasoningEfforts.includes(reasoningEffort)) setReasoningEffort("high");
   }, [reasoningEffort, reasoningEfforts]);
   const initializing = useRef(false);
+  const formRef = useRef<HTMLFormElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<{ context: AudioContext; stream: MediaStream; source: MediaStreamAudioSourceNode; processor: ScriptProcessorNode } | undefined>(undefined);
@@ -67,6 +68,7 @@ export function App() {
       setReasoningEffort(savedSettings.defaultReasoningEffort || "high");
       setSessions(await bridge.listSessions());
       setSession(active);
+      requestAnimationFrame(() => textareaRef.current?.focus());
     })();
   }, [bridge]);
 
@@ -263,7 +265,7 @@ export function App() {
   }, [activeTrace]);
   const latestAssistantId = useMemo(() => session?.messages.filter((message) => message.role === "assistant").at(-1)?.id, [session?.messages]);
   const changeSession = async (id: string) => { if (bridge) { setSession(await bridge.getSession(id)); setTrace([]); } };
-  const createSession = async () => { if (bridge) { const next = await bridge.createSession(); setSessions(await bridge.listSessions()); setSession(next); setTrace([]); } };
+  const createSession = async () => { if (bridge) { const next = await bridge.createSession(); setSessions(await bridge.listSessions()); setSession(next); setTrace([]); requestAnimationFrame(() => textareaRef.current?.focus()); } };
   const deleteSession = async (id: string) => {
     if (!bridge) return;
     const remaining = await bridge.deleteSession(id);
@@ -437,9 +439,9 @@ export function App() {
           {sending && !finishing && <article className="message assistant"><div className="message-content"><div className="message-meta">SecAgent · 正在生成</div><MessageActivities activities={traceActivities} elapsedSeconds={executionSeconds} isExecuting activeStepKind={activeStepKind} summaryRef={executionSummaryRef} /><div className="bubble-row"><div className="avatar"><img src="/icon.svg" alt="SecAgent" /></div><div className="bubble loading markdown-bubble">{streamingOutput ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingOutput}</ReactMarkdown> : "正在调用模型与工具…"}</div></div></div></article>}
           <div />
         </div>
-        <form className={`composer ${composerDragging ? "dragging" : ""}`} onSubmit={send} onClick={(event) => { if ((event.target as Element).closest('.icon-button img[src="/image-icon.svg"]')) fileInputRef.current?.click(); }} onPaste={handlePaste} onDragEnter={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); setComposerDragging(true); } }} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setComposerDragging(false); }} onDrop={handleDrop}><input ref={fileInputRef} className="visually-hidden" type="file" accept="image/*" multiple onChange={(event) => { void addImageFiles(event.target.files || []); event.target.value = ""; }} />{attachments.length > 0 && <div className="composer-attachments"><AttachmentStrip attachments={attachments} removable onRemove={(id) => setAttachments((current) => current.filter((attachment) => attachment.id !== id))} /></div>}{attachmentError && <div className="attachment-error">{attachmentError}</div>}
+        <form ref={formRef} className={`composer ${composerDragging ? "dragging" : ""}`} onSubmit={send} onClick={(event) => { if ((event.target as Element).closest('.icon-button img[src="/image-icon.svg"]')) fileInputRef.current?.click(); }} onPaste={handlePaste} onDragEnter={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); setComposerDragging(true); } }} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setComposerDragging(false); }} onDrop={handleDrop}><input ref={fileInputRef} className="visually-hidden" type="file" accept="image/*" multiple onChange={(event) => { void addImageFiles(event.target.files || []); event.target.value = ""; }} />{attachments.length > 0 && <div className="composer-attachments"><AttachmentStrip attachments={attachments} removable onRemove={(id) => setAttachments((current) => current.filter((attachment) => attachment.id !== id))} /></div>}{attachmentError && <div className="attachment-error">{attachmentError}</div>}
           <div className="composer-actions"><button type="button" className="icon-button" aria-label="添加图片"><img className="composer-icon" src="/image-icon.svg" alt="" /></button><button type="button" className={`icon-button mic-button ${recording ? "recording" : ""}`} aria-label={recording ? "停止语音输入" : "语音输入"} aria-pressed={recording} onClick={() => void toggleRecording()}><img className="composer-icon" src="/mic-icon.svg" alt="" /></button></div>
-          <textarea ref={textareaRef} value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={speechStatus || "问任何问题..."} rows={1} readOnly={recording} disabled={!session || sending} />
+          <textarea ref={textareaRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && !event.currentTarget.readOnly) { event.preventDefault(); formRef.current?.requestSubmit(); } }} placeholder={speechStatus || "问任何问题..."} rows={1} readOnly={recording} disabled={!session || sending} />
           <div className="model-menu" ref={modelMenuEnd}>
             <button type="button" className="model-picker" aria-label="选择模型和推理强度" aria-expanded={modelMenuOpen} onClick={() => { setModelMenuOpen((open) => !open); setModelSubmenu(null); }}>
               <span className="model-picker-copy"><strong>{selectedModel?.name || "未配置模型"}</strong><small>推理强度 · {reasoningEffortLabels[reasoningEffort]}</small></span>
@@ -452,7 +454,7 @@ export function App() {
               {modelSubmenu === "effort" && <div className="model-submenu" role="listbox">{reasoningEfforts.map((effort) => <button type="button" className={`model-option ${effort === reasoningEffort ? "selected" : ""}`} role="option" aria-selected={effort === reasoningEffort} key={effort} onClick={() => { setReasoningEffort(effort); setModelSubmenu(null); }}>{reasoningEffortLabels[effort]}</button>)}</div>}
             </div>}
           </div>
-          <button className="send-button" type="submit" aria-label="发送" disabled={!draft.trim() || !session || sending}>↑</button>
+          <button className="send-button" type="submit" aria-label="发送" disabled={!draft.trim() || !session || sending}><ArrowUp aria-hidden="true" /></button>
         </form>
       </section>
       <aside className="trace-panel">
