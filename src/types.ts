@@ -9,6 +9,7 @@ export interface McpServerConfig {
 export interface ModelProfile {
   id: string;
   name?: string;
+  enabled?: boolean;
   provider: "openai-compatible" | "openai-responses" | "anthropic" | "google";
   model: string;
   apiKeyEnv: string;
@@ -28,7 +29,7 @@ export interface ProviderConfig {
   endpoint?: string;
   anthropicVersion?: string;
   maxTokens?: number;
-  models: Array<{ id: string; name?: string }>;
+  models: Array<{ id: string; name?: string; enabled?: boolean }>;
 }
 
 export interface AgentConfig {

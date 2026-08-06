@@ -196,7 +196,8 @@ button { appearance: none; }
 .provider-list-item .card-heading span { color: #999; font-size: 12px; }
 .provider-list-item.single-model .card-heading { margin-bottom: 0; }
 .provider-model-editor { margin-top: 20px; padding-top: 16px; border-top: 1px solid #e5e5e5; }
-.provider-model-row { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(140px, 1fr) auto; align-items: center; gap: 8px; margin-top: 8px; }
+.provider-model-row { display: grid; grid-template-columns: auto minmax(120px, 1fr) minmax(140px, 1fr) auto; align-items: center; gap: 8px; margin-top: 8px; }
+.provider-model-row > input[type="checkbox"] { width: 15px; height: 15px; margin: 0; cursor: pointer; }
 .provider-model-row code { overflow: hidden; color: #888; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .settings-section#settings-models > .section-title > button { display: none; }
 .provider-list { gap: 0; padding: 0; overflow: hidden; border: 1px solid #e3e3e3; border-radius: 12px; background: #fff; }

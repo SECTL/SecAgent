@@ -116,6 +116,7 @@ export function normalizeAndValidate(raw: SecAgentConfig, workspace: string): Se
     raw.agent.models = raw.agent.providers.flatMap((provider) => provider.models.map((model) => ({
       id: `${provider.id}:${model.id}`,
       name: model.name || model.id,
+      enabled: model.enabled,
       provider: provider.provider,
       model: model.id,
       apiKeyEnv: provider.apiKeyEnv,
@@ -206,6 +207,7 @@ export function configuredModels(config: SecAgentConfig, googleModels: GoogleMod
   const options: ModelOption[] = [];
   let googleSeen = false;
   for (const profile of profiles) {
+    if (profile.enabled === false) continue;
     if (profile.provider === "google" && googleSeen) continue;
     if (profile.provider === "google") googleSeen = true;
     const configuredNames = commaValues(profile.name);
@@ -293,7 +295,7 @@ export function saveSettings(workspaceInput: string, payload: SettingsPayload): 
     if (typeof apiKey === "string" && apiKey.trim()) writeWorkspaceEnv(workspace, provider.apiKeyEnv, apiKey.trim());
     return provider;
   });
-  const models = providers.flatMap((provider) => provider.models.map((model) => ({ id: `${provider.id}:${model.id}`, name: model.name || model.id, provider: provider.provider, model: model.id, apiKeyEnv: provider.apiKeyEnv, baseUrl: provider.baseUrl, endpoint: provider.endpoint, anthropicVersion: provider.anthropicVersion, maxTokens: provider.maxTokens })));
+  const models = providers.flatMap((provider) => provider.models.map((model) => ({ id: `${provider.id}:${model.id}`, name: model.name || model.id, enabled: model.enabled, provider: provider.provider, model: model.id, apiKeyEnv: provider.apiKeyEnv, baseUrl: provider.baseUrl, endpoint: provider.endpoint, anthropicVersion: provider.anthropicVersion, maxTokens: provider.maxTokens })));
   const nextTts = { voice: payload.tts?.voice || DEFAULT_TTS_VOICE, rate: payload.tts?.rate || DEFAULT_TTS_RATE };
   const canonicalAgent = { ...(raw.agent as unknown as Record<string, unknown>), providers, models } as SecAgentConfig["agent"];
   for (const field of LEGACY_AGENT_MODEL_FIELDS) delete (canonicalAgent as unknown as Record<string, unknown>)[field];
