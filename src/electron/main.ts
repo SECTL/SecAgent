@@ -167,7 +167,7 @@ ipcMain.handle("models:list", async () => {
   const { config } = loadConfig(DEFAULT_WORKSPACE);
   const googleProfile = config.agent.models?.find((model) => model.provider === "google");
   const googleModels = googleProfile ? await listGoogleModels(process.env[googleProfile.apiKeyEnv] || "", googleProfile.baseUrl).catch(() => []) : [];
-  const options = configuredModels(config, googleModels);
+  const options = configuredModels(config, googleModels).filter((option) => option.id !== "sectl-official");
   const token = process.env.SECTL_OFFICIAL_TOKEN;
   const baseUrl = (process.env.SECTL_OFFICIAL_API_URL || "").replace(/\/$/, "");
   if (!token || !baseUrl || !config.agent.models?.some((model) => model.id === "sectl-official")) return options;
@@ -175,7 +175,7 @@ ipcMain.handle("models:list", async () => {
     const response = await fetch(`${baseUrl}/models`, { headers: { Authorization: `Bearer ${token}` } });
     const payload = await response.json() as { data?: Array<{ id?: string; name?: string }> };
     const remote = (payload.data || []).filter((model) => model.id).map((model) => ({ id: `official:sectl-official:${model.id}`, name: model.name || model.id || "官方模型", model: model.id || "", provider: "openai-responses" }));
-    return [...remote, ...options.filter((option) => option.id !== "sectl-official")];
+    return [...remote, ...options];
   } catch { return options; }
 });
 ipcMain.handle("providers:list", async () => {
