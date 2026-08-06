@@ -194,6 +194,7 @@ button { appearance: none; }
 .provider-list-item .card-heading { align-items: center; }
 .provider-list-item .card-heading > div:first-child { display: grid; gap: 5px; }
 .provider-list-item .card-heading span { color: #999; font-size: 12px; }
+.provider-list-item.single-model .card-heading { margin-bottom: 0; }
 .provider-model-editor { margin-top: 20px; padding-top: 16px; border-top: 1px solid #e5e5e5; }
 .provider-model-row { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(140px, 1fr) auto; align-items: center; gap: 8px; margin-top: 8px; }
 .provider-model-row code { overflow: hidden; color: #888; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
