@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@andresaya/edge-tts": "^1.8.0",
+    "@opencode-ai/models": "^0.0.35",
     "adm-zip": "^0.5.18",
     "lucide-react": "^0.468.0",
     "react": "^19.2.8",

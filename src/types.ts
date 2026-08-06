@@ -18,6 +18,19 @@ export interface ModelProfile {
   maxTokens?: number;
 }
 
+export interface ProviderConfig {
+  id: string;
+  name: string;
+  preset?: string;
+  provider: ModelProfile["provider"];
+  apiKeyEnv: string;
+  baseUrl: string;
+  endpoint?: string;
+  anthropicVersion?: string;
+  maxTokens?: number;
+  models: Array<{ id: string; name?: string }>;
+}
+
 export interface AgentConfig {
   provider: "openai-compatible" | "openai-responses" | "anthropic" | "google";
   model: string;
@@ -28,6 +41,7 @@ export interface AgentConfig {
   maxTokens: number;
   systemPrompt: string;
   models?: ModelProfile[];
+  providers?: ProviderConfig[];
 }
 
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";

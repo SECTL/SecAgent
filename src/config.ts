@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
 import { expandPath } from "./paths.js";
-import type { McpServerConfig, ModelProfile, ReasoningEffort, SecAgentConfig } from "./types.js";
+import type { McpServerConfig, ModelProfile, ProviderConfig, ReasoningEffort, SecAgentConfig } from "./types.js";
 import type { GoogleModelInfo } from "./google-models.js";
 
 export const DEFAULT_GOOGLE_MODEL = "gemini-2.5-flash";
@@ -112,6 +112,19 @@ export function normalizeAndValidate(raw: SecAgentConfig, workspace: string): Se
   if (raw?.version !== 1) errors.push("version 必须为 1");
   // Multi-model configuration is canonical. Populate the legacy top-level fields in memory
   // so the runtime can keep using one normalized AgentConfig shape.
+  if (raw?.agent?.providers?.length) {
+    raw.agent.models = raw.agent.providers.flatMap((provider) => provider.models.map((model) => ({
+      id: `${provider.id}:${model.id}`,
+      name: model.name || model.id,
+      provider: provider.provider,
+      model: model.id,
+      apiKeyEnv: provider.apiKeyEnv,
+      baseUrl: provider.baseUrl,
+      endpoint: provider.endpoint,
+      anthropicVersion: provider.anthropicVersion,
+      maxTokens: provider.maxTokens
+    })));
+  }
   if (raw?.agent?.models?.length) {
     const first = raw.agent.models[0];
     raw.agent = {
@@ -229,6 +242,8 @@ export function useConfiguredModel(config: SecAgentConfig, id?: string): void {
 }
 
 export interface SettingsPayload {
+  providers: Array<ProviderConfig & { apiKey?: string; apiKeyConfigured?: boolean }>;
+  /** Compatibility field for older IPC callers; the settings UI uses providers. */
   models: Array<ModelProfile & { apiKey?: string; apiKeyConfigured?: boolean }>;
   tts: { voice: string; rate: string };
   mcp: { servers: Record<string, McpServerConfig> };
@@ -251,25 +266,36 @@ export function readSettings(workspaceInput: string): SettingsPayload {
       anthropicVersion: config.agent.anthropicVersion,
       maxTokens: config.agent.maxTokens
     }];
-  const google = configured.find((model) => model.provider === "google");
-  const models = [...configured.filter((model) => model.provider !== "google"), ...(google ? [google] : [])];
-  return { models: models.map((model) => ({ ...model, apiKeyConfigured: Boolean(process.env[model.apiKeyEnv]) })), tts: { voice: config.tts?.voice || DEFAULT_TTS_VOICE, rate: config.tts?.rate || DEFAULT_TTS_RATE }, mcp: config.mcp, defaultModelId: config.defaults?.modelId, defaultReasoningEffort: config.defaults?.reasoningEffort };
+  const providers = config.agent.providers?.length ? config.agent.providers : groupLegacyModels(configured);
+  return { providers: providers.map((provider) => ({ ...provider, apiKeyConfigured: Boolean(process.env[provider.apiKeyEnv]) })), models: configured.map((model) => ({ ...model, apiKeyConfigured: Boolean(process.env[model.apiKeyEnv]) })), tts: { voice: config.tts?.voice || DEFAULT_TTS_VOICE, rate: config.tts?.rate || DEFAULT_TTS_RATE }, mcp: config.mcp, defaultModelId: config.defaults?.modelId, defaultReasoningEffort: config.defaults?.reasoningEffort };
+}
+
+function groupLegacyModels(models: ModelProfile[]): ProviderConfig[] {
+  const groups = new Map<string, ProviderConfig>();
+  for (const model of models) {
+    const id = model.id.includes(":") ? model.id.split(":")[0] : model.id;
+    const existing = groups.get(id);
+    const provider = existing || { id, name: model.name || id, provider: model.provider, apiKeyEnv: model.apiKeyEnv, baseUrl: model.baseUrl, endpoint: model.endpoint, anthropicVersion: model.anthropicVersion, maxTokens: model.maxTokens, models: [] };
+    provider.models.push({ id: model.model, name: model.name || model.model });
+    groups.set(id, provider);
+  }
+  return [...groups.values()];
 }
 
 export function saveSettings(workspaceInput: string, payload: SettingsPayload): SettingsPayload {
   const workspace = expandPath(workspaceInput);
   const file = configPath(workspace);
   const raw = YAML.parse(fs.readFileSync(file, "utf8")) as SecAgentConfig;
-  if (!payload || !Array.isArray(payload.models) || !payload.models.length) throw new Error("至少需要配置一个模型");
+  const inputProviders: Array<ProviderConfig & { apiKey?: string; apiKeyConfigured?: boolean }> = Array.isArray(payload?.providers) && payload.providers.length ? payload.providers : groupLegacyModels(payload?.models || []);
+  if (!inputProviders.length) throw new Error("至少需要配置一个提供商");
   if (!payload.mcp?.servers || typeof payload.mcp.servers !== "object") throw new Error("MCP 服务配置无效");
-  const google = payload.models.find((model) => model.provider === "google");
-  const editableModels = [...payload.models.filter((model) => model.provider !== "google"), ...(google ? [google] : [])];
-  const models = editableModels.map(({ apiKey, apiKeyConfigured: _apiKeyConfigured, ...model }) => {
-    if (typeof apiKey === "string" && apiKey.trim()) writeWorkspaceEnv(workspace, model.apiKeyEnv, apiKey.trim());
-    return model;
+  const providers = inputProviders.map(({ apiKey, apiKeyConfigured: _apiKeyConfigured, ...provider }) => {
+    if (typeof apiKey === "string" && apiKey.trim()) writeWorkspaceEnv(workspace, provider.apiKeyEnv, apiKey.trim());
+    return provider;
   });
+  const models = providers.flatMap((provider) => provider.models.map((model) => ({ id: `${provider.id}:${model.id}`, name: model.name || model.id, provider: provider.provider, model: model.id, apiKeyEnv: provider.apiKeyEnv, baseUrl: provider.baseUrl, endpoint: provider.endpoint, anthropicVersion: provider.anthropicVersion, maxTokens: provider.maxTokens })));
   const nextTts = { voice: payload.tts?.voice || DEFAULT_TTS_VOICE, rate: payload.tts?.rate || DEFAULT_TTS_RATE };
-  const canonicalAgent = { ...(raw.agent as unknown as Record<string, unknown>), models } as SecAgentConfig["agent"];
+  const canonicalAgent = { ...(raw.agent as unknown as Record<string, unknown>), providers, models } as SecAgentConfig["agent"];
   for (const field of LEGACY_AGENT_MODEL_FIELDS) delete (canonicalAgent as unknown as Record<string, unknown>)[field];
   const candidateAgent = { ...canonicalAgent, models: models.map((model) => ({ ...model })) } as SecAgentConfig["agent"];
   const candidate: SecAgentConfig = { ...raw, agent: candidateAgent, tts: nextTts, mcp: payload.mcp };

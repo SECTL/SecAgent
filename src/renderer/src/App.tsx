@@ -44,6 +44,7 @@ function toolTitle(name: string): string {
 }
 
 const emptyModel = (): ModelProfile => ({ id: `model-${Date.now()}`, name: "新模型", provider: "openai-compatible", model: "", apiKeyEnv: "OPENAI_API_KEY", baseUrl: "https://api.openai.com/v1", endpoint: "/chat/completions", maxTokens: 16384 });
+const emptyProvider = (): ProviderConfig => ({ id: `provider-${Date.now()}`, name: "新提供商", preset: "custom", provider: "openai-compatible", apiKeyEnv: "CUSTOM_API_KEY", baseUrl: "https://api.example.com/v1", endpoint: "/chat/completions", maxTokens: 16384, models: [] });
 const emptyMcp = (): McpServerConfig => ({ transport: "http", url: "http://127.0.0.1:3901/mcp", enabled: true });
 const ttsVoices = [
   ["zh-CN-XiaoxiaoNeural", "晓晓（女声，自然）"],
@@ -215,11 +216,23 @@ function PluginSettingsPanel({
   </div>;
 }
 
+function PresetCombobox({ value, presets, onSelect }: { value: string; presets: ProviderPreset[]; onSelect: (id: string) => void }) {
+  const selected = presets.find((preset) => preset.id === value);
+  const [query, setQuery] = useState(selected?.name || (value === "custom" ? "自定义" : value));
+  const [open, setOpen] = useState(false);
+  const filtered = presets.filter((preset) => `${preset.name} ${preset.id}`.toLowerCase().includes(query.trim().toLowerCase()));
+  useEffect(() => { setQuery(selected?.name || (value === "custom" ? "自定义" : value)); }, [value, selected?.name]);
+  return <div className="preset-combobox"><input value={query} placeholder="搜索提供商预设" onFocus={() => setOpen(true)} onChange={(event) => { setQuery(event.target.value); setOpen(true); }} onKeyDown={(event) => { if (event.key === "Escape") setOpen(false); if (event.key === "Enter" && filtered[0]) { onSelect(filtered[0].id); setOpen(false); } }} /><button type="button" className="preset-combobox-toggle" onClick={() => setOpen((current) => !current)}>⌄</button>{open && <div className="preset-combobox-options"><button type="button" onClick={() => { onSelect("custom"); setOpen(false); }}>自定义</button>{filtered.map((preset) => <button type="button" key={preset.id} onClick={() => { onSelect(preset.id); setOpen(false); }}><strong>{preset.name}</strong><small>{preset.id}</small></button>)}{filtered.length === 0 && <span className="preset-combobox-empty">没有匹配的预设</span>}</div>}</div>;
+}
+
 function SettingsApp() {
   const bridge = window.secagent;
   const isOobe = new URLSearchParams(window.location.search).get("oobe") === "1";
   const [settings, setSettings] = useState<SettingsPayload | null>(null);
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
+  const [providerPresets, setProviderPresets] = useState<ProviderPreset[]>([]);
+  const [editingProvider, setEditingProvider] = useState<ProviderConfig | null>(null);
+  const [providerModalOpen, setProviderModalOpen] = useState(false);
   const [plugins, setPlugins] = useState<PluginStatus[]>([]);
   const [marketPlugins, setMarketPlugins] = useState<MarketplacePlugin[]>([]);
   const [marketError, setMarketError] = useState("");
@@ -246,6 +259,7 @@ function SettingsApp() {
       setSettings(value);
     }).catch((reason) => { if (!disposed) setError(String(reason)); });
     void bridge.listModels().then(setAvailableModels).catch(() => undefined);
+    void bridge.listProviders().then(setProviderPresets).catch(() => undefined);
     return () => { disposed = true; };
   }, [bridge]);
   useEffect(() => {
@@ -265,12 +279,8 @@ function SettingsApp() {
     }
     // A newly added model is intentionally an incomplete draft. Do not send it
     // through the strict config validator until the required fields are filled.
-    const hasIncompleteModel = settings.models.some((model) => (
-      !model.id.trim() ||
-      !model.provider ||
-      (model.provider !== "google" && !model.model.trim()) ||
-      !model.apiKeyEnv.trim() ||
-      !model.baseUrl.trim()
+    const hasIncompleteModel = settings.providers.some((provider) => (
+      !provider.id.trim() || !provider.name.trim() || !provider.apiKeyEnv.trim() || !provider.baseUrl.trim() || !provider.models.length
     ));
     if (hasIncompleteModel) {
       setError("");
@@ -282,13 +292,34 @@ function SettingsApp() {
     }, 350);
     return () => window.clearTimeout(timer);
   }, [bridge, isOobe, settings]);
+  useEffect(() => {
+    const draft = settings?.models.find((model) => model.id.startsWith("model-"));
+    if (!draft || providerModalOpen) return;
+    setEditingProvider({ id: draft.id, name: draft.name || "新提供商", preset: "custom", provider: draft.provider, apiKeyEnv: draft.apiKeyEnv, apiKey: draft.apiKey, baseUrl: draft.baseUrl, endpoint: draft.endpoint, maxTokens: draft.maxTokens, models: draft.model ? [{ id: draft.model, name: draft.name || draft.model }] : [] });
+    setProviderModalOpen(true);
+    setSettings((current) => current && { ...current, models: current.models.filter((model) => model.id !== draft.id) });
+  }, [settings, providerModalOpen]);
   if (!settings) return <main className="settings-shell"><p>正在读取配置…</p></main>;
-  const updateModel = (index: number, patch: Partial<ModelProfile>) => setSettings((current) => current && { ...current, models: current.models.map((model, item) => item === index ? { ...model, ...patch } : model) });
-  const selectProvider = (index: number, provider: ModelProfile["provider"]) => updateModel(index, provider === "google"
-    ? { provider, apiKey: "", apiKeyConfigured: false, apiKeyEnv: "GEMINI_API_KEY", baseUrl: "https://generativelanguage.googleapis.com/v1beta", endpoint: "", model: "" }
-    : provider === "anthropic"
-      ? { provider, apiKey: "", apiKeyConfigured: false, apiKeyEnv: "ANTHROPIC_API_KEY", baseUrl: "https://api.anthropic.com", endpoint: "/v1/messages" }
-      : { provider, apiKey: "", apiKeyConfigured: false, apiKeyEnv: "OPENAI_API_KEY", baseUrl: "https://api.openai.com/v1", endpoint: provider === "openai-responses" ? "/responses" : "/chat/completions" });
+  const updateProvider = (patch: Partial<ProviderConfig>) => setEditingProvider((current) => current && { ...current, ...patch });
+  const updateModel = (_index: number, _patch: Partial<ModelProfile>) => undefined;
+  const selectProvider = (_index: number, _provider: ModelProfile["provider"]) => undefined;
+  const applyProviderPreset = (presetId: string) => {
+    if (!editingProvider) return;
+    if (presetId === "custom") { updateProvider({ preset: "custom" }); return; }
+    const preset = providerPresets.find((item) => item.id === presetId);
+    if (!preset) return;
+    const env = `${preset.name.replace(/[^A-Za-z0-9]/g, "").toUpperCase()}_API_KEY`;
+    const isAnthropic = /anthropic/i.test(preset.id);
+    const isGoogle = /google|gemini/i.test(preset.id);
+    const baseUrl = isAnthropic || isGoogle || !preset.api || /\/v1(?:beta)?\/?$/i.test(preset.api) ? preset.api : `${preset.api.replace(/\/$/, "")}/v1`;
+    updateProvider({ preset: preset.id, name: preset.name, apiKeyEnv: env, baseUrl: baseUrl || editingProvider.baseUrl, provider: isGoogle ? "google" : isAnthropic ? "anthropic" : "openai-compatible", endpoint: isGoogle ? "" : isAnthropic ? "/v1/messages" : "/chat/completions", models: preset.models.map((model) => ({ id: model.id, name: model.name || model.id })) });
+  };
+  const saveProvider = () => {
+    if (!editingProvider || !editingProvider.name.trim() || !editingProvider.apiKeyEnv.trim() || !editingProvider.baseUrl.trim() || !editingProvider.models.length) { setError("请填写提供商信息并至少添加一个模型"); return; }
+    setSettings((current) => current && { ...current, providers: current.providers.some((provider) => provider.id === editingProvider.id) ? current.providers.map((provider) => provider.id === editingProvider.id ? editingProvider : provider) : [...current.providers, editingProvider] });
+    setProviderModalOpen(false); setEditingProvider(null);
+  };
+  const removeProvider = (id: string) => setSettings((current) => current && { ...current, providers: current.providers.filter((provider) => provider.id !== id) });
   const updateServer = (name: string, patch: Partial<McpServerConfig>) => setSettings((current) => current && { ...current, mcp: { servers: Object.fromEntries(Object.entries(current.mcp.servers).map(([key, server]) => [key, key === name ? { ...server, ...patch } : server])) } });
   const renameServer = (oldName: string, newName: string) => {
     const name = newName.trim();
@@ -306,7 +337,7 @@ function SettingsApp() {
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setOfficialBusy(false); }
   };
-  const officialLogout = async () => { await bridge.officialLogout(); setOfficialLoggedIn(false); setOfficialPoints(null); setSettings((current) => current && { ...current, models: current.models.filter((model) => model.id !== "sectl-official") }); };
+  const officialLogout = async () => { await bridge.officialLogout(); setOfficialLoggedIn(false); setOfficialPoints(null); setSettings((current) => current && { ...current, providers: current.providers.filter((provider) => provider.id !== "sectl-official") }); };
   const defaultModel = availableModels.find((model) => model.id === settings.defaultModelId) || availableModels.find((model) => model.id === "sectl-official") || availableModels[0];
   const defaultReasoningEfforts = reasoningEffortsForModel(defaultModel);
   const defaultReasoningEffort = defaultReasoningEfforts.includes(settings.defaultReasoningEffort || "high") ? (settings.defaultReasoningEffort || "high") : defaultReasoningEfforts.includes("high") ? "high" : defaultReasoningEfforts[0];
@@ -321,9 +352,12 @@ function SettingsApp() {
     <section id="settings-tts" className={`settings-section ${isOobe || activePage === "settings-tts" ? "settings-section-active" : ""}`}><div className="section-title"><div><h2>朗读</h2><p>右键消息气泡选择“朗读”。语音由 Microsoft Edge 在线生成，不需要 API Key。</p></div></div>
       <article className="settings-card"><div className="form-grid"><label>语音音色<select value={settings.tts.voice} onChange={(event) => setSettings((current) => current && { ...current, tts: { ...current.tts, voice: event.target.value } })}>{ttsVoices.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>语速<select value={settings.tts.rate} onChange={(event) => setSettings((current) => current && { ...current, tts: { ...current.tts, rate: event.target.value } })}>{ttsRates.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div></article>
     </section>
-    <section id="settings-models" className={`settings-section ${isOobe || activePage === "settings-models" ? "settings-section-active" : ""}`}><div className="section-title"><div><h2>模型</h2><p>Google Gemini 填写 API Key 即可自动获取常用文本模型；模型名称可留空。</p></div><button className="secondary-button" onClick={() => setSettings((current) => current && { ...current, models: [...current.models, emptyModel()] })}>+ 添加模型</button></div>
+    <section id="settings-models" className={`settings-section ${isOobe || activePage === "settings-models" ? "settings-section-active" : ""}`}><div className="section-title"><div><h2>模型提供商</h2><p>每个提供商可以包含多个模型；预设信息在启动时从 models.dev 更新。</p></div></div>
       <article className="settings-card official-service-card"><div className="card-heading"><strong>SecAgent 官方服务</strong>{officialLoggedIn && <button className="text-button danger" onClick={() => void officialLogout()}>退出登录</button>}</div><p>{officialLoggedIn ? `已登录 ${officialEmail} · 模型列表由后端动态获取` : "使用浏览器打开 SECTL 授权页登录，登录完成后自动返回 SecAgent。"}</p>{!officialLoggedIn && <button className="primary-button" type="button" disabled={officialBusy} onClick={() => void officialLogin()}>{officialBusy ? "等待浏览器授权…" : "打开浏览器登录 SECTL"}</button>}{officialLoggedIn && <div className="official-balance-row"><span>账户余额</span><strong className="points-value">{officialPointsBusy ? "读取中…" : officialPoints === null ? "暂不可用" : `${officialPoints.toFixed(6)} Points`}</strong><button className="secondary-button" type="button" onClick={() => void refreshOfficialPoints()}>刷新余额</button></div>}<div className="default-model-settings"><label>默认模型<select value={settings.defaultModelId || defaultModel?.id || ""} onChange={(event) => setSettings((current) => current && { ...current, defaultModelId: event.target.value })}>{availableModels.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label><label>默认思考强度<select value={defaultReasoningEffort} onChange={(event) => setSettings((current) => current && { ...current, defaultReasoningEffort: event.target.value as ReasoningEffort })}>{defaultReasoningEfforts.map((effort) => <option key={effort} value={effort}>{reasoningEffortLabels[effort]}</option>)}</select></label></div></article>
-      <div className="settings-cards">{settings.models.map((model, index) => <article className="settings-card" key={model.id}>
+      <div className="provider-list settings-cards">{settings.providers.filter((provider) => provider.id !== "sectl-official" && provider.name !== "SecAgent 官方服务").map((provider) => <article className="settings-card provider-list-item" key={provider.id}><div className="card-heading"><div><strong>{provider.name}</strong><span>{provider.models.length} 个模型 · {provider.preset && provider.preset !== "custom" ? `预设：${provider.preset}` : "自定义"}</span></div><div className="item-actions"><button className="secondary-button" type="button" onClick={() => { setEditingProvider({ ...provider, models: provider.models.map((model) => ({ ...model })) }); setProviderModalOpen(true); }}>编辑</button><button className="text-button danger" type="button" onClick={() => removeProvider(provider.id)}>删除</button></div></div></article>)}</div>
+      {providerModalOpen && editingProvider && <div className="settings-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) { setProviderModalOpen(false); setEditingProvider(null); } }}><div className="settings-modal"><div className="session-modal-header"><strong>{settings.providers.some((provider) => provider.id === editingProvider.id) ? "编辑提供商" : "添加提供商"}</strong><button type="button" className="text-button" onClick={() => { setProviderModalOpen(false); setEditingProvider(null); }}>关闭</button></div><div className="form-grid"><label>提供商名称<input value={editingProvider.name} onChange={(event) => updateProvider({ name: event.target.value })} /></label><label>预设<select value={editingProvider.preset || "custom"} onChange={(event) => applyProviderPreset(event.target.value)}><option value="custom">自定义</option>{providerPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}</select></label><label>协议<select value={editingProvider.provider} onChange={(event) => updateProvider({ provider: event.target.value as ProviderConfig["provider"] })}><option value="openai-compatible">OpenAI Chat 兼容</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic">Anthropic</option><option value="google">Google Gemini</option></select></label><label>API Key 环境变量<input value={editingProvider.apiKeyEnv} onChange={(event) => updateProvider({ apiKeyEnv: event.target.value })} /></label><label className="wide-field">Base URL<input value={editingProvider.baseUrl} onChange={(event) => updateProvider({ baseUrl: event.target.value })} /></label><label>Endpoint<input value={editingProvider.endpoint || ""} onChange={(event) => updateProvider({ endpoint: event.target.value })} /></label><label>API Key<input type="password" placeholder={editingProvider.apiKeyConfigured ? "已配置（留空保持不变）" : "粘贴 API Key"} value={editingProvider.apiKey || ""} onChange={(event) => updateProvider({ apiKey: event.target.value })} /></label></div><div className="provider-model-editor"><div className="card-heading"><strong>模型列表</strong><button type="button" className="secondary-button" onClick={() => { const id = window.prompt("模型 ID"); if (id?.trim()) updateProvider({ models: [...editingProvider.models, { id: id.trim(), name: id.trim() }] }); }}>+ 添加模型</button></div>{editingProvider.models.map((model, index) => <div className="provider-model-row" key={`${model.id}-${index}`}><input value={model.name || ""} onChange={(event) => updateProvider({ models: editingProvider.models.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item) })} /><code>{model.id}</code><button type="button" className="text-button danger" onClick={() => updateProvider({ models: editingProvider.models.filter((_, itemIndex) => itemIndex !== index) })}>删除</button></div>)}</div><div className="modal-actions"><button type="button" className="secondary-button" onClick={() => { setProviderModalOpen(false); setEditingProvider(null); }}>取消</button><button type="button" className="primary-button" onClick={saveProvider}>保存</button></div></div></div>}
+      <div className="section-title provider-add-row"><div><h3>自定义提供商</h3></div><button className="secondary-button" type="button" onClick={() => { setEditingProvider(emptyProvider()); setProviderModalOpen(true); }}>+ 添加提供商</button></div>
+      <div className="settings-cards">{settings.models.filter(() => false).map((model, index) => <article className="settings-card" key={model.id}>
         <div className="card-heading"><strong>{model.name || model.model || "未命名模型"}</strong>{settings.models.length > 1 && <button className="text-button danger" onClick={() => setSettings((current) => current && { ...current, models: current.models.filter((_, item) => item !== index) })}>删除</button>}</div>
         <div className="form-grid"><label>显示名称<input value={model.name || ""} onChange={(event) => updateModel(index, { name: event.target.value })} /></label><label>模型 ID<input value={model.id} onChange={(event) => updateModel(index, { id: event.target.value })} /></label><label>协议<select value={model.provider} onChange={(event) => selectProvider(index, event.target.value as ModelProfile["provider"])}><option value="openai-responses">OpenAI Responses</option><option value="openai-compatible">OpenAI Chat 兼容</option><option value="anthropic">Anthropic</option><option value="google">Google Gemini</option></select></label><label>{model.provider === "google" ? "模型名称（可选，留空自动获取）" : "模型名称"}<input value={model.model} placeholder={model.provider === "google" ? "保存后自动使用可用 Gemini 文本模型" : ""} onChange={(event) => updateModel(index, { model: event.target.value })} /></label><label>{model.provider === "google" ? "Google AI Studio API Key" : "API Key"}<input type="password" placeholder={model.apiKeyConfigured ? "已配置（留空则保持不变）" : "粘贴你的 key"} value={model.apiKey || ""} onChange={(event) => updateModel(index, { apiKey: event.target.value })} /></label><label>API Key 环境变量<input value={model.apiKeyEnv} onChange={(event) => updateModel(index, { apiKeyEnv: event.target.value })} /></label><label>Base URL<input value={model.baseUrl} onChange={(event) => updateModel(index, { baseUrl: event.target.value })} /></label><label>Endpoint<input value={model.endpoint || ""} onChange={(event) => updateModel(index, { endpoint: event.target.value })} /></label><label>最大 Tokens<input type="number" min="1" value={model.maxTokens || 16384} onChange={(event) => updateModel(index, { maxTokens: Number(event.target.value) })} /></label></div>
       </article>)}</div>
@@ -341,6 +375,7 @@ function SettingsApp() {
         <strong>{plugin.message || (plugin.state === "ready" ? "已就绪" : "未连接")}</strong>
       </article>
     </section>))}
+    {providerModalOpen && editingProvider && <div className="preset-portal"><label>预设<PresetCombobox value={editingProvider.preset || "custom"} presets={providerPresets} onSelect={applyProviderPreset} /></label></div>}
   </main>;
 }
 

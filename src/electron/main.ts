@@ -18,6 +18,7 @@ import { synthesizeSpeech } from "./tts.js";
 import { PluginManager } from "../plugin-manager.js";
 import { MarketplaceClient, type MarketplacePlugin, type MarketplaceVersion } from "../marketplace.js";
 import { SecAgentHttpServer } from "../secagent-http.js";
+import { Models } from "@opencode-ai/models";
 
 let windowRef: BrowserWindow | undefined;
 let settingsWindow: BrowserWindow | undefined;
@@ -176,6 +177,21 @@ ipcMain.handle("models:list", async () => {
     const remote = (payload.data || []).filter((model) => model.id).map((model) => ({ id: `official:sectl-official:${model.id}`, name: model.name || model.id || "官方模型", model: model.id || "", provider: "openai-responses" }));
     return [...remote, ...options.filter((option) => option.id !== "sectl-official")];
   } catch { return options; }
+});
+ipcMain.handle("providers:list", async () => {
+  try {
+    const catalog = await Models.make().providers();
+    return Object.values(catalog).map((provider) => ({
+      id: provider.id,
+      name: provider.name || provider.id,
+      env: provider.env || [],
+      api: provider.api || "",
+      models: Object.values(provider.models || {}).map((model) => ({ id: model.id, name: model.name || model.id }))
+    }));
+  } catch (error) {
+    logMain("providers.list.failed", { error: String(error) });
+    return [];
+  }
 });
 ipcMain.handle("settings:get", () => readSettings(DEFAULT_WORKSPACE));
 ipcMain.handle("settings:skills", () => {

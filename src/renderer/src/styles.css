@@ -191,3 +191,33 @@ button { appearance: none; }
 @media (max-width: 640px) { .plugin-catalog-toolbar { align-items: flex-start; }.plugin-catalog-workspace { grid-template-columns: 1fr; min-height: auto; overflow: visible; }.plugin-catalog-sidebar { border-right: 0; border-bottom: 1px solid #e7e8eb; }.plugin-list { max-height: 265px; }.plugin-detail { min-height: 560px; }.plugin-detail-content { height: auto; min-height: 270px; }.plugin-detail-header { padding-top: 20px; }.plugin-info-grid { grid-template-columns: 1fr; } }
 .points-card { display: flex; align-items: center; justify-content: space-between; gap: 16px; }.points-card .card-heading { margin: 0; }.points-value { margin: 0; color: #1676d2; font-size: 22px; font-weight: 700; }
 .official-balance-row { display: flex; align-items: center; gap: 14px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line, #e4e8ed); }.official-balance-row .points-value { margin-right: auto; }.default-model-settings { display: grid; grid-template-columns: repeat(2, minmax(180px, 1fr)); gap: 12px; margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--line, #e4e8ed); }.default-model-settings label { display: grid; gap: 6px; color: var(--muted, #66717d); font-size: 13px; }.default-model-settings select { min-width: 0; }.model-divider { height: 1px; margin: 6px 10px; background: #e3e7eb; }
+.provider-list-item .card-heading { align-items: center; }
+.provider-list-item .card-heading > div:first-child { display: grid; gap: 5px; }
+.provider-list-item .card-heading span { color: #999; font-size: 12px; }
+.provider-model-editor { margin-top: 20px; padding-top: 16px; border-top: 1px solid #e5e5e5; }
+.provider-model-row { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(140px, 1fr) auto; align-items: center; gap: 8px; margin-top: 8px; }
+.provider-model-row code { overflow: hidden; color: #888; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.settings-section#settings-models > .section-title > button { display: none; }
+.provider-list { gap: 0; padding: 0; overflow: hidden; border: 1px solid #e3e3e3; border-radius: 12px; background: #fff; }
+.provider-list .provider-list-item { min-height: 58px; margin: 0; border: 0; border-bottom: 1px solid #ececec; border-radius: 0; box-shadow: none; }
+.provider-list .provider-list-item:last-child { border-bottom: 0; }
+.provider-add-row { margin-top: 14px; }
+.provider-add-row > button { display: inline-flex !important; }
+.default-model-settings select { width: 100%; min-height: 36px; padding: 8px 34px 8px 10px; border: 1px solid #d8d8d8; border-radius: 8px; outline: none; appearance: auto; background: #fff; color: #171717; font-size: 13px; cursor: pointer; }
+.default-model-settings select:hover { border-color: #b9c5d1; }
+.default-model-settings select:focus { border-color: #2389ec; box-shadow: 0 0 0 2px rgba(35,137,236,.12); }
+.settings-modal { position: relative; }
+.settings-modal .form-grid > label:nth-child(2) { visibility: hidden; }
+.preset-portal { position: absolute; z-index: 2; top: 92px; right: 22px; width: calc(50% - 30px); }
+.preset-portal > label { display: grid; gap: 6px; color: #666; font-size: 12px; }
+.preset-combobox { position: relative; display: flex; }
+.preset-combobox > input { width: 100%; min-width: 0; min-height: 36px; padding: 8px 34px 8px 9px; border: 1px solid #d8d8d8; border-radius: 7px; outline: none; background: #fff; color: #171717; font-size: 13px; }
+.preset-combobox > input:focus { border-color: #2389ec; box-shadow: 0 0 0 2px rgba(35,137,236,.12); }
+.preset-combobox-toggle { position: absolute; top: 1px; right: 1px; bottom: 1px; width: 30px; padding: 0; border: 0; border-radius: 0 6px 6px 0; background: transparent; color: #777; cursor: pointer; }
+.preset-combobox-options { position: absolute; top: calc(100% + 4px); right: 0; left: 0; z-index: 5; display: grid; max-height: 260px; overflow: auto; padding: 4px; border: 1px solid #d8d8d8; border-radius: 8px; background: #fff; box-shadow: 0 10px 28px rgba(0,0,0,.16); }
+.preset-combobox-options button { display: grid; gap: 2px; padding: 8px 9px; border: 0; border-radius: 5px; background: transparent; color: #333; text-align: left; cursor: pointer; }
+.preset-combobox-options button:hover { background: #eef6ff; }
+.preset-combobox-options small { color: #999; font-size: 11px; }
+.preset-combobox-empty { padding: 9px; color: #999; font-size: 12px; }
+.preset-portal { position: fixed; z-index: 60; top: 72px; right: calc(50% - 350px); left: auto; width: 329px; }
+@media (max-width: 760px) { .preset-portal { right: 28px; left: 50%; width: auto; transform: translateX(0); } }

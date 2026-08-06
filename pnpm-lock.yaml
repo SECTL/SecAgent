@@ -11,6 +11,9 @@ importers:
       '@andresaya/edge-tts':
         specifier: ^1.8.0
         version: 1.8.0(typescript@5.9.3)
+      '@opencode-ai/models':
+        specifier: ^0.0.35
+        version: 0.0.35
       adm-zip:
         specifier: ^0.5.18
         version: 0.5.18
@@ -493,6 +496,15 @@ packages:
 
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
+
+  '@opencode-ai/models@0.0.35':
+    resolution: {integrity: sha512-PmeXI0Y6bdQ9xC3V+TZBW8jOGjv35m7V68K5ehXWftyM0s3p5mTKXbBc4amJWs+LYNlWq8En42y9LlGKhN134A==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      effect: 4.0.0-beta.83
+    peerDependenciesMeta:
+      effect:
+        optional: true
 
   '@rolldown/pluginutils@1.0.0-rc.3':
     resolution: {integrity: sha512-eybk3TjzzzV97Dlj5c+XrBFW57eTNhzod66y9HrBlzJ6NsCrWCp/2kaPS3K9wJmurBC0Tdw4yPjXKZqlznim3Q==}
@@ -1745,6 +1757,8 @@ snapshots:
     dependencies:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
+
+  '@opencode-ai/models@0.0.35': {}
 
   '@rolldown/pluginutils@1.0.0-rc.3': {}
 
