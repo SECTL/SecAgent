@@ -16,16 +16,17 @@ function isDoubaoModel(modelName: string): boolean {
 }
 
 /**
- * Volcengine Ark (Doubao) only accepts reasoning effort low/medium/high.
- * "none" disables thinking via thinking.type=disabled; out-of-range values
- * are clamped to the nearest supported level.
+ * Volcengine Ark (Doubao) only accepts reasoning effort low/medium/high and
+ * disables thinking via a top-level thinking.type=disabled field (it rejects
+ * "none" and unknown reasoning sub-fields). Returns request fields to spread
+ * into the Responses body; out-of-range efforts are clamped to supported levels.
  */
-function doubaoReasoningConfig(effort: ReasoningEffort): Record<string, unknown> {
-  if (effort === "none") return { thinking: { type: "disabled" }, summary: "auto" };
+function doubaoReasoningFields(effort: ReasoningEffort): Record<string, unknown> {
+  if (effort === "none") return { thinking: { type: "disabled" } };
   const level = effort === "minimal" || effort === "low" ? "low"
     : effort === "medium" ? "medium"
     : "high"; // high / xhigh / max
-  return { effort: level, summary: "auto" };
+  return { reasoning: { effort: level, summary: "auto" } };
 }
 import type { RegisteredMcpTool } from "./mcp-adapter.js";
 import type { LoadedSkill } from "./skills.js";
@@ -225,11 +226,11 @@ export class ModelToolAgent {
         input,
         tools: definitions,
         max_output_tokens: this.agent.maxTokens,
-        reasoning: isDeepSeekV4Model(this.agent.model)
-          ? { effort: deepSeekReasoningEffort(reasoningEffort), summary: "auto" }
+        ...(isDeepSeekV4Model(this.agent.model)
+          ? { reasoning: { effort: deepSeekReasoningEffort(reasoningEffort), summary: "auto" } }
           : isDoubaoModel(this.agent.model)
-            ? doubaoReasoningConfig(reasoningEffort)
-            : { effort: reasoningEffort, summary: "auto" }
+            ? doubaoReasoningFields(reasoningEffort)
+            : { reasoning: { effort: reasoningEffort, summary: "auto" } })
       }, (event) => {
         const type = typeof event.type === "string" ? event.type : "";
         if (type === "response.output_text.delta" && typeof event.delta === "string") {
