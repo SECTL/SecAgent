@@ -395,7 +395,7 @@ export function App() {
       const end = textArea?.selectionEnd ?? start;
       speechInsert.current = { start, end };
       setRecording(true);
-      setSpeechStatus("正在启动本地模型…");
+      setSpeechStatus("正在启动语音识别…");
       await bridge.startSpeech();
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
       const context = new AudioContext({ sampleRate: 16000 });
