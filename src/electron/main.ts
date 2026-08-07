@@ -190,13 +190,14 @@ ipcMain.handle("models:list", async () => {
     const response = await fetch(`${baseUrl}/models`, { headers: { Authorization: `Bearer ${token}` } });
     const payload = await response.json() as { data?: Array<{ id?: string; name?: string }> };
     const remote = (payload.data || []).filter((model) => model.id).map((model) => ({ id: `official:sectl-official:${model.id}`, name: model.name || model.id || "官方模型", model: model.id || "", provider: "openai-responses" }));
+    // 低延迟档位暂不开放（回头再用）。
+    const visibleRemote = remote.filter((model) => model.model !== "virtual-latency");
     if (customModelMode) {
-      // 档位模式：主界面只暴露 快速/标准/深度 三个虚拟档位 + 自定义模型；低延迟档位暂不开放。
-      const tiers = remote.filter((model) => (OFFICIAL_TIER_IDS as readonly string[]).includes(model.model));
-      return [...tiers, ...options];
+      // 自定义模型模式开启：官方模型（含虚拟档位）与自定义模型全部可选。
+      return [...visibleRemote, ...options];
     }
-    // 关闭模式：官方具体模型 + 虚拟档位均可用，但隐藏低延迟档位。
-    return remote.filter((model) => model.model !== "virtual-latency");
+    // 关闭：官方档位模式 —— 下拉只有快速/标准/深度三个虚拟档位，看不到具体模型。
+    return visibleRemote.filter((model) => (OFFICIAL_TIER_IDS as readonly string[]).includes(model.model));
   } catch { return customModelMode ? options : []; }
 });
 ipcMain.handle("providers:list", async () => {
