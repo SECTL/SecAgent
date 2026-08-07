@@ -251,6 +251,8 @@ export interface SettingsPayload {
   mcp: { servers: Record<string, McpServerConfig> };
   defaultModelId?: string;
   defaultReasoningEffort?: ReasoningEffort;
+  /** Off by default: custom providers are ignored and the official service (login) is required. */
+  customModelMode?: boolean;
 }
 
 export function readSettings(workspaceInput: string): SettingsPayload {
@@ -269,7 +271,7 @@ export function readSettings(workspaceInput: string): SettingsPayload {
       maxTokens: config.agent.maxTokens
     }];
   const providers = config.agent.providers?.length ? config.agent.providers : groupLegacyModels(configured);
-  return { providers: providers.map((provider) => ({ ...provider, apiKeyConfigured: Boolean(process.env[provider.apiKeyEnv]) })), models: configured.map((model) => ({ ...model, apiKeyConfigured: Boolean(process.env[model.apiKeyEnv]) })), tts: { voice: config.tts?.voice || DEFAULT_TTS_VOICE, rate: config.tts?.rate || DEFAULT_TTS_RATE }, mcp: config.mcp, defaultModelId: config.defaults?.modelId, defaultReasoningEffort: config.defaults?.reasoningEffort };
+  return { providers: providers.map((provider) => ({ ...provider, apiKeyConfigured: Boolean(process.env[provider.apiKeyEnv]) })), models: configured.map((model) => ({ ...model, apiKeyConfigured: Boolean(process.env[model.apiKeyEnv]) })), tts: { voice: config.tts?.voice || DEFAULT_TTS_VOICE, rate: config.tts?.rate || DEFAULT_TTS_RATE }, mcp: config.mcp, defaultModelId: config.defaults?.modelId, defaultReasoningEffort: config.defaults?.reasoningEffort, customModelMode: config.defaults?.customModelMode ?? false };
 }
 
 function groupLegacyModels(models: ModelProfile[]): ProviderConfig[] {
@@ -308,7 +310,7 @@ export function saveSettings(workspaceInput: string, payload: SettingsPayload): 
   raw.agent = canonicalAgent;
   raw.tts = nextTts;
   raw.mcp = payload.mcp;
-  raw.defaults = { modelId: payload.defaultModelId || undefined, reasoningEffort: payload.defaultReasoningEffort || undefined };
+  raw.defaults = { modelId: payload.defaultModelId || undefined, reasoningEffort: payload.defaultReasoningEffort || undefined, customModelMode: Boolean(payload.customModelMode) };
   delete (raw as SecAgentConfig & { policy?: unknown }).policy;
   fs.writeFileSync(file, YAML.stringify(raw), "utf8");
   return readSettings(workspace);

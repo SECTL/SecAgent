@@ -62,7 +62,7 @@ export interface SecAgentConfig {
   agent: AgentConfig;
   tts?: { voice?: string; rate?: string };
   mcp: { servers: Record<string, McpServerConfig> };
-  defaults?: { modelId?: string; reasoningEffort?: ReasoningEffort };
+  defaults?: { modelId?: string; reasoningEffort?: ReasoningEffort; customModelMode?: boolean };
 }
 
 /** A tool supplied by a locally installed SecAgent plugin. */

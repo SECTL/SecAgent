@@ -20,6 +20,14 @@ export const traceLabel: Record<string, string> = {
 
 export const reasoningEffortLabels: Record<ReasoningEffort, string> = { none: "不思考", minimal: "极低", low: "低", medium: "中", high: "高", xhigh: "极高", max: "最高" };
 
+/** 官方服务的虚拟档位：主界面在“自定义模型模式”开启时只暴露这三档（低延迟档位暂缓）。 */
+export const officialTiers = [
+  { id: "virtual-fast", name: "快速", description: "优先使用最快的上游模型" },
+  { id: "virtual-standard", name: "标准", description: "使用标准档上游模型" },
+  { id: "virtual-deep", name: "深度", description: "使用更深推理的上游模型" }
+] as const;
+export const tierDefaultId = "virtual-standard";
+
 export const ttsVoices = [
   ["zh-CN-XiaoxiaoNeural", "晓晓（女声，自然）"],
   ["zh-CN-XiaoyiNeural", "晓伊（女声，温柔）"],

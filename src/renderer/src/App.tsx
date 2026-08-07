@@ -8,7 +8,8 @@ import { MessageActivities } from "./components/MessageActivities.js";
 import { AttachmentStrip } from "./components/AttachmentStrip.js";
 import { reasoningEffortLabels, traceLabel } from "./constants.js";
 import type { TraceEvent } from "./constants.js";
-import { isOfficialModel, reasoningEffortsForModel } from "./utils.js";
+import { isOfficialModel, isOfficialTierModel, reasoningEffortsForModel, tierEffortForModel } from "./utils.js";
+import { officialTiers, tierDefaultId } from "./constants.js";
 
 export function App() {
   const bridge = window.secagent;
@@ -26,6 +27,7 @@ export function App() {
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [modelSubmenu, setModelSubmenu] = useState<"model" | "effort" | null>(null);
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("high");
+  const [customModelMode, setCustomModelMode] = useState(false);
   const [sending, setSending] = useState(false);
   const [finishing, setFinishing] = useState(false);
   const [recording, setRecording] = useState(false);
@@ -63,9 +65,14 @@ export function App() {
       const [list, configured] = await Promise.all([bridge.listSessions(), bridge.listModels()]);
       const active = list[0] ? await bridge.getSession(list[0].id) : await bridge.createSession();
       const savedSettings = await bridge.getSettings();
+      const customMode = Boolean(savedSettings.customModelMode);
+      setCustomModelMode(customMode);
       setModels(configured);
-      setSelectedModelId(configured.find((model) => model.id === savedSettings.defaultModelId)?.id || configured[0]?.id || "");
-      setReasoningEffort(savedSettings.defaultReasoningEffort || "high");
+      const preferred = configured.find((model) => model.id === savedSettings.defaultModelId)
+        || (customMode ? configured.find((model) => isOfficialTierModel(model) && model.model === tierDefaultId) : undefined)
+        || configured[0];
+      setSelectedModelId(preferred?.id || "");
+      setReasoningEffort(savedSettings.defaultReasoningEffort || (preferred && isOfficialTierModel(preferred) ? tierEffortForModel(preferred) : "high"));
       setSessions(await bridge.listSessions());
       setSession(active);
       requestAnimationFrame(() => textareaRef.current?.focus());
@@ -78,7 +85,16 @@ export function App() {
       void bridge.listModels().then((models) => {
         setModels(models);
         void bridge.getSettings().then((settings) => {
-          setSelectedModelId((current) => models.some((model) => model.id === (settings.defaultModelId || current)) ? (settings.defaultModelId || current) : models[0]?.id || "");
+          const customMode = Boolean(settings.customModelMode);
+          setCustomModelMode(customMode);
+          setSelectedModelId((current) => {
+            if (models.some((model) => model.id === (settings.defaultModelId || current))) return settings.defaultModelId || current;
+            if (customMode) {
+              const tier = models.find((model) => isOfficialTierModel(model) && model.model === tierDefaultId);
+              if (tier) return tier.id;
+            }
+            return models[0]?.id || "";
+          });
           setReasoningEffort(settings.defaultReasoningEffort || "high");
         });
       });
@@ -338,7 +354,9 @@ export function App() {
     let completed = false;
     try {
       if (bridge) {
-        const response = await bridge.sendMessage(session.meta.id, text, selectedModelId, reasoningEffort, sentAttachments);
+        // 官方智能档位隐含推理强度；自定义模型仍使用用户选择的推理强度。
+        const effort = isOfficialTierModel(selectedModel) ? tierEffortForModel(selectedModel) : reasoningEffort;
+        const response = await bridge.sendMessage(session.meta.id, text, selectedModelId, effort, sentAttachments);
         setSession(response);
         setSessions(await bridge.listSessions());
         completed = true;
@@ -444,13 +462,13 @@ export function App() {
           <textarea ref={textareaRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && !event.currentTarget.readOnly) { event.preventDefault(); formRef.current?.requestSubmit(); } }} placeholder={speechStatus || "问任何问题..."} rows={1} readOnly={recording} disabled={!session || sending} />
           <div className="model-menu" ref={modelMenuEnd}>
             <button type="button" className="model-picker" aria-label="选择模型和推理强度" aria-expanded={modelMenuOpen} onClick={() => { setModelMenuOpen((open) => !open); setModelSubmenu(null); }}>
-              <span className="model-picker-copy"><strong>{selectedModel?.name || "未配置模型"}</strong><small>推理强度 · {reasoningEffortLabels[reasoningEffort]}</small></span>
+              <span className="model-picker-copy"><strong>{selectedModel?.name || "未配置模型"}</strong>{isOfficialTierModel(selectedModel) ? <small>官方智能档位 · 自动推理强度</small> : <small>推理强度 · {reasoningEffortLabels[reasoningEffort]}</small>}</span>
               <img className={`model-chevron ${modelMenuOpen ? "open" : ""}`} src="/session-chevron.svg" alt="" />
             </button>
             {modelMenuOpen && <div className="model-options" role="menu">
               <button type="button" className={`model-setting-row ${modelSubmenu === "model" ? "selected" : ""}`} onClick={() => setModelSubmenu((current) => current === "model" ? null : "model")}><span>模型</span><span className="model-setting-value">{selectedModel?.name || "未配置模型"}<span className="model-row-chevron">›</span></span></button>
               {modelSubmenu === "model" && <div className="model-submenu" role="listbox">{orderedModels.map((model, index) => <Fragment key={model.id}>{index > 0 && isOfficialModel(orderedModels[index - 1]) !== isOfficialModel(model) && <div className="model-divider" role="separator" /> }<button type="button" className={`model-option ${model.id === selectedModelId ? "selected" : ""}`} role="option" aria-selected={model.id === selectedModelId} onClick={() => { setSelectedModelId(model.id); setModelSubmenu(null); }}>{model.name}</button></Fragment>)}</div>}
-              <button type="button" className={`model-setting-row ${modelSubmenu === "effort" ? "selected" : ""}`} onClick={() => setModelSubmenu((current) => current === "effort" ? null : "effort")}><span>推理强度</span><span className="model-setting-value">{reasoningEffortLabels[reasoningEffort]}<span className="model-row-chevron">›</span></span></button>
+              {(!customModelMode || !isOfficialTierModel(selectedModel)) && <button type="button" className={`model-setting-row ${modelSubmenu === "effort" ? "selected" : ""}`} onClick={() => setModelSubmenu((current) => current === "effort" ? null : "effort")}><span>推理强度</span><span className="model-setting-value">{reasoningEffortLabels[reasoningEffort]}<span className="model-row-chevron">›</span></span></button>}
               {modelSubmenu === "effort" && <div className="model-submenu" role="listbox">{reasoningEfforts.map((effort) => <button type="button" className={`model-option ${effort === reasoningEffort ? "selected" : ""}`} role="option" aria-selected={effort === reasoningEffort} key={effort} onClick={() => { setReasoningEffort(effort); setModelSubmenu(null); }}>{reasoningEffortLabels[effort]}</button>)}</div>}
             </div>}
           </div>

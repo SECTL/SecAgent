@@ -17,6 +17,19 @@ export function isOfficialModel(model: ModelOption): boolean {
   return model.id === "sectl-official" || model.id.startsWith("official:");
 }
 
+/** Tier model ids as returned by the relay for the official service (低延迟档位暂缓开放). */
+export const OFFICIAL_TIER_IDS = ["virtual-fast", "virtual-standard", "virtual-deep"] as const;
+export const TIER_REASONING_EFFORT: Record<string, ReasoningEffort> = { "virtual-fast": "low", "virtual-standard": "high", "virtual-deep": "max" };
+
+export function isOfficialTierModel(model?: ModelOption | null): boolean {
+  return Boolean(model && model.id.startsWith("official:") && (OFFICIAL_TIER_IDS as readonly string[]).includes(model.model));
+}
+
+export function tierEffortForModel(model?: ModelOption | null): ReasoningEffort {
+  if (!model || !isOfficialTierModel(model)) return "high";
+  return TIER_REASONING_EFFORT[model.model] || "high";
+}
+
 export function toolTitle(name: string): string {
   return name.replace(/__/g, " · ").replace(/_/g, " ");
 }

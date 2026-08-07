@@ -167,14 +167,25 @@ function officialProvider(baseUrl: string) {
   return { id: "sectl-official", name: "SecAgent 官方服务", preset: "custom", provider: "openai-responses" as const, apiKeyEnv: "SECTL_OFFICIAL_TOKEN", baseUrl: `${baseUrl}/v1`, endpoint: "/responses", maxTokens: 16384, models: [{ id: "deepseek-v4-flash", name: "DeepSeek V4 Flash" }] };
 }
 
+/** Client-facing virtual tiers served by the relay. Latency tier is deferred (回头再用). */
+const OFFICIAL_TIER_IDS = ["virtual-fast", "virtual-standard", "virtual-deep"] as const;
+/** Reasoning effort implied by each official tier when the tier picker replaces the model/effort selectors. */
+const TIER_REASONING_EFFORT: Record<string, string> = { "virtual-fast": "low", "virtual-standard": "high", "virtual-deep": "max" };
+
+export function tierEffortForTierId(tierId: string): string {
+  return TIER_REASONING_EFFORT[tierId] || "high";
+}
+
 ipcMain.handle("models:list", async () => {
   const { config } = loadConfig(DEFAULT_WORKSPACE);
   const googleProfile = config.agent.models?.find((model) => model.provider === "google");
   const googleModels = googleProfile ? await listGoogleModels(process.env[googleProfile.apiKeyEnv] || "", googleProfile.baseUrl).catch(() => []) : [];
   const options = configuredModels(config, googleModels).filter((option) => option.id !== "sectl-official" && !option.id.startsWith("sectl-official:"));
+  const customModelMode = Boolean(config.defaults?.customModelMode);
   const token = process.env.SECTL_OFFICIAL_TOKEN;
   const baseUrl = (process.env.SECTL_OFFICIAL_API_URL || "").replace(/\/$/, "");
-  if (!token || !baseUrl) return options;
+  // 自定义模型模式关闭时只能使用官方服务（必须登录），自定义提供商不生效。
+  if (!token || !baseUrl) return customModelMode ? options : [];
   try {
     const current = readSettings(DEFAULT_WORKSPACE);
     if (!current.providers.some((provider) => provider.id === "sectl-official")) {
@@ -185,8 +196,14 @@ ipcMain.handle("models:list", async () => {
     const response = await fetch(`${baseUrl}/models`, { headers: { Authorization: `Bearer ${token}` } });
     const payload = await response.json() as { data?: Array<{ id?: string; name?: string }> };
     const remote = (payload.data || []).filter((model) => model.id).map((model) => ({ id: `official:sectl-official:${model.id}`, name: model.name || model.id || "官方模型", model: model.id || "", provider: "openai-responses" }));
-    return [...remote, ...options];
-  } catch { return options; }
+    if (customModelMode) {
+      // 档位模式：主界面只暴露 快速/标准/深度 三个虚拟档位 + 自定义模型；低延迟档位暂不开放。
+      const tiers = remote.filter((model) => (OFFICIAL_TIER_IDS as readonly string[]).includes(model.model));
+      return [...tiers, ...options];
+    }
+    // 关闭模式：官方具体模型 + 虚拟档位均可用，但隐藏低延迟档位。
+    return remote.filter((model) => model.model !== "virtual-latency");
+  } catch { return customModelMode ? options : []; }
 });
 ipcMain.handle("providers:list", async () => {
   try {
@@ -296,7 +313,18 @@ ipcMain.handle("plugins:install", async () => {
 ipcMain.handle("marketplace:list", () => marketplace.list());
 ipcMain.handle("marketplace:install", async (_event, version: MarketplaceVersion) => { if (!pluginManager) throw new Error("插件管理器尚未启动"); await marketplace.install(pluginManager, version); return pluginManager.list(); });
 ipcMain.handle("settings:save", (_event, payload: SettingsPayload) => {
-  const saved = saveSettings(DEFAULT_WORKSPACE, payload);
+  const customModelMode = Boolean(payload?.customModelMode);
+  let providers = Array.isArray(payload?.providers) ? payload.providers : [];
+  if (!customModelMode) {
+    // 自定义模型模式关闭：自定义供应商不生效，仅保留官方服务；必须登录才能使用。
+    providers = providers.filter((provider) => provider.id === "sectl-official");
+    if (!providers.length) {
+      const baseUrl = (process.env.SECTL_OFFICIAL_API_URL || "").replace(/\/$/, "");
+      if (!baseUrl) throw new Error("自定义模型模式已关闭：请先配置 SECTL_OFFICIAL_API_URL 或登录 SecAgent 官方服务");
+      providers = [officialProvider(baseUrl)];
+    }
+  }
+  const saved = saveSettings(DEFAULT_WORKSPACE, { ...payload, providers });
   markOnboardingComplete(DEFAULT_WORKSPACE);
   windowRef?.webContents.send("settings:changed", saved);
   return saved;
