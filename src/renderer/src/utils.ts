@@ -2,8 +2,14 @@ export function isDeepSeekV4Model(modelName?: string): boolean {
   return /^(?:deepseek-v4-flash|deepseek-v4-pro)(?:[-_].*)?$/i.test((modelName || "").trim());
 }
 
+export function isDoubaoModel(modelName?: string): boolean {
+  return /^(?:doubao|seed)[-_.]/i.test((modelName || "").trim());
+}
+
 export function reasoningEffortsForModel(model?: ModelOption): ReasoningEffort[] {
   if (isDeepSeekV4Model(model?.model)) return ["none", "low", "high", "max"];
+  // Volcengine Ark (Doubao) only supports none/low/medium/high.
+  if (isDoubaoModel(model?.model)) return ["none", "low", "medium", "high"];
   return ["none", "minimal", "low", "medium", "high", "xhigh"];
 }
 

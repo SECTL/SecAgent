@@ -10,6 +10,23 @@ function deepSeekReasoningEffort(effort: ReasoningEffort): "none" | "low" | "hig
   if (effort === "max") return "max";
   return "high";
 }
+
+function isDoubaoModel(modelName: string): boolean {
+  return /^(?:doubao|seed)[-_.]/i.test(modelName.trim());
+}
+
+/**
+ * Volcengine Ark (Doubao) only accepts reasoning effort low/medium/high.
+ * "none" disables thinking via thinking.type=disabled; out-of-range values
+ * are clamped to the nearest supported level.
+ */
+function doubaoReasoningConfig(effort: ReasoningEffort): Record<string, unknown> {
+  if (effort === "none") return { thinking: { type: "disabled" }, summary: "auto" };
+  const level = effort === "minimal" || effort === "low" ? "low"
+    : effort === "medium" ? "medium"
+    : "high"; // high / xhigh / max
+  return { effort: level, summary: "auto" };
+}
 import type { RegisteredMcpTool } from "./mcp-adapter.js";
 import type { LoadedSkill } from "./skills.js";
 
@@ -208,7 +225,11 @@ export class ModelToolAgent {
         input,
         tools: definitions,
         max_output_tokens: this.agent.maxTokens,
-        reasoning: { effort: isDeepSeekV4Model(this.agent.model) ? deepSeekReasoningEffort(reasoningEffort) : reasoningEffort, summary: "auto" }
+        reasoning: isDeepSeekV4Model(this.agent.model)
+          ? { effort: deepSeekReasoningEffort(reasoningEffort), summary: "auto" }
+          : isDoubaoModel(this.agent.model)
+            ? doubaoReasoningConfig(reasoningEffort)
+            : { effort: reasoningEffort, summary: "auto" }
       }, (event) => {
         const type = typeof event.type === "string" ? event.type : "";
         if (type === "response.output_text.delta" && typeof event.delta === "string") {
