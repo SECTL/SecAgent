@@ -169,12 +169,6 @@ function officialProvider(baseUrl: string) {
 
 /** Client-facing virtual tiers served by the relay. Latency tier is deferred (回头再用). */
 const OFFICIAL_TIER_IDS = ["virtual-fast", "virtual-standard", "virtual-deep"] as const;
-/** Reasoning effort implied by each official tier when the tier picker replaces the model/effort selectors. */
-const TIER_REASONING_EFFORT: Record<string, string> = { "virtual-fast": "low", "virtual-standard": "high", "virtual-deep": "max" };
-
-export function tierEffortForTierId(tierId: string): string {
-  return TIER_REASONING_EFFORT[tierId] || "high";
-}
 
 ipcMain.handle("models:list", async () => {
   const { config } = loadConfig(DEFAULT_WORKSPACE);

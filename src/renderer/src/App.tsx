@@ -8,7 +8,7 @@ import { MessageActivities } from "./components/MessageActivities.js";
 import { AttachmentStrip } from "./components/AttachmentStrip.js";
 import { reasoningEffortLabels, traceLabel } from "./constants.js";
 import type { TraceEvent } from "./constants.js";
-import { isOfficialModel, isOfficialTierModel, reasoningEffortsForModel, tierEffortForModel } from "./utils.js";
+import { isOfficialModel, isOfficialTierModel, reasoningEffortsForModel } from "./utils.js";
 import { officialTiers, tierDefaultId } from "./constants.js";
 
 export function App() {
@@ -27,6 +27,7 @@ export function App() {
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [modelSubmenu, setModelSubmenu] = useState<"model" | "effort" | null>(null);
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("high");
+  const [defaultEffort, setDefaultEffort] = useState<ReasoningEffort>("high");
   const [customModelMode, setCustomModelMode] = useState(false);
   const [sending, setSending] = useState(false);
   const [finishing, setFinishing] = useState(false);
@@ -72,7 +73,9 @@ export function App() {
         || (customMode ? configured.find((model) => isOfficialTierModel(model) && model.model === tierDefaultId) : undefined)
         || configured[0];
       setSelectedModelId(preferred?.id || "");
-      setReasoningEffort(savedSettings.defaultReasoningEffort || (preferred && isOfficialTierModel(preferred) ? tierEffortForModel(preferred) : "high"));
+      const defaultReasoning = (savedSettings.defaultReasoningEffort || "high") as ReasoningEffort;
+      setDefaultEffort(defaultReasoning);
+      setReasoningEffort(defaultReasoning);
       setSessions(await bridge.listSessions());
       setSession(active);
       requestAnimationFrame(() => textareaRef.current?.focus());
@@ -87,6 +90,7 @@ export function App() {
         void bridge.getSettings().then((settings) => {
           const customMode = Boolean(settings.customModelMode);
           setCustomModelMode(customMode);
+          setDefaultEffort((settings.defaultReasoningEffort || "high") as ReasoningEffort);
           setSelectedModelId((current) => {
             if (models.some((model) => model.id === (settings.defaultModelId || current))) return settings.defaultModelId || current;
             if (customMode) {
@@ -354,8 +358,8 @@ export function App() {
     let completed = false;
     try {
       if (bridge) {
-        // 官方智能档位隐含推理强度；自定义模型仍使用用户选择的推理强度。
-        const effort = isOfficialTierModel(selectedModel) ? tierEffortForModel(selectedModel) : reasoningEffort;
+        // 档位顺序只是后端的 fallback 顺序，与推理强度无关：档位模型始终使用默认推理强度。
+        const effort = isOfficialTierModel(selectedModel) ? defaultEffort : reasoningEffort;
         const response = await bridge.sendMessage(session.meta.id, text, selectedModelId, effort, sentAttachments);
         setSession(response);
         setSessions(await bridge.listSessions());
@@ -462,7 +466,7 @@ export function App() {
           <textarea ref={textareaRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && !event.currentTarget.readOnly) { event.preventDefault(); formRef.current?.requestSubmit(); } }} placeholder={speechStatus || "问任何问题..."} rows={1} readOnly={recording} disabled={!session || sending} />
           <div className="model-menu" ref={modelMenuEnd}>
             <button type="button" className="model-picker" aria-label="选择模型和推理强度" aria-expanded={modelMenuOpen} onClick={() => { setModelMenuOpen((open) => !open); setModelSubmenu(null); }}>
-              <span className="model-picker-copy"><strong>{selectedModel?.name || "未配置模型"}</strong>{isOfficialTierModel(selectedModel) ? <small>官方智能档位 · 自动推理强度</small> : <small>推理强度 · {reasoningEffortLabels[reasoningEffort]}</small>}</span>
+              <span className="model-picker-copy"><strong>{selectedModel?.name || "未配置模型"}</strong>{isOfficialTierModel(selectedModel) ? <small>官方智能档位</small> : <small>推理强度 · {reasoningEffortLabels[reasoningEffort]}</small>}</span>
               <img className={`model-chevron ${modelMenuOpen ? "open" : ""}`} src="/session-chevron.svg" alt="" />
             </button>
             {modelMenuOpen && <div className="model-options" role="menu">
