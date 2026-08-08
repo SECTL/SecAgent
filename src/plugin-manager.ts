@@ -25,13 +25,21 @@ interface PluginManifest {
 }
 interface InstalledPlugin { id: string; version: string; enabled: boolean }
 interface PluginStateFile { plugins: InstalledPlugin[] }
-interface ActivePlugin { manifest: PluginManifest; root: string; state: PluginStatus["state"]; message?: string; tools: Map<string, { definition: PluginToolDefinition; call: (args: Record<string, unknown>) => Promise<unknown> }>; skills: Map<string, string>; dispose?: () => void | Promise<void> }
+interface ActivePlugin { manifest: PluginManifest; root: string; state: PluginStatus["state"]; message?: string; tools: Map<string, { definition: PluginToolDefinition; call: (args: Record<string, unknown>) => Promise<unknown> }>; skills: Map<string, string>; prompts: Map<string, PluginPromptProvider>; dispose?: () => void | Promise<void> }
+
+/** 插件注册的提示词：静态文本，或每次用户发消息时求值的提供器。 */
+export type PluginPromptProvider = string | (() => string | Promise<string>);
+
+/** 一次求值后来自某个插件的提示词片段，按插件注册顺序收集。 */
+export interface PluginPromptContribution { pluginId: string; name: string; text: string }
 
 export interface PluginHostApi {
   registerTool(definition: Omit<PluginToolDefinition, "key"> & { name: string }, call: (args: Record<string, unknown>) => Promise<unknown>): void;
   unregisterTool(name: string): void;
   registerSkill(relativePath: string): string;
   unregisterSkill(name: string): void;
+  registerPrompt(name: string, provider: PluginPromptProvider): void;
+  unregisterPrompt(name: string): void;
   setStatus(message: string, state?: "ready" | "error"): void;
   fetch(url: string, init?: RequestInit): Promise<Response>;
 }
@@ -143,6 +151,23 @@ export class PluginManager {
     return skills;
   }
   getTools(): PluginToolDefinition[] { return [...this.active.values()].flatMap((plugin) => [...plugin.tools.values()].map((item) => item.definition)); }
+  /** 收集所有激活插件注册的提示词；单个提供器失败时记录错误并跳过，不中断其他插件。 */
+  async getPromptContributions(): Promise<PluginPromptContribution[]> {
+    const contributions: PluginPromptContribution[] = [];
+    for (const plugin of this.active.values()) {
+      for (const [name, provider] of plugin.prompts) {
+        try {
+          const text = typeof provider === "function" ? await provider() : provider;
+          if (typeof text !== "string") throw new Error("提示词提供器必须返回字符串");
+          if (!text.trim()) continue;
+          contributions.push({ pluginId: plugin.manifest.id, name, text });
+        } catch (error) {
+          console.error(`[secagent] 插件 ${plugin.manifest.id} 的提示词 ${name} 获取失败：${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    }
+    return contributions;
+  }
   async callTool(key: string, args: Record<string, unknown>): Promise<unknown> {
     for (const plugin of this.active.values()) {
       const tool = plugin.tools.get(key);
@@ -156,8 +181,8 @@ export class PluginManager {
     if (!installed || this.active.has(id)) return;
     const root = path.join(this.installedRoot, installed.id, installed.version);
     const manifest = this.readManifest(root);
-    if (!manifest) { this.active.set(id, { manifest: { apiVersion: API_VERSION, id, name: id, version: installed.version }, root, state: "error", message: "找不到或无法读取插件清单", tools: new Map(), skills: new Map() }); this.changed(); return; }
-    const plugin: ActivePlugin = { manifest, root, state: "starting", tools: new Map(), skills: new Map() };
+    if (!manifest) { this.active.set(id, { manifest: { apiVersion: API_VERSION, id, name: id, version: installed.version }, root, state: "error", message: "找不到或无法读取插件清单", tools: new Map(), skills: new Map(), prompts: new Map() }); this.changed(); return; }
+    const plugin: ActivePlugin = { manifest, root, state: "starting", tools: new Map(), skills: new Map(), prompts: new Map() };
     this.active.set(id, plugin); this.changed();
     try {
       if (!manifest.main) throw new Error("插件清单缺少 main 入口");
@@ -208,6 +233,13 @@ export class PluginManager {
         if (file) fs.rmSync(path.dirname(file), { recursive: true, force: true });
         this.changed();
       },
+      registerPrompt: (name, provider) => {
+        requirePermission("agent.prompts");
+        if (!/^[a-z][a-z0-9_]*$/.test(name)) throw new Error("插件提示词名称只能使用小写字母、数字和下划线");
+        if (typeof provider !== "string" && typeof provider !== "function") throw new Error("插件提示词必须是字符串或返回字符串的函数");
+        plugin.prompts.set(name, provider); this.changed();
+      },
+      unregisterPrompt: (name) => { plugin.prompts.delete(name); this.changed(); },
       setStatus: (message, state = "ready") => { plugin.message = message; plugin.state = state; this.changed(); },
       fetch: async (url, init) => { requirePermission("network.http"); const parsed = new URL(url); if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("插件 HTTP 仅允许 http/https"); return fetch(url, init); }
     };

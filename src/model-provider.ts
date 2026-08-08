@@ -1,3 +1,4 @@
+import type { PluginPromptContribution } from "./plugin-manager.js";
 import type { ChatAttachment, ReasoningEffort, SecAgentConfig } from "./types.js";
 
 function isDeepSeekV4Model(modelName: string): boolean {
@@ -81,7 +82,7 @@ function toGoogleSchema(input: unknown): Record<string, unknown> {
 
 export class ModelToolAgent {
   private agent: SecAgentConfig["agent"];
-  constructor(config: SecAgentConfig, _skills: LoadedSkill[], private trace?: ModelTrace) {
+  constructor(config: SecAgentConfig, _skills: LoadedSkill[], private trace?: ModelTrace, private getExtraPrompts?: () => Promise<PluginPromptContribution[]>) {
     const skillCatalog = _skills.length
       ? `\n\n## 可用 Skills\n${_skills.map((skill) => `- ${skill.name}: ${skill.description}（入口文件：${skill.relativePath || skill.path}）`).join("\n")}`
       : "";
@@ -91,10 +92,18 @@ export class ModelToolAgent {
     if (!tools.length) throw new Error("没有已启用且可发现的 MCP 工具");
     const key = process.env[this.agent.apiKeyEnv];
     if (!key) throw new Error(`未配置模型密钥环境变量 ${this.agent.apiKeyEnv}。请设置后重试；密钥不要写入 secagent.yaml。`);
-    if (this.agent.provider === "anthropic") return this.runAnthropic(instruction, tools, key, execute, reasoningEffort, conversation);
-    if (this.agent.provider === "google") return this.runGoogle(instruction, tools, key, execute, reasoningEffort, conversation);
-    if (this.agent.provider === "openai-responses") return this.runOpenAIResponses(instruction, tools, key, execute, reasoningEffort, conversation);
-    return this.runOpenAICompatible(instruction, tools, key, execute, reasoningEffort, conversation);
+    const systemPrompt = await this.resolveSystemPrompt();
+    if (this.agent.provider === "anthropic") return this.runAnthropic(instruction, tools, key, execute, reasoningEffort, systemPrompt, conversation);
+    if (this.agent.provider === "google") return this.runGoogle(instruction, tools, key, execute, reasoningEffort, systemPrompt, conversation);
+    if (this.agent.provider === "openai-responses") return this.runOpenAIResponses(instruction, tools, key, execute, reasoningEffort, systemPrompt, conversation);
+    return this.runOpenAICompatible(instruction, tools, key, execute, reasoningEffort, systemPrompt, conversation);
+  }
+  /** 每次请求前从插件收集提示词并拼接到系统提示词最后；无插件提示词时原样返回。 */
+  private async resolveSystemPrompt(): Promise<string> {
+    const contributions = await this.getExtraPrompts?.() || [];
+    if (!contributions.length) return this.agent.systemPrompt;
+    const catalog = contributions.map(({ pluginId, name, text }) => `[${pluginId}/${name}]\n${text}`).join("\n\n");
+    return `${this.agent.systemPrompt}\n\n## 插件注入的提示词\n${catalog}`;
   }
   private async request(url: string, headers: Record<string, string>, body: unknown): Promise<unknown> {
     this.trace?.("model.request", { url, body });
@@ -160,9 +169,9 @@ export class ModelToolAgent {
     // durable audit record required for every request sent to a model.
     this.trace?.("model.response", { url, status: response.status, body: completeBody() });
   }
-  private async runOpenAICompatible(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort, conversation?: ConversationMessage[]): Promise<string> {
+  private async runOpenAICompatible(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort, systemPrompt: string, conversation?: ConversationMessage[]): Promise<string> {
     const history = conversation?.length ? conversation : [{ role: "user" as const, content: instruction }];
-    const messages: Array<Record<string, unknown>> = [{ role: "system", content: this.agent.systemPrompt }, ...history.map((message) => ({ role: message.role, content: openAIContent(message) }))];
+    const messages: Array<Record<string, unknown>> = [{ role: "system", content: systemPrompt }, ...history.map((message) => ({ role: message.role, content: openAIContent(message) }))];
     const definitions = tools.map((tool) => ({ type: "function", function: { name: tool.key, description: tool.description || tool.key, parameters: tool.inputSchema || { type: "object", properties: {} } } }));
     for (let turn = 0; ; turn++) {
       let content = "";
@@ -208,7 +217,7 @@ export class ModelToolAgent {
     throw new Error("工具调用循环意外结束");
   }
 
-  private async runOpenAIResponses(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort, conversation?: ConversationMessage[]): Promise<string> {
+  private async runOpenAIResponses(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort, systemPrompt: string, conversation?: ConversationMessage[]): Promise<string> {
     type InputItem = Record<string, unknown>;
     type FunctionCall = { callId: string; itemId?: string; name: string; arguments: string };
     const history = conversation?.length ? conversation : [{ role: "user" as const, content: instruction }];
@@ -222,7 +231,7 @@ export class ModelToolAgent {
       const calls = new Map<string, FunctionCall>();
       await this.streamRequest(`${this.agent.baseUrl}${this.agent.endpoint || "/responses"}`, { "Content-Type": "application/json", Authorization: `Bearer ${key}` }, {
         model: this.agent.model,
-        instructions: this.agent.systemPrompt,
+        instructions: systemPrompt,
         input,
         tools: definitions,
         max_output_tokens: this.agent.maxTokens,
@@ -297,7 +306,7 @@ export class ModelToolAgent {
     }
     throw new Error("工具调用循环意外结束");
   }
-  private async runGoogle(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high", conversation?: ConversationMessage[]): Promise<string> {
+  private async runGoogle(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high", systemPrompt: string, conversation?: ConversationMessage[]): Promise<string> {
     type Part = { text?: string; thought?: boolean; inlineData?: { mimeType: string; data: string }; functionCall?: { name?: string; args?: Record<string, unknown> }; functionResponse?: { name?: string; response?: unknown }; thoughtSignature?: string };
     const history = conversation?.length ? conversation : [{ role: "user" as const, content: instruction }];
     const contents: Array<{ role: "user" | "model"; parts: Part[] }> = history.map((message) => ({
@@ -312,7 +321,7 @@ export class ModelToolAgent {
       let text = "";
       const calls = new Map<string, { name: string; args: Record<string, unknown>; thoughtSignature?: string }>();
       const body = {
-        systemInstruction: { parts: [{ text: this.agent.systemPrompt }] },
+        systemInstruction: { parts: [{ text: systemPrompt }] },
         contents,
         tools: [{ functionDeclarations: definitions }],
         generationConfig: { maxOutputTokens: this.agent.maxTokens, thinkingConfig: this.googleThinkingConfig(reasoningEffort) }
@@ -391,7 +400,7 @@ export class ModelToolAgent {
     if (buffer.trim()) consume(buffer);
     this.trace?.("model.response", { url, status: response.status, body: completeBody() });
   }
-  private async runAnthropic(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high", conversation?: ConversationMessage[]): Promise<string> {
+  private async runAnthropic(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high", systemPrompt: string, conversation?: ConversationMessage[]): Promise<string> {
     // The desktop session supplies structured turns. Keep the single-string fallback for CLI
     // callers that do not have a persisted conversation.
     const messages: Array<Record<string, unknown>> = conversation?.length
@@ -408,7 +417,7 @@ export class ModelToolAgent {
       }, {
         model: this.agent.model,
         max_tokens: this.agent.maxTokens,
-        system: this.agent.systemPrompt,
+        system: systemPrompt,
         messages,
         tools: definitions,
         ...this.anthropicThinkingConfig(reasoningEffort)

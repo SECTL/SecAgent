@@ -11,11 +11,11 @@ SecAgent 插件是可移植的 zip 包，包内包含 JavaScript、JSON、Skill 
   "name": "我的应用",
   "version": "1.0.0",
   "main": "main.mjs",
-  "permissions": ["agent.tools", "agent.skills", "network.http"]
+  "permissions": ["agent.tools", "agent.skills", "agent.prompts", "network.http"]
 }
 ```
 
-工具插件通常声明 `agent.tools`；提供 Skill 时声明 `agent.skills`；访问第三方 HTTP 服务时声明 `network.http`。
+工具插件通常声明 `agent.tools`；提供 Skill 时声明 `agent.skills`；向 Agent 注入提示词时声明 `agent.prompts`；访问第三方 HTTP 服务时声明 `network.http`。
 
 ## 入口 API
 
@@ -28,12 +28,23 @@ export async function activate(api) {
     inputSchema: { type: "object", required: ["title"], properties: { title: { type: "string" } } },
     hidden: true
   }, async ({ title }) => ({ title }));
+  api.registerPrompt("domain_rules", "操作涉及积分变更前，必须向用户展示变更明细并等待确认。");
   api.setStatus("已就绪");
-  return () => { api.unregisterTool("create_item"); api.unregisterSkill("my-app"); };
+  return () => { api.unregisterTool("create_item"); api.unregisterSkill("my-app"); api.unregisterPrompt("domain_rules"); };
 }
 ```
 
 Skill 的 `SKILL.md` 应包含 YAML frontmatter，声明 `name` 和 `description`。工具的完整 key、参数、返回值和安全约束应写在 Skill 正文中；隐藏工具仍然可以执行，但不会进入模型的初始工具列表。
+
+## 提示词注入
+
+插件通过 `api.registerPrompt(name, provider)` 注册提示词。每次用户向 Agent 发送消息时，宿主都会重新求值所有激活插件的提示词（`provider` 可以是静态字符串，也可以是返回字符串的函数），并拼接到系统提示词的最后：
+
+- 多个插件、多个提示词按注册顺序依次拼接，每个提示词带来源标注 `[<插件 id>/<名称>]`；
+- 求值返回空字符串或抛出异常的提示词会被跳过，不影响其他插件，错误记录在宿主日志；
+- 插件停用或调用 `api.unregisterPrompt(name)` 后，对应提示词不再注入。
+
+提示词会被完整注入模型上下文，只应包含业务规则、约束等指令内容；不要写入密钥或敏感信息。
 
 ## 非 MCP 第三方应用连接
 

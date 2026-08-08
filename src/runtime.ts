@@ -26,7 +26,7 @@ export class SecAgentRuntime {
   private sequence = 0;
   constructor(private config: SecAgentConfig, private audit: AuditStore, private skills: LoadedSkill[], private trace?: (event: TraceEvent) => void, private plugins?: PluginManager) {
     this.registry = new McpRegistry(config);
-    this.agent = new ModelToolAgent(config, skills, (stage, data) => this.emit(stage, data));
+    this.agent = new ModelToolAgent(config, skills, (stage, data) => this.emit(stage, data), () => this.plugins?.getPromptContributions() ?? Promise.resolve([]));
   }
   async run(input: string, reasoningEffort: ReasoningEffort = "high", conversation?: ConversationMessage[]): Promise<RunResult> {
     const mcpTools = await this.registry.discover();
