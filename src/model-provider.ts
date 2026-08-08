@@ -202,7 +202,7 @@ export class ModelToolAgent {
       const calls = message.tool_calls || [];
       if (!calls.length) return message.content.trim() || "已完成。";
       if (content) this.trace?.("model.output.reset", { turn: turn + 1, reason: "tool_call" });
-      messages.push({ role: "assistant", content: message.content ?? null, tool_calls: calls });
+      messages.push({ role: "assistant", content: message.content ?? null, tool_calls: calls.map((call) => ({ ...call, type: "function" })) });
       for (const call of calls) {
         const name = call.function?.name;
         if (!name || !call.id) continue;
