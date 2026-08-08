@@ -40,14 +40,9 @@ node dist/index.js run "给高一三班的李明加 2 分" --workspace ./demo-wo
 
 CLI 直接调用 SecScore 的 HTTP MCP（默认 `http://127.0.0.1:3901/mcp`），支持查学生、真实写入、审计和撤销。
 
-## 本地中文语音输入
+## 云端中文语音输入
 
-桌面端麦克风按钮使用本地 `sherpa-onnx` 流式识别，不上传音频。当前已下载官方的小型中文 `streaming-zipformer-zh-14M` 模型到 `models/`；运行环境需要安装 Python 依赖：
-
-```bash
-python3 -m pip install sherpa-onnx
-npm run dev
-```
+桌面端麦克风按钮统一通过 SecAgent 官方服务的 WebSocket 接口进行云端识别。使用前需要登录官方服务并配置 `SECTL_OFFICIAL_API_URL` 和 `SECTL_OFFICIAL_TOKEN`；音频不会在本地使用 `sherpa-onnx` 模型处理。
 
 点击麦克风后，识别结果会实时替换并插入到点击按钮前 textarea 的光标位置；再次点击结束录音。
 

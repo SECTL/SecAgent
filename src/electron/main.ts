@@ -410,7 +410,7 @@ app.whenReady().then(async () => {
     settingsWindow?.webContents.send("plugins:changed", list);
   });
   // Electron otherwise rejects getUserMedia requests in some desktop environments.
-  // Speech audio is only used by the local recognizer and is never sent to a server.
+  // Speech audio is streamed to the official cloud ASR service.
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
     callback(permission === "media");
   });
