@@ -1,84 +1,115 @@
-import { BrowserWindow } from "electron";
+import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import readline from "node:readline";
+import { app, BrowserWindow } from "electron";
 
+const modelName = "sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23";
+let worker: ChildProcessWithoutNullStreams | undefined;
 let remoteSocket: WebSocket | undefined;
+let speechWindow: BrowserWindow | undefined;
 let pendingRemoteAudio: ArrayBuffer[] = [];
-let mode: "remote" | "idle" = "idle";
+/** "remote" = backend relay /asr/ws; "local" = bundled sherpa-onnx worker; "idle" = none. */
+let mode: "remote" | "local" | "idle" = "idle";
 
-function send(window: BrowserWindow | undefined, payload: unknown): void {
-  window?.webContents.send("speech:event", payload);
+function projectPath(...parts: string[]): string {
+  const candidates = [
+    path.join(process.cwd(), ...parts),
+    path.join(app.getAppPath(), ...parts),
+    path.join(__dirname, "../../", ...parts)
+  ];
+  const found = candidates.find((candidate) => fs.existsSync(candidate));
+  if (!found) throw new Error(`找不到语音资源：${parts.join("/")}`);
+  return found;
 }
 
-/**
- * Remote ASR endpoint on the official relay, reachable on the same origin/port
- * as the chat API (secagent-api.sectl.cn:443 -> /asr/ws).
- */
-function remoteAsrUrl(): string {
+function send(window: BrowserWindow | undefined, payload: unknown): void {
+  if (!window || window.isDestroyed() || window.webContents.isDestroyed()) return;
+  try { window.webContents.send("speech:event", payload); } catch { /* Window may close during an async callback. */ }
+}
+
+/** Remote ASR endpoint on the official relay. */
+function remoteAsrUrl(): string | null {
   const token = process.env.SECTL_OFFICIAL_TOKEN || "";
   const baseUrl = (process.env.SECTL_OFFICIAL_API_URL || "").replace(/\/$/, "");
-  if (!token || !baseUrl) throw new Error("云端语音识别未配置，请先登录 SecAgent 官方服务");
+  if (!token || !baseUrl) return null;
   const wsBase = baseUrl.replace(/^https:/, "wss:").replace(/^http:/, "ws:");
   return `${wsBase}/asr/ws?token=${encodeURIComponent(token)}`;
 }
 
 export function startSpeech(window: BrowserWindow | undefined): { ok: true } {
+  speechWindow = window;
+  if (worker) return { ok: true };
   if (remoteSocket && (remoteSocket.readyState === WebSocket.OPEN || remoteSocket.readyState === WebSocket.CONNECTING)) return { ok: true };
 
   const url = remoteAsrUrl();
-  if (typeof WebSocket === "undefined") throw new Error("当前环境不支持云端语音识别");
-  try {
-    const socket = new WebSocket(url);
-    remoteSocket = socket;
-    mode = "remote";
-    socket.binaryType = "arraybuffer";
-    socket.onopen = () => {
-      if (remoteSocket === socket && socket.readyState === WebSocket.OPEN) {
-        for (const pcm of pendingRemoteAudio) socket.send(pcm);
+  if (url && typeof WebSocket !== "undefined") {
+    try {
+      const socket = new WebSocket(url);
+      remoteSocket = socket;
+      mode = "remote";
+      socket.binaryType = "arraybuffer";
+      socket.onopen = () => {
+        if (remoteSocket === socket && socket.readyState === WebSocket.OPEN) {
+          for (const pcm of pendingRemoteAudio) socket.send(pcm);
+          pendingRemoteAudio = [];
+        }
+        send(speechWindow, { type: "ready" });
+      };
+      socket.onmessage = (event) => {
+        try { send(speechWindow, typeof event.data === "string" ? JSON.parse(event.data) : event.data); }
+        catch { send(speechWindow, { type: "log", message: String(event.data ?? "") }); }
+      };
+      socket.onerror = () => { if (mode === "remote") send(speechWindow, { type: "error", message: "云端语音识别连接失败" }); };
+      socket.onclose = () => {
+        const wasRemote = mode === "remote";
+        if (remoteSocket === socket) { remoteSocket = undefined; mode = "idle"; }
         pendingRemoteAudio = [];
-      }
-      send(window, { type: "ready" });
-    };
-    socket.onmessage = (event) => {
-      try {
-        const payload = typeof event.data === "string" ? JSON.parse(event.data) : event.data;
-        send(window, payload);
-      } catch {
-        send(window, { type: "log", message: String(event.data ?? "") });
-      }
-    };
-    socket.onerror = () => {
-      if (mode === "remote") send(window, { type: "error", message: "云端语音识别连接失败" });
-    };
-    socket.onclose = () => {
-      const wasRemote = mode === "remote";
-      if (remoteSocket === socket) {
-        remoteSocket = undefined;
-        mode = "idle";
-      }
-      pendingRemoteAudio = [];
-      if (wasRemote) send(window, { type: "stopped" });
-    };
-    return { ok: true };
-  } catch (error) {
-    remoteSocket = undefined;
-    mode = "idle";
-    throw error;
+        if (wasRemote) send(speechWindow, { type: "stopped" });
+      };
+      return { ok: true };
+    } catch {
+      remoteSocket = undefined;
+      mode = "idle";
+    }
   }
+
+  mode = "local";
+  const model = projectPath("models", modelName);
+  const script = projectPath("speech-worker.py");
+  worker = spawn(process.env.PYTHON || "python3", [
+    script,
+    "--tokens", path.join(model, "tokens.txt"),
+    "--encoder", path.join(model, "encoder-epoch-99-avg-1.int8.onnx"),
+    "--decoder", path.join(model, "decoder-epoch-99-avg-1.onnx"),
+    "--joiner", path.join(model, "joiner-epoch-99-avg-1.int8.onnx")
+  ], { stdio: "pipe" });
+  const output = readline.createInterface({ input: worker.stdout });
+  output.on("line", (line) => { try { send(speechWindow, JSON.parse(line)); } catch { /* Ignore malformed worker output. */ } });
+  worker.stderr.on("data", (chunk) => send(speechWindow, { type: "log", message: String(chunk) }));
+  worker.on("error", (error) => send(speechWindow, { type: "error", message: error.message }));
+  worker.on("exit", (code) => {
+    if (worker) send(speechWindow, { type: "stopped", code });
+    worker = undefined;
+    mode = "idle";
+    speechWindow = undefined;
+  });
+  return { ok: true };
 }
 
 export function sendSpeechAudio(samples: Float32Array): void {
+  const pcm = samples.buffer.slice(samples.byteOffset, samples.byteOffset + samples.byteLength) as ArrayBuffer;
   if (remoteSocket?.readyState === WebSocket.OPEN) {
-    // float32 LE PCM @16kHz mono — same wire format the relay expects.
-    const pcm = samples.buffer.slice(samples.byteOffset, samples.byteOffset + samples.byteLength) as ArrayBuffer;
-    try { remoteSocket.send(pcm); } catch { /* Socket may have closed between the state check and send. */ }
+    try { remoteSocket.send(pcm); } catch { /* Socket may close between the state check and send. */ }
     return;
   }
   if (remoteSocket?.readyState === WebSocket.CONNECTING) {
-    const pcm = samples.buffer.slice(samples.byteOffset, samples.byteOffset + samples.byteLength) as ArrayBuffer;
-    // Keep at most roughly 0.5s while the cloud connection is handshaking.
     if (pendingRemoteAudio.length >= 32) pendingRemoteAudio.shift();
     pendingRemoteAudio.push(pcm);
     return;
   }
+  if (!worker || worker.stdin.destroyed) return;
+  worker.stdin.write(JSON.stringify({ type: "audio", pcm: Buffer.from(pcm).toString("base64") }) + "\n");
 }
 
 export function stopSpeech(): void {
@@ -86,9 +117,10 @@ export function stopSpeech(): void {
     pendingRemoteAudio = [];
     if (remoteSocket.readyState === WebSocket.OPEN) {
       try { remoteSocket.send("Done"); } catch { /* Socket may already be closing. */ }
-    } else if (remoteSocket.readyState === WebSocket.CONNECTING) {
-      remoteSocket.close();
-    }
+    } else if (remoteSocket.readyState === WebSocket.CONNECTING) remoteSocket.close();
     return;
   }
+  if (!worker || worker.stdin.destroyed) return;
+  worker.stdin.write(JSON.stringify({ type: "stop" }) + "\n");
+  worker.stdin.end();
 }

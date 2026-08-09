@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld("secagent", {
   openSkillsDirectory: () => ipcRenderer.invoke("settings:open-skills"),
   saveSettings: (payload: unknown) => ipcRenderer.invoke("settings:save", payload),
   listPlugins: () => ipcRenderer.invoke("plugins:list"),
+  callPluginSettings: (pluginId: string, pageId: string, action: string, args?: unknown) => ipcRenderer.invoke("plugins:settings-call", pluginId, pageId, action, args || {}),
   setPluginEnabled: (id: string, enabled: boolean) => ipcRenderer.invoke("plugins:set-enabled", id, enabled),
   reloadPlugin: (id: string) => ipcRenderer.invoke("plugins:reload", id),
   uninstallPlugin: (id: string) => ipcRenderer.invoke("plugins:uninstall", id),
@@ -29,6 +30,9 @@ contextBridge.exposeInMainWorld("secagent", {
   sendSpeechAudio: (samples: Float32Array) => ipcRenderer.send("speech:audio", samples),
   stopSpeech: () => ipcRenderer.invoke("speech:stop"),
   synthesizeSpeech: (text: string) => ipcRenderer.invoke("tts:synthesize", text),
+  setWakeContext: (context: unknown) => ipcRenderer.send("wake:context", context),
+  closeWake: () => ipcRenderer.invoke("wake:close"),
+  setWakeInteractive: (interactive: boolean) => ipcRenderer.send("wake:interactive", interactive),
   onSpeechEvent: (listener: (event: unknown) => void) => {
     const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
     ipcRenderer.on("speech:event", wrapped);

@@ -25,7 +25,7 @@ interface PluginManifest {
 }
 interface InstalledPlugin { id: string; version: string; enabled: boolean }
 interface PluginStateFile { plugins: InstalledPlugin[] }
-interface ActivePlugin { manifest: PluginManifest; root: string; state: PluginStatus["state"]; message?: string; tools: Map<string, { definition: PluginToolDefinition; call: (args: Record<string, unknown>) => Promise<unknown> }>; skills: Map<string, string>; prompts: Map<string, PluginPromptProvider>; dispose?: () => void | Promise<void> }
+interface ActivePlugin { manifest: PluginManifest; root: string; state: PluginStatus["state"]; message?: string; tools: Map<string, { definition: PluginToolDefinition; call: (args: Record<string, unknown>) => Promise<unknown> }>; skills: Map<string, string>; prompts: Map<string, PluginPromptProvider>; settingsHandlers?: Map<string, (action: string, args: Record<string, unknown>) => Promise<unknown>>; dispose?: () => void | Promise<void> }
 
 /** 插件注册的提示词：静态文本，或每次用户发消息时求值的提供器。 */
 export type PluginPromptProvider = string | (() => string | Promise<string>);
@@ -40,6 +40,14 @@ export interface PluginHostApi {
   unregisterSkill(name: string): void;
   registerPrompt(name: string, provider: PluginPromptProvider): void;
   unregisterPrompt(name: string): void;
+  registerSettingsHandler(pageId: string, handler: (action: string, args: Record<string, unknown>) => Promise<unknown>): void;
+  unregisterSettingsHandler(pageId: string): void;
+  getSectlSession(): Promise<{ accessToken: string; userId?: string; email?: string; name?: string } | null>;
+  sectlOAuthLogin(): Promise<{ accessToken: string; userId?: string; email?: string; name?: string }>;
+  /** Read plugin-scoped preferences. This must not be used for business data or access tokens. */
+  getConfig(): Record<string, unknown>;
+  /** Persist plugin-scoped preferences. The host stores this outside the workspace business databases. */
+  setConfig(config: Record<string, unknown>): void;
   setStatus(message: string, state?: "ready" | "error"): void;
   fetch(url: string, init?: RequestInit): Promise<Response>;
 }
@@ -51,14 +59,19 @@ export interface PluginHostApi {
 export class PluginManager {
   private readonly installedRoot: string;
   private readonly runtimeRoot: string;
+  private readonly configRoot: string;
   private readonly statePath: string;
   private active = new Map<string, ActivePlugin>();
   private state: PluginStateFile = { plugins: [] };
   private listeners = new Set<() => void>();
 
-  constructor(private readonly workspace: string) {
+  constructor(private readonly workspace: string, private readonly authBridge: {
+    getSession: () => Promise<{ accessToken: string; userId?: string; email?: string; name?: string } | null>;
+    oauthLogin: () => Promise<{ accessToken: string; userId?: string; email?: string; name?: string }>;
+  } = { getSession: async () => null, oauthLogin: async () => { throw new Error("SECTL OAuth login unavailable"); } }) {
     this.installedRoot = path.join(workspace, "plugins", "installed");
     this.runtimeRoot = path.join(workspace, ".secagent-runtime", "plugins");
+    this.configRoot = path.join(workspace, "plugins", "config");
     this.statePath = path.join(workspace, "plugins", "plugins.json");
   }
 
@@ -176,13 +189,20 @@ export class PluginManager {
     throw new Error(`未注册插件工具：${key}`);
   }
 
+  async callSettings(id: string, pageId: string, action: string, args: Record<string, unknown> = {}): Promise<unknown> {
+    const plugin = this.active.get(id);
+    const handler = plugin?.settingsHandlers?.get(pageId);
+    if (!handler) throw new Error(`插件设置页不可用：${id}/${pageId}`);
+    return handler(action, args);
+  }
+
   private async activate(id: string): Promise<void> {
     const installed = this.state.plugins.find((item) => item.id === id && item.enabled);
     if (!installed || this.active.has(id)) return;
     const root = path.join(this.installedRoot, installed.id, installed.version);
     const manifest = this.readManifest(root);
     if (!manifest) { this.active.set(id, { manifest: { apiVersion: API_VERSION, id, name: id, version: installed.version }, root, state: "error", message: "找不到或无法读取插件清单", tools: new Map(), skills: new Map(), prompts: new Map() }); this.changed(); return; }
-    const plugin: ActivePlugin = { manifest, root, state: "starting", tools: new Map(), skills: new Map(), prompts: new Map() };
+    const plugin: ActivePlugin = { manifest, root, state: "starting", tools: new Map(), skills: new Map(), prompts: new Map(), settingsHandlers: new Map() };
     this.active.set(id, plugin); this.changed();
     try {
       if (!manifest.main) throw new Error("插件清单缺少 main 入口");
@@ -240,6 +260,18 @@ export class PluginManager {
         plugin.prompts.set(name, provider); this.changed();
       },
       unregisterPrompt: (name) => { plugin.prompts.delete(name); this.changed(); },
+      registerSettingsHandler: (pageId, handler) => {
+        requirePermission("agent.settings");
+        if (!/^[a-z][a-z0-9_-]*$/.test(pageId)) throw new Error("插件设置页 ID 无效");
+        plugin.settingsHandlers ??= new Map();
+        plugin.settingsHandlers.set(pageId, handler);
+        this.changed();
+      },
+      unregisterSettingsHandler: (pageId) => { plugin.settingsHandlers?.delete(pageId); this.changed(); },
+      getSectlSession: () => this.authBridge.getSession(),
+      sectlOAuthLogin: () => this.authBridge.oauthLogin(),
+      getConfig: () => this.readPluginConfig(plugin),
+      setConfig: (config) => this.writePluginConfig(plugin, config),
       setStatus: (message, state = "ready") => { plugin.message = message; plugin.state = state; this.changed(); },
       fetch: async (url, init) => { requirePermission("network.http"); const parsed = new URL(url); if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("插件 HTTP 仅允许 http/https"); return fetch(url, init); }
     };
@@ -286,4 +318,23 @@ export class PluginManager {
   }
   private readState(): PluginStateFile { try { const raw = JSON.parse(fs.readFileSync(this.statePath, "utf8")) as PluginStateFile; return { plugins: Array.isArray(raw.plugins) ? raw.plugins : [] }; } catch { return { plugins: [] }; } }
   private saveState(): void { fs.mkdirSync(path.dirname(this.statePath), { recursive: true }); fs.writeFileSync(this.statePath, `${JSON.stringify(this.state, null, 2)}\n`, "utf8"); }
+  private pluginConfigPath(plugin: ActivePlugin): string { return path.join(this.configRoot, `${plugin.manifest.id}.json`); }
+  private readPluginConfig(plugin: ActivePlugin): Record<string, unknown> {
+    try {
+      const raw = JSON.parse(fs.readFileSync(this.pluginConfigPath(plugin), "utf8")) as unknown;
+      return raw && typeof raw === "object" && !Array.isArray(raw) ? { ...(raw as Record<string, unknown>) } : {};
+    } catch {
+      return {};
+    }
+  }
+  private writePluginConfig(plugin: ActivePlugin, config: Record<string, unknown>): void {
+    if (!config || typeof config !== "object" || Array.isArray(config)) throw new Error("插件配置必须是对象");
+    const serialized = `${JSON.stringify(config, null, 2)}\n`;
+    if (Buffer.byteLength(serialized, "utf8") > 64 * 1024) throw new Error("插件配置超过 64 KiB 限制");
+    fs.mkdirSync(this.configRoot, { recursive: true });
+    const target = this.pluginConfigPath(plugin);
+    const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(temporary, serialized, "utf8");
+    fs.renameSync(temporary, target);
+  }
 }

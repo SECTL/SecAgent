@@ -1,8 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import { PluginSettingsPanel } from "./PluginSettingsPanel.js";
+import { SecScoreSettingsPage } from "./SecScoreSettingsPage.js";
 import { PresetCombobox } from "./PresetCombobox.js";
 import { reasoningEffortLabels, ttsRates, ttsVoices } from "../constants.js";
 import { emptyMcp, emptyProvider, reasoningEffortsForModel } from "../utils.js";
+import { DEFAULT_WAKE_HOTKEY, displayWakeHotkey, wakeHotkeyFromKeyboardEvent } from "../../../wake-hotkey.js";
+
+function WakeHotkeyField({ value, platform, onChange }: { value: string; platform: NodeJS.Platform; onChange: (value: string) => void }) {
+  const [capturing, setCapturing] = useState(false);
+  return <div className="wake-hotkey-field">
+    <label>全局快捷键<input readOnly value={capturing ? "请按下快捷键..." : displayWakeHotkey(value, platform)} onFocus={() => setCapturing(true)} onBlur={() => setCapturing(false)} onKeyDown={(event) => { event.preventDefault(); const hotkey = wakeHotkeyFromKeyboardEvent(event.nativeEvent); if (hotkey) { onChange(hotkey); setCapturing(false); } }} /></label>
+    <button type="button" className="secondary-button" onClick={() => onChange(DEFAULT_WAKE_HOTKEY)}>恢复默认</button>
+  </div>;
+}
 
 export function SettingsApp() {
   const bridge = window.secagent;
@@ -26,7 +36,7 @@ export function SettingsApp() {
   const skipAutosave = useRef(true);
   const [activePage, setActivePage] = useState(() => {
     const hash = window.location.hash.replace(/^#/, "");
-    const builtInPage = ["settings-tts", "settings-models", "settings-mcp", "settings-plugins"].includes(hash);
+    const builtInPage = ["settings-wake", "settings-tts", "settings-models", "settings-mcp", "settings-plugins"].includes(hash);
     return isOobe ? "settings-models" : (builtInPage || hash.startsWith("plugin-") ? hash : "settings-tts");
   });
 
@@ -67,7 +77,18 @@ export function SettingsApp() {
     }
     const timer = window.setTimeout(() => {
       setError("");
-      void bridge.saveSettings(settings).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+      void bridge.saveSettings(settings).catch(async (reason) => {
+        setError(reason instanceof Error ? reason.message : String(reason));
+        // A conflicting wake shortcut is deliberately not persisted by the
+        // main process. Reflect that authoritative value in the editor while
+        // preserving unrelated draft changes.
+        try {
+          const persisted = await bridge.getSettings();
+          if (persisted.wake.hotkey !== settings.wake.hotkey) {
+            setSettings((current) => current && current.wake.hotkey === settings.wake.hotkey ? { ...current, wake: persisted.wake } : current);
+          }
+        } catch { /* Keep the original save error visible. */ }
+      });
     }, 350);
     return () => window.clearTimeout(timer);
   }, [bridge, isOobe, settings]);
@@ -109,7 +130,15 @@ export function SettingsApp() {
   const save = async () => {
     setError(""); setSaved(false);
     try { const result = await bridge.saveSettings(settings); setSettings(result); setSaved(true); setTimeout(() => setSaved(false), 2200); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      try {
+        const persisted = await bridge.getSettings();
+        if (persisted.wake.hotkey !== settings.wake.hotkey) {
+          setSettings((current) => current && current.wake.hotkey === settings.wake.hotkey ? { ...current, wake: persisted.wake } : current);
+        }
+      } catch { /* Keep the original save error visible. */ }
+    }
   };
   const officialLogin = async () => {
     setError(""); setOfficialBusy(true);
@@ -123,12 +152,15 @@ export function SettingsApp() {
   const defaultReasoningEffort = defaultReasoningEfforts.includes(settings.defaultReasoningEffort || "high") ? (settings.defaultReasoningEffort || "high") : defaultReasoningEfforts.includes("high") ? "high" : defaultReasoningEfforts[0];
   return <main className={`settings-shell has-window-title ${isOobe ? "oobe-shell" : ""} ${bridge.platform === "darwin" ? "macos-settings" : ""} ${bridge.platform === "win32" ? "windows-settings" : ""}`}>
     <div className="settings-window-title">SecAgent设置</div>
-    {!isOobe && <nav className="settings-nav" aria-label="Settings navigation"><button type="button" className={activePage === "settings-tts" ? "active" : ""} aria-current={activePage === "settings-tts" ? "page" : undefined} onClick={() => { setActivePage("settings-tts"); window.history.replaceState(null, "", "#settings-tts"); }}>朗读</button><button type="button" className={activePage === "settings-models" ? "active" : ""} aria-current={activePage === "settings-models" ? "page" : undefined} onClick={() => { setActivePage("settings-models"); window.history.replaceState(null, "", "#settings-models"); }}>模型</button><button type="button" className={activePage === "settings-mcp" ? "active" : ""} aria-current={activePage === "settings-mcp" ? "page" : undefined} onClick={() => { setActivePage("settings-mcp"); window.history.replaceState(null, "", "#settings-mcp"); }}>MCP 服务</button><button type="button" className={activePage === "settings-plugins" ? "active" : ""} aria-current={activePage === "settings-plugins" ? "page" : undefined} onClick={() => { setActivePage("settings-plugins"); window.history.replaceState(null, "", "#settings-plugins"); }}>插件</button>{plugins.flatMap((plugin) => plugin.settingsPages.map((page) => { const pageId = `plugin-${plugin.id}-${page.id}`; return <button type="button" className={activePage === pageId ? "active" : ""} aria-current={activePage === pageId ? "page" : undefined} key={pageId} onClick={() => { setActivePage(pageId); window.history.replaceState(null, "", `#${pageId}`); }}>{page.title}</button>; }))}</nav>}
+    {!isOobe && <nav className="settings-nav" aria-label="Settings navigation"><button type="button" className={activePage === "settings-wake" ? "active" : ""} aria-current={activePage === "settings-wake" ? "page" : undefined} onClick={() => { setActivePage("settings-wake"); window.history.replaceState(null, "", "#settings-wake"); }}>随时唤醒</button><button type="button" className={activePage === "settings-tts" ? "active" : ""} aria-current={activePage === "settings-tts" ? "page" : undefined} onClick={() => { setActivePage("settings-tts"); window.history.replaceState(null, "", "#settings-tts"); }}>朗读</button><button type="button" className={activePage === "settings-models" ? "active" : ""} aria-current={activePage === "settings-models" ? "page" : undefined} onClick={() => { setActivePage("settings-models"); window.history.replaceState(null, "", "#settings-models"); }}>模型</button><button type="button" className={activePage === "settings-mcp" ? "active" : ""} aria-current={activePage === "settings-mcp" ? "page" : undefined} onClick={() => { setActivePage("settings-mcp"); window.history.replaceState(null, "", "#settings-mcp"); }}>MCP 服务</button><button type="button" className={activePage === "settings-plugins" ? "active" : ""} aria-current={activePage === "settings-plugins" ? "page" : undefined} onClick={() => { setActivePage("settings-plugins"); window.history.replaceState(null, "", "#settings-plugins"); }}>插件</button>{plugins.flatMap((plugin) => plugin.settingsPages.map((page) => { const pageId = `plugin-${plugin.id}-${page.id}`; return <button type="button" className={activePage === pageId ? "active" : ""} aria-current={activePage === pageId ? "page" : undefined} key={pageId} onClick={() => { setActivePage(pageId); window.history.replaceState(null, "", `#${pageId}`); }}>{page.title}</button>; }))}</nav>}
     {isOobe && <>
       <header className="oobe-header"><p className="eyebrow">WELCOME TO SECAGENT</p><h1>先配置一个大模型</h1><p>完成模型配置后就可以开始使用。其他设置暂时不用处理，之后随时可以回来修改。</p><button className="primary-button" onClick={() => void save()}>保存并开始使用</button></header>
       <div className="oobe-intro"><strong>只需要完成这一项</strong><span>选择模型协议，填写模型名称和 API Key。MCP、语音及其他高级设置不会影响首次使用。</span></div>
     </>}
     {error && <div className="settings-error">{error}</div>}{isOobe && saved && <div className="settings-success">设置已保存，下一次请求立即生效。</div>}
+    <section id="settings-wake" className={`settings-section ${isOobe || activePage === "settings-wake" ? "settings-section-active" : ""}`}><div className="section-title"><div><h2>随时唤醒</h2><p>按下全局快捷键后，在当前显示器工作区唤起语音 Agent。窗口不会覆盖任务栏。</p></div></div>
+      <article className="settings-card"><WakeHotkeyField value={settings.wake.hotkey} platform={bridge.platform} onChange={(hotkey) => setSettings((current) => current && { ...current, wake: { hotkey } })} /><p className="settings-help">Windows 默认 Ctrl Alt A；macOS 默认 Ctrl Option A。快捷键被其它程序占用时不会保存。</p></article>
+    </section>
     <section id="settings-tts" className={`settings-section ${isOobe || activePage === "settings-tts" ? "settings-section-active" : ""}`}><div className="section-title"><div><h2>朗读</h2><p>右键消息气泡选择“朗读”。语音由 Microsoft Edge 在线生成，不需要 API Key。</p></div></div>
       <article className="settings-card"><div className="form-grid"><label>语音音色<select value={settings.tts.voice} onChange={(event) => setSettings((current) => current && { ...current, tts: { ...current.tts, voice: event.target.value } })}>{ttsVoices.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>语速<select value={settings.tts.rate} onChange={(event) => setSettings((current) => current && { ...current, tts: { ...current.tts, rate: event.target.value } })}>{ttsRates.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div></article>
     </section>
@@ -146,10 +178,10 @@ export function SettingsApp() {
     </section>
     {!isOobe && plugins.flatMap((plugin) => plugin.settingsPages.map((page) => activePage === `plugin-${plugin.id}-${page.id}` && <section className="settings-section settings-section-active plugin-settings-section" key={`${plugin.id}-${page.id}`}>
       <div className="section-title"><h2>{page.title}</h2></div>
-      <article className={`settings-card plugin-service-status ${plugin.state}`}>
+      {plugin.id === "secscore-connector" && page.id === "secscore" ? <SecScoreSettingsPage pluginId={plugin.id} pageId={page.id} /> : <article className={`settings-card plugin-service-status ${plugin.state}`}>
         <span>服务状态</span>
         <strong>{plugin.message || (plugin.state === "ready" ? "已就绪" : "未连接")}</strong>
-      </article>
+      </article>}
     </section>))}
 
   </main>;

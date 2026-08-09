@@ -4,6 +4,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ArrowUp, LoaderCircle, Square, Volume2 } from "lucide-react";
 import { SettingsApp } from "./components/SettingsApp.js";
+import { WakeOverlay } from "./components/WakeOverlay.js";
 import { MessageActivities } from "./components/MessageActivities.js";
 import { AttachmentStrip } from "./components/AttachmentStrip.js";
 import { reasoningEffortLabels, traceLabel } from "./constants.js";
@@ -13,7 +14,9 @@ import { officialTiers, tierDefaultId } from "./constants.js";
 
 export function App() {
   const bridge = window.secagent;
-  if (new URLSearchParams(window.location.search).has("settings")) return <SettingsApp />;
+  const route = new URLSearchParams(window.location.search);
+  if (route.has("settings")) return <SettingsApp />;
+  if (route.has("wake")) return <WakeOverlay />;
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [models, setModels] = useState<ModelOption[]>([]);
   const [selectedModelId, setSelectedModelId] = useState("");
@@ -47,6 +50,9 @@ export function App() {
   const orderedModels = useMemo(() => [...models.filter(isOfficialModel), ...models.filter((model) => !isOfficialModel(model))], [models]);
   const selectedModel = models.find((model) => model.id === selectedModelId);
   const reasoningEfforts = useMemo(() => reasoningEffortsForModel(selectedModel), [selectedModel]);
+  useEffect(() => {
+    bridge.setWakeContext({ sessionId: session?.meta.id, modelId: selectedModelId || undefined, reasoningEffort: customModelMode ? reasoningEffort : defaultEffort });
+  }, [bridge, session?.meta.id, selectedModelId, reasoningEffort, defaultEffort, customModelMode]);
   useEffect(() => {
     if (!reasoningEfforts.includes(reasoningEffort)) setReasoningEffort("high");
   }, [reasoningEffort, reasoningEfforts]);

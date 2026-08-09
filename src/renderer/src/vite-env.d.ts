@@ -11,7 +11,7 @@ interface McpServerConfig { transport: "stdio" | "http"; command?: string; args?
 interface ProviderModel { id: string; name?: string; enabled?: boolean }
 interface ProviderConfig { id: string; name: string; preset?: string; provider: ModelProfile["provider"]; apiKeyEnv: string; apiKey?: string; apiKeyConfigured?: boolean; baseUrl: string; endpoint?: string; anthropicVersion?: string; maxTokens?: number; models: ProviderModel[] }
 interface ProviderPreset { id: string; name: string; env: string[]; api: string; models: ProviderModel[] }
-interface SettingsPayload { providers: ProviderConfig[]; models: ModelProfile[]; tts: { voice: string; rate: string }; mcp: { servers: Record<string, McpServerConfig> }; defaultModelId?: string; defaultReasoningEffort?: ReasoningEffort; customModelMode?: boolean }
+interface SettingsPayload { providers: ProviderConfig[]; models: ModelProfile[]; tts: { voice: string; rate: string }; wake: { hotkey: string }; mcp: { servers: Record<string, McpServerConfig> }; defaultModelId?: string; defaultReasoningEffort?: ReasoningEffort; customModelMode?: boolean }
 interface SkillSummary { name: string; description: string; path: string }
 interface PluginStatus { id: string; name: string; version: string; icon?: string; enabled: boolean; state: "inactive" | "starting" | "error" | "ready"; message?: string; description?: string; author?: string; repository?: string; permissions?: string[]; readme?: string; settingsPages: Array<{ id: string; title: string; description?: string }> }
 interface MarketplaceVersion { version: string; minHostApiVersion: number; assetUrl: string; sha256: string; permissions: string[]; platforms: string[] }
@@ -31,6 +31,7 @@ interface Window {
     listSkills(): Promise<SkillSummary[]>;
     openSkillsDirectory(): Promise<string>;
     listPlugins(): Promise<PluginStatus[]>;
+    callPluginSettings(pluginId: string, pageId: string, action: string, args?: unknown): Promise<any>;
     setPluginEnabled(id: string, enabled: boolean): Promise<PluginStatus[]>;
     reloadPlugin(id: string): Promise<PluginStatus[]>;
     uninstallPlugin(id: string): Promise<PluginStatus[]>;
@@ -47,6 +48,9 @@ interface Window {
     sendSpeechAudio(samples: Float32Array): void;
     stopSpeech(): Promise<{ ok: true }>;
     synthesizeSpeech(text: string): Promise<string>;
+    setWakeContext(context: { sessionId?: string; modelId?: string; reasoningEffort?: ReasoningEffort }): void;
+    closeWake(): Promise<{ ok: true }>;
+    setWakeInteractive(interactive: boolean): void;
     onSpeechEvent(listener: (event: unknown) => void): () => void;
     onSettingsChanged(listener: (settings: SettingsPayload) => void): () => void;
     onPluginsChanged(listener: (plugins: PluginStatus[]) => void): () => void;

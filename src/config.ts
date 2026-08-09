@@ -4,12 +4,13 @@ import YAML from "yaml";
 import { expandPath } from "./paths.js";
 import type { McpServerConfig, ModelProfile, ProviderConfig, ReasoningEffort, SecAgentConfig } from "./types.js";
 import type { GoogleModelInfo } from "./google-models.js";
+import { DEFAULT_WAKE_HOTKEY, normalizeWakeHotkey } from "./wake-hotkey.js";
 
 export const DEFAULT_GOOGLE_MODEL = "gemini-2.5-flash";
 export const DEFAULT_MAX_TOKENS = 16_384;
 const ONBOARDING_MARKER = ".oobe-complete";
 const LEGACY_AGENT_MODEL_FIELDS = ["provider", "model", "apiKeyEnv", "baseUrl", "endpoint", "anthropicVersion", "maxTokens"] as const;
-const WORKSPACE_RUNTIME_ENV_KEYS = new Set(["SECTL_OFFICIAL_TOKEN", "SECTL_OFFICIAL_EMAIL"]);
+const WORKSPACE_RUNTIME_ENV_KEYS = new Set(["SECTL_OFFICIAL_TOKEN", "SECTL_OFFICIAL_EMAIL", "SECTL_OFFICIAL_SECTL_TOKEN", "SECTL_OFFICIAL_USER_ID"]);
 /** Developer/service configuration is kept in SecAgent/.env, not the workspace. */
 export const PROJECT_ENV_FILE = path.resolve(process.cwd(), ".env");
 
@@ -35,6 +36,7 @@ const template = (workspace: string): SecAgentConfig => ({
     }]
   } as SecAgentConfig["agent"],
   tts: { voice: DEFAULT_TTS_VOICE, rate: DEFAULT_TTS_RATE },
+  wake: { hotkey: DEFAULT_WAKE_HOTKEY },
   mcp: { servers: {} }
 });
 
@@ -68,7 +70,7 @@ export function initializeWorkspace(workspace: string): void {
   const file = configPath(workspace);
   if (!fs.existsSync(file)) fs.writeFileSync(file, YAML.stringify(template(workspace)), "utf8");
   const envFile = path.join(workspace, ".env");
-  if (!fs.existsSync(envFile)) fs.writeFileSync(envFile, "# 本地密钥和官方服务连接配置，不要提交或分享此文件。\nOPENAI_API_KEY=\nANTHROPIC_API_KEY=\nGEMINI_API_KEY=\nSECTL_OFFICIAL_API_URL=\nSECTL_OAUTH_API_URL=https://appwrite.sectl.cn\nSECTL_OAUTH_CALLBACK_PORT=49152\nSECTL_OFFICIAL_PLATFORM_ID=\nSECTL_OFFICIAL_CLIENT_ID=\nSECTL_OFFICIAL_TOKEN=\nSECTL_OFFICIAL_EMAIL=\n", "utf8");
+  if (!fs.existsSync(envFile)) fs.writeFileSync(envFile, "# 本地密钥和官方服务连接配置，不要提交或分享此文件。\nOPENAI_API_KEY=\nANTHROPIC_API_KEY=\nGEMINI_API_KEY=\nSECTL_OFFICIAL_API_URL=\nSECTL_OAUTH_API_URL=https://appwrite.sectl.cn\nSECTL_OAUTH_CALLBACK_PORT=49152\nSECTL_OFFICIAL_PLATFORM_ID=\nSECTL_OFFICIAL_CLIENT_ID=\nSECTL_OFFICIAL_TOKEN=\nSECTL_OFFICIAL_EMAIL=\nSECTL_OFFICIAL_SECTL_TOKEN=\nSECTL_OFFICIAL_USER_ID=\n", "utf8");
   removeReservedWorkspaceEnvEntries(envFile);
 }
 
@@ -156,6 +158,8 @@ export function normalizeAndValidate(raw: SecAgentConfig, workspace: string): Se
     raw.agent.systemPrompt = DEFAULT_SYSTEM_PROMPT;
   }
   raw.tts = { voice: raw.tts?.voice || DEFAULT_TTS_VOICE, rate: raw.tts?.rate || DEFAULT_TTS_RATE };
+  try { raw.wake = { hotkey: normalizeWakeHotkey(raw.wake?.hotkey || DEFAULT_WAKE_HOTKEY) }; }
+  catch (error) { errors.push(error instanceof Error ? error.message : "随时唤醒快捷键无效"); }
   delete (raw.agent as { systemPromptFile?: unknown }).systemPromptFile;
   if (!raw?.agent?.provider || !["openai-compatible", "openai-responses", "anthropic", "google"].includes(raw.agent.provider)) errors.push("agent.provider 必须是 openai-compatible、openai-responses、anthropic 或 google");
   if (!raw?.agent?.model && raw?.agent?.provider !== "google") errors.push("agent.model 缺失");
@@ -248,6 +252,7 @@ export interface SettingsPayload {
   /** Compatibility field for older IPC callers; the settings UI uses providers. */
   models: Array<ModelProfile & { apiKey?: string; apiKeyConfigured?: boolean }>;
   tts: { voice: string; rate: string };
+  wake: { hotkey: string };
   mcp: { servers: Record<string, McpServerConfig> };
   defaultModelId?: string;
   defaultReasoningEffort?: ReasoningEffort;
@@ -271,7 +276,7 @@ export function readSettings(workspaceInput: string): SettingsPayload {
       maxTokens: config.agent.maxTokens
     }];
   const providers = config.agent.providers?.length ? config.agent.providers : groupLegacyModels(configured);
-  return { providers: providers.map((provider) => ({ ...provider, apiKeyConfigured: Boolean(process.env[provider.apiKeyEnv]) })), models: configured.map((model) => ({ ...model, apiKeyConfigured: Boolean(process.env[model.apiKeyEnv]) })), tts: { voice: config.tts?.voice || DEFAULT_TTS_VOICE, rate: config.tts?.rate || DEFAULT_TTS_RATE }, mcp: config.mcp, defaultModelId: config.defaults?.modelId, defaultReasoningEffort: config.defaults?.reasoningEffort, customModelMode: config.defaults?.customModelMode ?? false };
+  return { providers: providers.map((provider) => ({ ...provider, apiKeyConfigured: Boolean(process.env[provider.apiKeyEnv]) })), models: configured.map((model) => ({ ...model, apiKeyConfigured: Boolean(process.env[model.apiKeyEnv]) })), tts: { voice: config.tts?.voice || DEFAULT_TTS_VOICE, rate: config.tts?.rate || DEFAULT_TTS_RATE }, wake: { hotkey: config.wake?.hotkey || DEFAULT_WAKE_HOTKEY }, mcp: config.mcp, defaultModelId: config.defaults?.modelId, defaultReasoningEffort: config.defaults?.reasoningEffort, customModelMode: config.defaults?.customModelMode ?? false };
 }
 
 function groupLegacyModels(models: ModelProfile[]): ProviderConfig[] {
@@ -299,16 +304,18 @@ export function saveSettings(workspaceInput: string, payload: SettingsPayload): 
   });
   const models = providers.flatMap((provider) => provider.models.map((model) => ({ id: `${provider.id}:${model.id}`, name: model.name || model.id, enabled: model.enabled, provider: provider.provider, model: model.id, apiKeyEnv: provider.apiKeyEnv, baseUrl: provider.baseUrl, endpoint: provider.endpoint, anthropicVersion: provider.anthropicVersion, maxTokens: provider.maxTokens })));
   const nextTts = { voice: payload.tts?.voice || DEFAULT_TTS_VOICE, rate: payload.tts?.rate || DEFAULT_TTS_RATE };
+  const nextWake = { hotkey: normalizeWakeHotkey(payload.wake?.hotkey || DEFAULT_WAKE_HOTKEY) };
   const canonicalAgent = { ...(raw.agent as unknown as Record<string, unknown>), providers, models } as SecAgentConfig["agent"];
   for (const field of LEGACY_AGENT_MODEL_FIELDS) delete (canonicalAgent as unknown as Record<string, unknown>)[field];
   const candidateAgent = { ...canonicalAgent, models: models.map((model) => ({ ...model })) } as SecAgentConfig["agent"];
-  const candidate: SecAgentConfig = { ...raw, agent: candidateAgent, tts: nextTts, mcp: payload.mcp };
+  const candidate: SecAgentConfig = { ...raw, agent: candidateAgent, tts: nextTts, wake: nextWake, mcp: payload.mcp };
   delete (candidate as SecAgentConfig & { policy?: unknown }).policy;
   // Validate a normalized copy, then persist only the canonical multi-model fields.
   normalizeAndValidate(candidate, workspace);
   canonicalAgent.models = candidate.agent.models;
   raw.agent = canonicalAgent;
   raw.tts = nextTts;
+  raw.wake = nextWake;
   raw.mcp = payload.mcp;
   raw.defaults = { modelId: payload.defaultModelId || undefined, reasoningEffort: payload.defaultReasoningEffort || undefined, customModelMode: Boolean(payload.customModelMode) };
   delete (raw as SecAgentConfig & { policy?: unknown }).policy;

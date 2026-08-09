@@ -7,31 +7,13 @@ import type { AgentTool } from "./model-provider.js";
 const execAsync = promisify(exec);
 
 export const piTools: AgentTool[] = [
-  {
-    key: "read",
-    description: "读取文件内容。path 可使用绝对路径或相对于工作区的路径。",
-    inputSchema: { type: "object", additionalProperties: false, required: ["path"], properties: { path: { type: "string" }, offset: { type: "integer", minimum: 1 }, limit: { type: "integer", minimum: 1 } } }
-  },
-  {
-    key: "write",
-    description: "写入文件内容；父目录不存在时自动创建。",
-    inputSchema: { type: "object", additionalProperties: false, required: ["path", "content"], properties: { path: { type: "string" }, content: { type: "string" } } }
-  },
-  {
-    key: "edit",
-    description: "将文件中唯一匹配的 oldText 替换为 newText。",
-    inputSchema: { type: "object", additionalProperties: false, required: ["path", "oldText", "newText"], properties: { path: { type: "string" }, oldText: { type: "string" }, newText: { type: "string" } } }
-  },
-  {
-    key: "bash",
-    description: "在工作区目录执行 shell 命令并返回标准输出和错误输出。",
-    inputSchema: { type: "object", additionalProperties: false, required: ["command"], properties: { command: { type: "string" }, timeout: { type: "integer", minimum: 1 } } }
-  }
+  { key: "read", description: "读取文件内容。path 可使用绝对路径或相对于工作区的路径。", inputSchema: { type: "object", additionalProperties: false, required: ["path"], properties: { path: { type: "string" }, offset: { type: "integer", minimum: 1 }, limit: { type: "integer", minimum: 1 } } } },
+  { key: "write", description: "写入文件内容；父目录不存在时自动创建。", inputSchema: { type: "object", additionalProperties: false, required: ["path", "content"], properties: { path: { type: "string" }, content: { type: "string" } } } },
+  { key: "edit", description: "将文件中唯一匹配的 oldText 替换为 newText。", inputSchema: { type: "object", additionalProperties: false, required: ["path", "oldText", "newText"], properties: { path: { type: "string" }, oldText: { type: "string" }, newText: { type: "string" } } } },
+  { key: "bash", description: "在工作区目录执行 shell 命令并返回标准输出和错误输出。", inputSchema: { type: "object", additionalProperties: false, required: ["command"], properties: { command: { type: "string" }, timeout: { type: "integer", minimum: 1 } } } }
 ];
 
-function resolvePath(workspace: string, filePath: string): string {
-  return path.isAbsolute(filePath) ? filePath : path.resolve(workspace, filePath);
-}
+function resolvePath(workspace: string, filePath: string): string { return path.isAbsolute(filePath) ? filePath : path.resolve(workspace, filePath); }
 
 export async function callPiTool(workspace: string, key: string, args: Record<string, unknown>): Promise<unknown> {
   if (key === "read") {

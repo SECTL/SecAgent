@@ -105,11 +105,11 @@ export class ModelToolAgent {
     const catalog = contributions.map(({ pluginId, name, text }) => `[${pluginId}/${name}]\n${text}`).join("\n\n");
     return `${this.agent.systemPrompt}\n\n## 插件注入的提示词\n${catalog}`;
   }
-  private async request(url: string, headers: Record<string, string>, body: unknown): Promise<unknown> {
+  private async request(url: string, headers: Record<string, string>, body: unknown, signal?: AbortSignal): Promise<unknown> {
     this.trace?.("model.request", { url, body });
     let response: Response;
     try {
-      response = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
+      response = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000) });
     } catch (error) {
       throw new Error(`无法连接模型端点 ${url}：${error instanceof Error ? error.message : String(error)}`);
     }
@@ -134,10 +134,29 @@ export class ModelToolAgent {
     completeBody: () => unknown,
     signal?: AbortSignal
   ): Promise<void> {
+    try {
+      await this.streamRequestOnce(url, headers, body, onEvent, completeBody, signal);
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/terminated|network|socket|closed|reset/i.test(message)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      await this.streamRequestOnce(url, headers, body, onEvent, completeBody, signal);
+    }
+  }
+
+  private async streamRequestOnce(
+    url: string,
+    headers: Record<string, string>,
+    body: Record<string, unknown>,
+    onEvent: (event: Record<string, unknown>) => void,
+    completeBody: () => unknown,
+    signal?: AbortSignal
+  ): Promise<void> {
     this.trace?.("model.request", { url, body });
     let response: Response;
     try {
-      response = await fetch(url, { method: "POST", headers, body: JSON.stringify({ ...body, stream: true }), signal: AbortSignal.any([AbortSignal.timeout(90_000), ...(signal ? [signal] : [])]) });
+      response = await fetch(url, { method: "POST", headers, body: JSON.stringify({ ...body, stream: true }), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(90_000)]) : AbortSignal.timeout(90_000) });
     } catch (error) {
       if (signal?.aborted) throw error;
       throw new Error(`无法连接模型端点 ${url}：${error instanceof Error ? error.message : String(error)}`);
@@ -175,6 +194,7 @@ export class ModelToolAgent {
     const history = conversation?.length ? conversation : [{ role: "user" as const, content: instruction }];
     const messages: Array<Record<string, unknown>> = [{ role: "system", content: systemPrompt }, ...history.map((message) => ({ role: message.role, content: openAIContent(message) }))];
     const definitions = tools.map((tool) => ({ type: "function", function: { name: tool.key, description: tool.description || tool.key, parameters: tool.inputSchema || { type: "object", properties: {} } } }));
+    let pendingToolError: string | undefined;
     for (let turn = 0; ; turn++) {
       let content = "";
       const toolCalls = new Map<number, { id?: string; function: { name?: string; arguments: string } }>();
@@ -203,9 +223,10 @@ export class ModelToolAgent {
       }, () => ({ choices: [{ message: { content: content || null, tool_calls: [...toolCalls.values()] } }] }), signal);
       const message = { content, tool_calls: [...toolCalls.values()] };
       const calls = message.tool_calls || [];
-      if (!calls.length) return message.content.trim() || "已完成。";
+      if (!calls.length) return pendingToolError ? `工具执行失败：${pendingToolError}` : message.content.trim() || "模型响应为空。";
       if (content) this.trace?.("model.output.reset", { turn: turn + 1, reason: "tool_call" });
       messages.push({ role: "assistant", content: message.content ?? null, tool_calls: calls.map((call) => ({ ...call, type: "function" })) });
+      let turnToolError: string | undefined;
       for (const call of calls) {
         const name = call.function?.name;
         if (!name || !call.id) continue;
@@ -214,9 +235,14 @@ export class ModelToolAgent {
         if ("_error" in args) throw new Error("模型返回了无法解析的工具参数，请提高 maxTokens 或重试");
         let result: unknown;
         signal?.throwIfAborted();
-        try { result = await execute(name, args); } catch (error) { result = { error: error instanceof Error ? error.message : String(error) }; }
+        try { result = await execute(name, args); } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          turnToolError ??= message;
+          result = { error: message };
+        }
         messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result) });
       }
+      pendingToolError = turnToolError;
     }
     throw new Error("工具调用循环意外结束");
   }
@@ -227,6 +253,7 @@ export class ModelToolAgent {
     const history = conversation?.length ? conversation : [{ role: "user" as const, content: instruction }];
     const input: InputItem[] = history.map((message) => ({ role: message.role, content: responsesContent(message) }));
     const definitions = tools.map((tool) => ({ type: "function", name: tool.key, description: tool.description || tool.key, parameters: tool.inputSchema || { type: "object", properties: {} }, strict: false }));
+    let pendingToolError: string | undefined;
     for (let turn = 0; ; turn++) {
       let answer = "";
       let summaryDeltaSeen = false;
@@ -296,9 +323,10 @@ export class ModelToolAgent {
         }
       }, () => ({ output: [{ type: "message", content: answer || undefined }, ...[...calls.values()].map((call) => ({ type: "function_call", call_id: call.callId, name: call.name, arguments: call.arguments }))] }), signal);
       const functionCalls = [...calls.values()].filter((call) => call.name && call.callId);
-      if (!functionCalls.length) return answer.trim() || "已完成。";
+      if (!functionCalls.length) return pendingToolError ? `工具执行失败：${pendingToolError}` : answer.trim() || "模型响应为空。";
       if (answer) this.trace?.("model.output.reset", { turn: turn + 1, reason: "tool_call" });
       if (responseOutput.length) input.push(...responseOutput);
+      let turnToolError: string | undefined;
       for (const call of functionCalls) {
         let args: Record<string, unknown> = {};
         try { args = JSON.parse(call.arguments || "{}"); } catch { args = { _error: "模型返回了无法解析的工具参数" }; }
@@ -306,9 +334,14 @@ export class ModelToolAgent {
         if (!responseOutput.length) input.push({ type: "function_call", call_id: call.callId, name: call.name, arguments: call.arguments });
         let result: unknown;
         signal?.throwIfAborted();
-        try { result = await execute(call.name, args); } catch (error) { result = { error: error instanceof Error ? error.message : String(error) }; }
+        try { result = await execute(call.name, args); } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          turnToolError ??= message;
+          result = { error: message };
+        }
         input.push({ type: "function_call_output", call_id: call.callId, output: JSON.stringify(result) });
       }
+      pendingToolError = turnToolError;
     }
     throw new Error("工具调用循环意外结束");
   }
@@ -323,6 +356,7 @@ export class ModelToolAgent {
       ]
     }));
     const definitions = tools.map((tool) => ({ name: tool.key, description: tool.description || tool.key, parameters: toGoogleSchema(tool.inputSchema || { type: "object", properties: {} }) }));
+    let pendingToolError: string | undefined;
     for (let turn = 0; ; turn++) {
       let text = "";
       const calls = new Map<string, { name: string; args: Record<string, unknown>; thoughtSignature?: string }>();
@@ -351,7 +385,7 @@ export class ModelToolAgent {
         }
       }, () => ({ candidates: [{ content: { parts: [{ text: text || undefined }, ...[...calls.values()].map((call) => ({ functionCall: call }))] } }] }), signal);
       const functionCalls = [...calls.values()];
-      if (!functionCalls.length) return text.trim() || "已完成。";
+      if (!functionCalls.length) return pendingToolError ? `工具执行失败：${pendingToolError}` : text.trim() || "模型响应为空。";
       if (text) this.trace?.("model.output.reset", { turn: turn + 1, reason: "tool_call" });
       const modelParts: Part[] = [];
       if (text) modelParts.push({ text });
@@ -360,12 +394,18 @@ export class ModelToolAgent {
         ...(call.thoughtSignature ? { thoughtSignature: call.thoughtSignature } : {})
       })));
       contents.push({ role: "model", parts: modelParts });
+      let turnToolError: string | undefined;
       for (const call of functionCalls) {
         let result: unknown;
         signal?.throwIfAborted();
-        try { result = await execute(call.name, call.args); } catch (error) { result = { error: error instanceof Error ? error.message : String(error) }; }
+        try { result = await execute(call.name, call.args); } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          turnToolError ??= message;
+          result = { error: message };
+        }
         contents.push({ role: "user", parts: [{ functionResponse: { name: call.name, response: result } }] });
       }
+      pendingToolError = turnToolError;
     }
     throw new Error("工具调用循环意外结束");
   }
@@ -380,7 +420,7 @@ export class ModelToolAgent {
     const requestUrl = `${url}${url.includes("?") ? "&" : "?"}alt=sse`;
     this.trace?.("model.request", { url, body });
     let response: Response;
-    try { response = await fetch(requestUrl, { method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": key }, body: JSON.stringify(body), signal: AbortSignal.any([AbortSignal.timeout(90_000), ...(signal ? [signal] : [])]) }); }
+    try { response = await fetch(requestUrl, { method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": key }, body: JSON.stringify(body), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(90_000)]) : AbortSignal.timeout(90_000) }); }
     catch (error) { if (signal?.aborted) throw error; throw new Error(`无法连接 Google Gemini 端点 ${url}：${error instanceof Error ? error.message : String(error)}`); }
     if (!response.ok) {
       const payload = await response.json().catch(() => ({})) as { error?: { message?: string } };
@@ -418,6 +458,7 @@ export class ModelToolAgent {
       ] : message.content }))
       : [{ role: "user", content: instruction }];
     const definitions = tools.map((tool) => ({ name: tool.key, description: tool.description || tool.key, input_schema: tool.inputSchema || { type: "object", properties: {} } }));
+    let pendingToolError: string | undefined;
     for (let turn = 0; ; turn++) {
       const blocks = new Map<number, { type?: string; id?: string; name?: string; text?: string; inputJson?: string; input?: Record<string, unknown> }>();
       signal?.throwIfAborted();
@@ -467,18 +508,27 @@ export class ModelToolAgent {
         input: block.type === "tool_use" ? this.parseToolInput(block.inputJson) : undefined
       }));
       const calls = content.filter((item) => item.type === "tool_use" && item.id && item.name);
-      if (!calls.length) return content.filter((item) => item.type === "text").map((item) => item.text).filter(Boolean).join("\n") || "已完成。";
+      if (!calls.length) {
+        const answer = content.filter((item) => item.type === "text").map((item) => item.text).filter(Boolean).join("\n");
+        return pendingToolError ? `工具执行失败：${pendingToolError}` : answer || "模型响应为空。";
+      }
       if (content.some((item) => item.type === "text" && item.text)) this.trace?.("model.output.reset", { turn: turn + 1, reason: "tool_call" });
       messages.push({ role: "assistant", content });
       const results: Array<Record<string, unknown>> = [];
+      let turnToolError: string | undefined;
       for (const call of calls) {
         if (call.input && "_error" in call.input) throw new Error("模型返回了无法解析的工具参数，请提高 maxTokens 或重试");
         let result: unknown;
         signal?.throwIfAborted();
-        try { result = await execute(call.name!, call.input || {}); } catch (error) { result = { error: error instanceof Error ? error.message : String(error) }; }
+        try { result = await execute(call.name!, call.input || {}); } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          turnToolError ??= message;
+          result = { error: message };
+        }
         results.push({ type: "tool_result", tool_use_id: call.id, content: JSON.stringify(result) });
       }
       messages.push({ role: "user", content: results });
+      pendingToolError = turnToolError;
     }
     throw new Error("工具调用循环意外结束");
   }

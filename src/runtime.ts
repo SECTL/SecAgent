@@ -39,7 +39,7 @@ export class SecAgentRuntime {
       ...pluginTools.filter((tool) => !hiddenTools.has(tool.key)),
       ...piTools,
       { key: "secagent__read_skill", description: "读取指定 Skill 或其 Skill 目录内专题 Markdown 的完整操作说明。仅当需要该 Skill 的详细流程、约束或示例时调用。", inputSchema: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", description: "Skill 名称，必须来自系统提示词中的可用 Skills 目录。" }, file: { type: "string", description: "可选；Skill 目录内的相对 Markdown 文件名，例如 components.md。" } } } },
-      { key: "secagent__call_hidden_tool", description: "调用 Skill 约定的隐藏 MCP 工具。工具名称和参数格式应严格遵循 Skill 正文或模型已知的其他契约。", inputSchema: { type: "object", additionalProperties: false, required: ["name", "arguments"], properties: { name: { type: "string", description: "隐藏工具的完整 key，例如 secscore__add_score。" }, arguments: { type: "object", description: "按照工具契约填写的参数。" } } } }
+      { key: "secagent__call_hidden_tool", description: "调用 Skill 约定的隐藏 MCP 工具。工具名称和参数格式应严格遵循 Skill 正文或模型已知的其他契约。", inputSchema: { type: "object", additionalProperties: false, required: ["name", "arguments"], properties: { name: { type: "string", description: "隐藏工具的完整 key，例如 secscore-connector__list_students。" }, arguments: { type: "object", description: "按照工具契约填写的参数。" } } } }
     ];
     this.emit("mcp.tools/list", [...mcpTools.map((tool) => ({ key: tool.key, server: tool.server, name: tool.name, description: tool.description, hidden: tool.hidden, inputSchema: tool.inputSchema })), ...pluginTools.map((tool) => ({ ...tool, source: "plugin" }))]);
     this.emit("secagent.skills/list", this.skills.map((skill) => ({ name: skill.name, description: skill.description })));

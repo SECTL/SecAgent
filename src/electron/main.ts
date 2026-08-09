@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, session, shell } from "electron";
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, screen, session, shell } from "electron";
 import { createServer } from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -19,11 +19,16 @@ import { PluginManager } from "../plugin-manager.js";
 import { MarketplaceClient, type MarketplacePlugin, type MarketplaceVersion } from "../marketplace.js";
 import { SecAgentHttpServer } from "../secagent-http.js";
 import { Models } from "@opencode-ai/models";
+import { DEFAULT_WAKE_HOTKEY, normalizeWakeHotkey } from "../wake-hotkey.js";
 
 let windowRef: BrowserWindow | undefined;
 let settingsWindow: BrowserWindow | undefined;
+let wakeWindow: BrowserWindow | undefined;
 let pluginManager: PluginManager | undefined;
 let secAgentHttpServer: SecAgentHttpServer | undefined;
+let activeWakeShortcut: string | undefined;
+let activeWakeContext: { sessionId?: string; modelId?: string; reasoningEffort?: ReasoningEffort } = {};
+let wakeAbortController: AbortController | undefined;
 const marketplace = new MarketplaceClient();
 const activeSessionRuns = new Map<string, AbortController>();
 
@@ -72,6 +77,95 @@ function configureWindowChrome(window: BrowserWindow): void {
   // Keep the application menu alive for CmdOrCtrl+, and Ctrl+Shift+I while hiding its UI.
   window.setAutoHideMenuBar(true);
   window.setMenuBarVisibility(false);
+}
+
+function rendererPath(): string { return path.join(__dirname, "../renderer/index.html"); }
+
+function sendToAppWindows(channel: string, payload: unknown): void {
+  for (const target of [windowRef, wakeWindow]) {
+    if (!target || target.isDestroyed() || target.webContents.isDestroyed()) continue;
+    try {
+      target.webContents.send(channel, payload);
+    } catch {
+      // A renderer may close between the destroyed check and send().
+    }
+  }
+}
+
+function closeWakeWindow(): void {
+  wakeAbortController?.abort();
+  wakeAbortController = undefined;
+  stopSpeech();
+  if (wakeWindow && !wakeWindow.isDestroyed()) wakeWindow.close();
+  wakeWindow = undefined;
+}
+
+async function openWakeWindow(): Promise<void> {
+  if (wakeWindow && !wakeWindow.isDestroyed()) {
+    closeWakeWindow();
+    return;
+  }
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const workArea = display.workArea;
+  let sessionId = activeWakeContext.sessionId;
+  if (!sessionId) {
+    const first = store().list()[0];
+    sessionId = first?.id || store().create().meta.id;
+  }
+  const query = new URLSearchParams({
+    wake: "1",
+    sessionId,
+    ...(activeWakeContext.modelId ? { modelId: activeWakeContext.modelId } : {}),
+    ...(activeWakeContext.reasoningEffort ? { reasoningEffort: activeWakeContext.reasoningEffort } : {})
+  }).toString();
+  wakeWindow = new BrowserWindow({
+    x: workArea.x,
+    y: workArea.y,
+    width: workArea.width,
+    height: workArea.height,
+    frame: false,
+    transparent: true,
+    backgroundColor: "#00000000",
+    hasShadow: false,
+    resizable: false,
+    movable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    focusable: true,
+    show: false,
+    alwaysOnTop: true,
+    webPreferences: { preload: path.join(__dirname, "../preload/preload.cjs"), contextIsolation: true, nodeIntegration: false }
+  });
+  wakeWindow.setAlwaysOnTop(true, "floating");
+  wakeWindow.setIgnoreMouseEvents(true);
+  wakeWindow.webContents.on("before-input-event", (_event, input) => {
+    if (input.type === "keyDown" && input.key === "Escape") closeWakeWindow();
+  });
+  const showWakeWindow = () => {
+    if (!wakeWindow || wakeWindow.isDestroyed()) return;
+    if (!wakeWindow.isVisible()) wakeWindow.show();
+    wakeWindow.focus();
+  };
+  wakeWindow.once("ready-to-show", showWakeWindow);
+  wakeWindow.on("closed", () => {
+    wakeAbortController?.abort();
+    wakeAbortController = undefined;
+    stopSpeech();
+    wakeWindow = undefined;
+  });
+  if (process.env.ELECTRON_RENDERER_URL) await wakeWindow.loadURL(`${process.env.ELECTRON_RENDERER_URL}?${query}`);
+  else await wakeWindow.loadFile(rendererPath(), { query: { wake: "1", sessionId, ...(activeWakeContext.modelId ? { modelId: activeWakeContext.modelId } : {}), ...(activeWakeContext.reasoningEffort ? { reasoningEffort: activeWakeContext.reasoningEffort } : {}) } });
+  // Transparent windows do not consistently emit ready-to-show on every
+  // platform, so make the post-load path an additional safe fallback.
+  showWakeWindow();
+}
+
+function registerWakeShortcut(shortcut: string): void {
+  const normalized = normalizeWakeHotkey(shortcut);
+  if (activeWakeShortcut === normalized) return;
+  if (!globalShortcut.register(normalized, () => { void openWakeWindow().catch((error) => logMain("wake.open.failed", { error: String(error) })); })) throw new Error(`快捷键 ${normalized} 已被其它应用占用`);
+  if (activeWakeShortcut) globalShortcut.unregister(activeWakeShortcut);
+  activeWakeShortcut = normalized;
 }
 
 function createWindow(): void {
@@ -252,6 +346,47 @@ ipcMain.handle("official:login", async (_event, email: string, password: string)
   const providers = current.providers.some((provider) => provider.id === "sectl-official") ? current.providers : [...current.providers, officialProvider(baseUrl)];
   return saveSettings(DEFAULT_WORKSPACE, { ...current, providers });
 });
+async function runSectlOAuthLogin(): Promise<{ accessToken: string; userId?: string; email?: string; name?: string }> {
+  loadConfig(DEFAULT_WORKSPACE);
+  const relayUrl = (process.env.SECTL_OFFICIAL_API_URL || "").replace(/\/$/, "");
+  const oauthUrl = (process.env.SECTL_OAUTH_API_URL || "https://appwrite.sectl.cn").replace(/\/$/, "");
+  const oauthWebUrl = (process.env.SECTL_OAUTH_WEB_URL || "https://sectl.cn").replace(/\/$/, "");
+  const clientId = process.env.SECTL_OFFICIAL_CLIENT_ID || "";
+  const port = Number(process.env.SECTL_OAUTH_CALLBACK_PORT || 49152);
+  if (!relayUrl) throw new Error("请在 SecAgent .env 配置 SECTL_OFFICIAL_API_URL");
+  if (!clientId) throw new Error("请在 SecAgent .env 配置 SECTL_OFFICIAL_CLIENT_ID");
+  if (!Number.isInteger(port) || port < 49152 || port > 65535) throw new Error("SECTL_OAUTH_CALLBACK_PORT 必须是 49152-65535 的固定端口");
+  const redirectUri = `http://127.0.0.1:${port}/oauth/callback`;
+  const state = crypto.randomBytes(24).toString("base64url");
+  const verifier = crypto.randomBytes(48).toString("base64url");
+  const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
+  const authorize = new URL(`${oauthWebUrl}/oauth/authorize`);
+  authorize.search = new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, response_type: "code", scope: "user:read", state, code_challenge: challenge, code_challenge_method: "S256" }).toString();
+  const callback = await new Promise<{ code: string }>((resolve, reject) => {
+    const server = createServer((request, response) => {
+      const url = new URL(request.url || "/", `http://127.0.0.1:${port}`);
+      if (url.pathname !== "/oauth/callback") { response.writeHead(404); response.end("Not found"); return; }
+      if (url.searchParams.get("state") !== state) { response.writeHead(400); response.end("Invalid state"); reject(new Error("OAuth state validation failed")); server.close(); return; }
+      const error = url.searchParams.get("error");
+      if (error) { response.writeHead(400, { "Content-Type": "text/html; charset=utf-8" }); response.end("<h2>Login failed. You can close this page.</h2>"); reject(new Error(url.searchParams.get("error_description") || error)); server.close(); return; }
+      const code = url.searchParams.get("code");
+      if (!code) { response.writeHead(400); response.end("Missing code"); reject(new Error("OAuth callback missing code")); server.close(); return; }
+      response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }); response.end("<h2>Login successful. You can close this page.</h2>"); resolve({ code }); server.close();
+    });
+    server.on("error", (error) => reject(new Error(`无法监听 OAuth 回调端口 ${port}: ${error.message}`)));
+    server.listen(port, "127.0.0.1", () => { void shell.openExternal(authorize.toString()); });
+    setTimeout(() => { server.close(); reject(new Error("OAuth 登录超时，请重试")); }, 5 * 60 * 1000).unref();
+  });
+  const response = await fetch(`${oauthUrl}/api/oauth/token`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ grant_type: "authorization_code", code: callback.code, client_id: clientId, redirect_uri: redirectUri, code_verifier: verifier, device_uuid: crypto.randomUUID() }) });
+  const payload = await response.json().catch(() => ({})) as { access_token?: string; error_description?: string };
+  if (!response.ok || !payload.access_token) throw new Error(payload.error_description || "SECTL OAuth 换取令牌失败");
+  const relayResponse = await fetch(`${relayUrl}/auth/oauth`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ access_token: payload.access_token, client_id: clientId, platform_id: process.env.SECTL_OFFICIAL_PLATFORM_ID || clientId }) });
+  const relayPayload = await relayResponse.json().catch(() => ({})) as { access_token?: string; user?: { id?: string; email?: string; name?: string }; detail?: string };
+  if (!relayResponse.ok || !relayPayload.access_token) throw new Error(relayPayload.detail || "官方服务 OAuth 登录失败");
+  return { accessToken: relayPayload.access_token, userId: relayPayload.user?.id, email: relayPayload.user?.email, name: relayPayload.user?.name };
+}
+
+ipcMain.handle("sectl:oauth-login", () => runSectlOAuthLogin());
 ipcMain.handle("official:oauth-login", async () => {
   loadConfig(DEFAULT_WORKSPACE);
   const relayUrl = (process.env.SECTL_OFFICIAL_API_URL || "").replace(/\/$/, "");
@@ -287,16 +422,19 @@ ipcMain.handle("official:oauth-login", async () => {
   const tokenPayload = await tokenResponse.json().catch(() => ({})) as { access_token?: string; error_description?: string };
   if (!tokenResponse.ok || !tokenPayload.access_token) throw new Error(tokenPayload.error_description || "SECTL OAuth 换取令牌失败");
   const relayResponse = await fetch(`${relayUrl}/auth/oauth`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ access_token: tokenPayload.access_token, client_id: clientId, platform_id: process.env.SECTL_OFFICIAL_PLATFORM_ID || clientId }) });
-  const relayPayload = await relayResponse.json().catch(() => ({})) as { access_token?: string; user?: { email?: string }; detail?: string };
+  const relayPayload = await relayResponse.json().catch(() => ({})) as { access_token?: string; user?: { id?: string; email?: string; name?: string }; detail?: string };
   if (!relayResponse.ok || !relayPayload.access_token) throw new Error(relayPayload.detail || "官方服务登录失败");
   writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_TOKEN", relayPayload.access_token);
+  writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_SECTL_TOKEN", "");
+  writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_USER_ID", relayPayload.user?.id || "");
   writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_EMAIL", relayPayload.user?.email || "SECTL 用户");
   const current = readSettings(DEFAULT_WORKSPACE);
   const providers = current.providers.some((provider) => provider.id === "sectl-official") ? current.providers : [...current.providers, officialProvider(relayUrl)];
   return saveSettings(DEFAULT_WORKSPACE, { ...current, providers });
 });
-ipcMain.handle("official:logout", () => { loadConfig(DEFAULT_WORKSPACE); writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_TOKEN", ""); writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_EMAIL", ""); return { loggedIn: false }; });
+ipcMain.handle("official:logout", () => { loadConfig(DEFAULT_WORKSPACE); writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_TOKEN", ""); writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_SECTL_TOKEN", ""); writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_USER_ID", ""); writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_EMAIL", ""); return { loggedIn: false }; });
 ipcMain.handle("plugins:list", () => pluginManager?.list() || []);
+ipcMain.handle("plugins:settings-call", async (_event, pluginId: string, pageId: string, action: string, args: Record<string, unknown> = {}) => pluginManager?.callSettings(pluginId, pageId, action, args));
 ipcMain.handle("plugins:set-enabled", async (_event, id: string, enabled: boolean) => { await pluginManager?.setEnabled(id, enabled); return pluginManager?.list() || []; });
 ipcMain.handle("plugins:reload", async (_event, id: string) => { await pluginManager?.reload(id); return pluginManager?.list() || []; });
 ipcMain.handle("plugins:uninstall", async (_event, id: string) => { await pluginManager?.uninstall(id); return pluginManager?.list() || []; });
@@ -320,12 +458,39 @@ ipcMain.handle("settings:save", (_event, payload: SettingsPayload) => {
       providers = [officialProvider(baseUrl)];
     }
   }
-  const saved = saveSettings(DEFAULT_WORKSPACE, { ...payload, providers });
+  const nextWakeHotkey = normalizeWakeHotkey(payload.wake?.hotkey || DEFAULT_WAKE_HOTKEY);
+  const previousWakeHotkey = activeWakeShortcut;
+  const wakeShortcutChanged = previousWakeHotkey !== nextWakeHotkey;
+  if (wakeShortcutChanged) {
+    if (!globalShortcut.register(nextWakeHotkey, () => { void openWakeWindow().catch((error) => logMain("wake.open.failed", { error: String(error) })); })) throw new Error(`快捷键 ${nextWakeHotkey} 已被其它应用占用`);
+  }
+  let saved: SettingsPayload;
+  try {
+    saved = saveSettings(DEFAULT_WORKSPACE, { ...payload, providers, wake: { hotkey: nextWakeHotkey } });
+  } catch (error) {
+    if (wakeShortcutChanged) globalShortcut.unregister(nextWakeHotkey);
+    throw error;
+  }
+  if (wakeShortcutChanged) {
+    if (previousWakeHotkey) globalShortcut.unregister(previousWakeHotkey);
+    activeWakeShortcut = nextWakeHotkey;
+  }
   markOnboardingComplete(DEFAULT_WORKSPACE);
-  windowRef?.webContents.send("settings:changed", saved);
+  sendToAppWindows("settings:changed", saved);
   return saved;
 });
-ipcMain.handle("speech:start", () => startSpeech(windowRef));
+ipcMain.on("wake:context", (_event, payload: unknown) => {
+  if (!payload || typeof payload !== "object") return;
+  const candidate = payload as Record<string, unknown>;
+  activeWakeContext = {
+    ...(typeof candidate.sessionId === "string" ? { sessionId: candidate.sessionId } : {}),
+    ...(typeof candidate.modelId === "string" ? { modelId: candidate.modelId } : {}),
+    ...(typeof candidate.reasoningEffort === "string" ? { reasoningEffort: candidate.reasoningEffort as ReasoningEffort } : {})
+  };
+});
+ipcMain.handle("wake:close", () => { closeWakeWindow(); return { ok: true }; });
+ipcMain.on("wake:interactive", (_event, interactive: boolean) => { if (wakeWindow && !wakeWindow.isDestroyed()) wakeWindow.setIgnoreMouseEvents(!interactive); });
+ipcMain.handle("speech:start", (event) => startSpeech(wakeWindow?.webContents.id === event.sender.id ? wakeWindow : windowRef));
 ipcMain.handle("speech:stop", () => { stopSpeech(); return { ok: true }; });
 ipcMain.handle("tts:synthesize", async (_event, text: string) => {
   if (typeof text !== "string" || !text.trim()) return "";
@@ -355,6 +520,8 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
   let traceSequence = 0;
   const toolCalls: ToolCallRecord[] = [];
   const activities: AssistantActivity[] = [];
+  const isWakeRequest = Boolean(wakeWindow && wakeWindow.webContents.id === _event.sender.id);
+  if (isWakeRequest) wakeAbortController = abortController;
   const trace = (event: Omit<TraceEvent, "sequence" | "at"> | TraceEvent) => {
     // The main process owns the sequence so its own request/error events and runtime events share
     // one strictly ordered timeline.
@@ -386,7 +553,7 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
     }
     sessionStore.appendRuntimeEvent(id, ordered);
     logMain("session.runtime", { sessionId: id, ...ordered });
-    windowRef?.webContents.send("sessions:runtime-event", { sessionId: id, ...ordered });
+    sendToAppWindows("sessions:runtime-event", { sessionId: id, ...ordered });
   };
   try {
     logMain("ipc.sessions.send", { sessionId: id, text });
@@ -409,6 +576,7 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
     return sessionStore.get(id);
   } finally {
     if (activeSessionRuns.get(id) === abortController) activeSessionRuns.delete(id);
+    if (wakeAbortController === abortController) wakeAbortController = undefined;
     audit.close();
   }
 });
@@ -416,7 +584,14 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
 app.whenReady().then(async () => {
   const needsOnboarding = !fs.existsSync(configPath(DEFAULT_WORKSPACE)) || !isOnboardingComplete(DEFAULT_WORKSPACE);
   initializeWorkspace(DEFAULT_WORKSPACE);
-  pluginManager = new PluginManager(DEFAULT_WORKSPACE);
+  pluginManager = new PluginManager(DEFAULT_WORKSPACE, {
+    getSession: async () => {
+      loadConfig(DEFAULT_WORKSPACE);
+      const accessToken = process.env.SECTL_OFFICIAL_TOKEN || "";
+      return accessToken ? { accessToken, userId: process.env.SECTL_OFFICIAL_USER_ID || undefined, email: process.env.SECTL_OFFICIAL_EMAIL || undefined } : null;
+    },
+    oauthLogin: runSectlOAuthLogin,
+  });
   await pluginManager.initialize();
   secAgentHttpServer = new SecAgentHttpServer(pluginManager, marketplace);
   try { await secAgentHttpServer.start(); }
@@ -436,8 +611,10 @@ app.whenReady().then(async () => {
   if (process.platform === "darwin") app.dock?.setIcon(appIconPath());
   logMain("app.ready");
   createWindow();
+  try { registerWakeShortcut(readSettings(DEFAULT_WORKSPACE).wake.hotkey || DEFAULT_WAKE_HOTKEY); }
+  catch (error) { logMain("wake.shortcut.register.failed", { error: error instanceof Error ? error.message : String(error) }); }
   if (needsOnboarding) openSettings(true);
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
-app.on("before-quit", () => { void secAgentHttpServer?.stop(); void pluginManager?.shutdown(); });
+app.on("before-quit", () => { closeWakeWindow(); globalShortcut.unregisterAll(); void secAgentHttpServer?.stop(); void pluginManager?.shutdown(); });
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
