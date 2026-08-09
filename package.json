@@ -11,7 +11,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && electron-vite build",
     "build:cli": "tsc -p tsconfig.json",
-    "dev": "node scripts/dev-launcher.mjs",
+    "dev": "electron-vite dev",
     "dev:cli": "tsx src/index.ts",
     "start": "node scripts/dev-launcher.mjs",
     "test": "node --test dist/**/*.test.js"
