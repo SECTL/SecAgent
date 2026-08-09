@@ -15,6 +15,7 @@ export const traceLabel: Record<string, string> = {
   "secagent.tools/result": "Skill 已读取",
   "model.agent.result": "模型任务完成",
   "assistant.response": "回复已保存",
+  "runtime.stopped": "已手动停止",
   "runtime.error": "运行出错"
 };
 

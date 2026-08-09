@@ -2,7 +2,7 @@ interface SessionMeta { id: string; title: string; createdAt: string; updatedAt:
 interface ToolCallRecord { name: string; arguments: unknown; result?: unknown }
 type AssistantActivity = { kind: "thinking" | "summary" | "text"; content: string; turn?: number } | { kind: "tool"; name: string; arguments: unknown; result?: unknown }
 interface ChatAttachment { id: string; name: string; mimeType: string; dataUrl: string; size: number }
-interface SessionMessage { id: string; role: "user" | "assistant"; content: string; createdAt: string; attachments?: ChatAttachment[]; toolCalls?: ToolCallRecord[]; activities?: AssistantActivity[] }
+interface SessionMessage { id: string; role: "user" | "assistant"; content: string; createdAt: string; attachments?: ChatAttachment[]; toolCalls?: ToolCallRecord[]; activities?: AssistantActivity[]; stopped?: boolean }
 interface SessionData { meta: SessionMeta; messages: SessionMessage[] }
 type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 interface ModelOption { id: string; name: string; model: string; provider: string }
@@ -41,6 +41,7 @@ interface Window {
     deleteSession(id: string): Promise<SessionMeta[]>;
     getSession(id: string): Promise<SessionData>;
     sendMessage(id: string, text: string, modelId?: string, reasoningEffort?: ReasoningEffort, attachments?: ChatAttachment[]): Promise<SessionData>;
+    stopMessage(id: string): Promise<{ ok: true; stopped: boolean }>;
     onRuntimeEvent(listener: (event: unknown) => void): () => void;
     startSpeech(): Promise<{ ok: true }>;
     sendSpeechAudio(samples: Float32Array): void;

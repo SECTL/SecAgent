@@ -88,15 +88,15 @@ export class ModelToolAgent {
       : "";
     this.agent = { ...config.agent, systemPrompt: `${config.agent.systemPrompt}${skillCatalog}` };
   }
-  async run(instruction: string, tools: AgentTool[], execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high", conversation?: ConversationMessage[]): Promise<string> {
+  async run(instruction: string, tools: AgentTool[], execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high", conversation?: ConversationMessage[], signal?: AbortSignal): Promise<string> {
     if (!tools.length) throw new Error("没有已启用且可发现的 MCP 工具");
     const key = process.env[this.agent.apiKeyEnv];
     if (!key) throw new Error(`未配置模型密钥环境变量 ${this.agent.apiKeyEnv}。请设置后重试；密钥不要写入 secagent.yaml。`);
     const systemPrompt = await this.resolveSystemPrompt();
-    if (this.agent.provider === "anthropic") return this.runAnthropic(instruction, tools, key, execute, reasoningEffort, systemPrompt, conversation);
-    if (this.agent.provider === "google") return this.runGoogle(instruction, tools, key, execute, reasoningEffort, systemPrompt, conversation);
-    if (this.agent.provider === "openai-responses") return this.runOpenAIResponses(instruction, tools, key, execute, reasoningEffort, systemPrompt, conversation);
-    return this.runOpenAICompatible(instruction, tools, key, execute, reasoningEffort, systemPrompt, conversation);
+    if (this.agent.provider === "anthropic") return this.runAnthropic(instruction, tools, key, execute, reasoningEffort, systemPrompt, conversation, signal);
+    if (this.agent.provider === "google") return this.runGoogle(instruction, tools, key, execute, reasoningEffort, systemPrompt, conversation, signal);
+    if (this.agent.provider === "openai-responses") return this.runOpenAIResponses(instruction, tools, key, execute, reasoningEffort, systemPrompt, conversation, signal);
+    return this.runOpenAICompatible(instruction, tools, key, execute, reasoningEffort, systemPrompt, conversation, signal);
   }
   /** 每次请求前从插件收集提示词并拼接到系统提示词最后；无插件提示词时原样返回。 */
   private async resolveSystemPrompt(): Promise<string> {
@@ -131,13 +131,15 @@ export class ModelToolAgent {
     headers: Record<string, string>,
     body: Record<string, unknown>,
     onEvent: (event: Record<string, unknown>) => void,
-    completeBody: () => unknown
+    completeBody: () => unknown,
+    signal?: AbortSignal
   ): Promise<void> {
     this.trace?.("model.request", { url, body });
     let response: Response;
     try {
-      response = await fetch(url, { method: "POST", headers, body: JSON.stringify({ ...body, stream: true }), signal: AbortSignal.timeout(90_000) });
+      response = await fetch(url, { method: "POST", headers, body: JSON.stringify({ ...body, stream: true }), signal: AbortSignal.any([AbortSignal.timeout(90_000), ...(signal ? [signal] : [])]) });
     } catch (error) {
+      if (signal?.aborted) throw error;
       throw new Error(`无法连接模型端点 ${url}：${error instanceof Error ? error.message : String(error)}`);
     }
     if (!response.ok) {
@@ -169,13 +171,14 @@ export class ModelToolAgent {
     // durable audit record required for every request sent to a model.
     this.trace?.("model.response", { url, status: response.status, body: completeBody() });
   }
-  private async runOpenAICompatible(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort, systemPrompt: string, conversation?: ConversationMessage[]): Promise<string> {
+  private async runOpenAICompatible(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort, systemPrompt: string, conversation?: ConversationMessage[], signal?: AbortSignal): Promise<string> {
     const history = conversation?.length ? conversation : [{ role: "user" as const, content: instruction }];
     const messages: Array<Record<string, unknown>> = [{ role: "system", content: systemPrompt }, ...history.map((message) => ({ role: message.role, content: openAIContent(message) }))];
     const definitions = tools.map((tool) => ({ type: "function", function: { name: tool.key, description: tool.description || tool.key, parameters: tool.inputSchema || { type: "object", properties: {} } } }));
     for (let turn = 0; ; turn++) {
       let content = "";
       const toolCalls = new Map<number, { id?: string; function: { name?: string; arguments: string } }>();
+      signal?.throwIfAborted();
       await this.streamRequest(`${this.agent.baseUrl}${this.agent.endpoint || "/chat/completions"}`, { "Content-Type": "application/json", Authorization: `Bearer ${key}` }, {
         model: this.agent.model, messages, tools: definitions, max_tokens: this.agent.maxTokens, reasoning_effort: reasoningEffort
       }, (chunk) => {
@@ -197,7 +200,7 @@ export class ModelToolAgent {
           if (partial.function?.arguments) current.function.arguments += partial.function.arguments;
           toolCalls.set(index, current);
         }
-      }, () => ({ choices: [{ message: { content: content || null, tool_calls: [...toolCalls.values()] } }] }));
+      }, () => ({ choices: [{ message: { content: content || null, tool_calls: [...toolCalls.values()] } }] }), signal);
       const message = { content, tool_calls: [...toolCalls.values()] };
       const calls = message.tool_calls || [];
       if (!calls.length) return message.content.trim() || "已完成。";
@@ -210,6 +213,7 @@ export class ModelToolAgent {
         try { args = JSON.parse(call.function?.arguments || "{}"); } catch { args = { _error: "模型返回了无法解析的工具参数" }; }
         if ("_error" in args) throw new Error("模型返回了无法解析的工具参数，请提高 maxTokens 或重试");
         let result: unknown;
+        signal?.throwIfAborted();
         try { result = await execute(name, args); } catch (error) { result = { error: error instanceof Error ? error.message : String(error) }; }
         messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result) });
       }
@@ -217,7 +221,7 @@ export class ModelToolAgent {
     throw new Error("工具调用循环意外结束");
   }
 
-  private async runOpenAIResponses(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort, systemPrompt: string, conversation?: ConversationMessage[]): Promise<string> {
+  private async runOpenAIResponses(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort, systemPrompt: string, conversation?: ConversationMessage[], signal?: AbortSignal): Promise<string> {
     type InputItem = Record<string, unknown>;
     type FunctionCall = { callId: string; itemId?: string; name: string; arguments: string };
     const history = conversation?.length ? conversation : [{ role: "user" as const, content: instruction }];
@@ -229,6 +233,7 @@ export class ModelToolAgent {
       let thinkingDeltaSeen = false;
       let responseOutput: InputItem[] = [];
       const calls = new Map<string, FunctionCall>();
+      signal?.throwIfAborted();
       await this.streamRequest(`${this.agent.baseUrl}${this.agent.endpoint || "/responses"}`, { "Content-Type": "application/json", Authorization: `Bearer ${key}` }, {
         model: this.agent.model,
         instructions: systemPrompt,
@@ -289,7 +294,7 @@ export class ModelToolAgent {
           const failed = event.response as { error?: { message?: string; code?: string } } | undefined;
           throw new Error(failed?.error?.message || "妯″瀷璇锋眰澶辫触");
         }
-      }, () => ({ output: [{ type: "message", content: answer || undefined }, ...[...calls.values()].map((call) => ({ type: "function_call", call_id: call.callId, name: call.name, arguments: call.arguments }))] }));
+      }, () => ({ output: [{ type: "message", content: answer || undefined }, ...[...calls.values()].map((call) => ({ type: "function_call", call_id: call.callId, name: call.name, arguments: call.arguments }))] }), signal);
       const functionCalls = [...calls.values()].filter((call) => call.name && call.callId);
       if (!functionCalls.length) return answer.trim() || "已完成。";
       if (answer) this.trace?.("model.output.reset", { turn: turn + 1, reason: "tool_call" });
@@ -300,13 +305,14 @@ export class ModelToolAgent {
         if ("_error" in args) throw new Error("模型返回了无法解析的工具参数，请提高 maxTokens 或重试");
         if (!responseOutput.length) input.push({ type: "function_call", call_id: call.callId, name: call.name, arguments: call.arguments });
         let result: unknown;
+        signal?.throwIfAborted();
         try { result = await execute(call.name, args); } catch (error) { result = { error: error instanceof Error ? error.message : String(error) }; }
         input.push({ type: "function_call_output", call_id: call.callId, output: JSON.stringify(result) });
       }
     }
     throw new Error("工具调用循环意外结束");
   }
-  private async runGoogle(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high", systemPrompt: string, conversation?: ConversationMessage[]): Promise<string> {
+  private async runGoogle(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high", systemPrompt: string, conversation?: ConversationMessage[], signal?: AbortSignal): Promise<string> {
     type Part = { text?: string; thought?: boolean; inlineData?: { mimeType: string; data: string }; functionCall?: { name?: string; args?: Record<string, unknown> }; functionResponse?: { name?: string; response?: unknown }; thoughtSignature?: string };
     const history = conversation?.length ? conversation : [{ role: "user" as const, content: instruction }];
     const contents: Array<{ role: "user" | "model"; parts: Part[] }> = history.map((message) => ({
@@ -326,6 +332,7 @@ export class ModelToolAgent {
         tools: [{ functionDeclarations: definitions }],
         generationConfig: { maxOutputTokens: this.agent.maxTokens, thinkingConfig: this.googleThinkingConfig(reasoningEffort) }
       };
+      signal?.throwIfAborted();
       await this.streamGoogleRequest(`${this.agent.baseUrl}${this.agent.endpoint || `/models/${encodeURIComponent(this.agent.model || "gemini-2.5-flash")}:streamGenerateContent`}`, key, body, (chunk) => {
         const parts = (chunk.candidates as Array<{ content?: { parts?: Part[] } }> | undefined)?.[0]?.content?.parts || [];
         for (const part of parts) {
@@ -342,7 +349,7 @@ export class ModelToolAgent {
             calls.set(name, current);
           }
         }
-      }, () => ({ candidates: [{ content: { parts: [{ text: text || undefined }, ...[...calls.values()].map((call) => ({ functionCall: call }))] } }] }));
+      }, () => ({ candidates: [{ content: { parts: [{ text: text || undefined }, ...[...calls.values()].map((call) => ({ functionCall: call }))] } }] }), signal);
       const functionCalls = [...calls.values()];
       if (!functionCalls.length) return text.trim() || "已完成。";
       if (text) this.trace?.("model.output.reset", { turn: turn + 1, reason: "tool_call" });
@@ -355,6 +362,7 @@ export class ModelToolAgent {
       contents.push({ role: "model", parts: modelParts });
       for (const call of functionCalls) {
         let result: unknown;
+        signal?.throwIfAborted();
         try { result = await execute(call.name, call.args); } catch (error) { result = { error: error instanceof Error ? error.message : String(error) }; }
         contents.push({ role: "user", parts: [{ functionResponse: { name: call.name, response: result } }] });
       }
@@ -368,12 +376,12 @@ export class ModelToolAgent {
     const budget = effort === "none" ? 0 : effort === "minimal" ? 512 : effort === "low" ? 1024 : effort === "medium" ? 4096 : effort === "max" || effort === "xhigh" ? 16384 : 8192;
     return { thinkingBudget: budget, includeThoughts: true };
   }
-  private async streamGoogleRequest(url: string, key: string, body: unknown, onChunk: (chunk: Record<string, unknown>) => void, completeBody: () => unknown): Promise<void> {
+  private async streamGoogleRequest(url: string, key: string, body: unknown, onChunk: (chunk: Record<string, unknown>) => void, completeBody: () => unknown, signal?: AbortSignal): Promise<void> {
     const requestUrl = `${url}${url.includes("?") ? "&" : "?"}alt=sse`;
     this.trace?.("model.request", { url, body });
     let response: Response;
-    try { response = await fetch(requestUrl, { method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": key }, body: JSON.stringify(body), signal: AbortSignal.timeout(90_000) }); }
-    catch (error) { throw new Error(`无法连接 Google Gemini 端点 ${url}：${error instanceof Error ? error.message : String(error)}`); }
+    try { response = await fetch(requestUrl, { method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": key }, body: JSON.stringify(body), signal: AbortSignal.any([AbortSignal.timeout(90_000), ...(signal ? [signal] : [])]) }); }
+    catch (error) { if (signal?.aborted) throw error; throw new Error(`无法连接 Google Gemini 端点 ${url}：${error instanceof Error ? error.message : String(error)}`); }
     if (!response.ok) {
       const payload = await response.json().catch(() => ({})) as { error?: { message?: string } };
       this.trace?.("model.response", { url, status: response.status, body: payload });
@@ -400,7 +408,7 @@ export class ModelToolAgent {
     if (buffer.trim()) consume(buffer);
     this.trace?.("model.response", { url, status: response.status, body: completeBody() });
   }
-  private async runAnthropic(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high", systemPrompt: string, conversation?: ConversationMessage[]): Promise<string> {
+  private async runAnthropic(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high", systemPrompt: string, conversation?: ConversationMessage[], signal?: AbortSignal): Promise<string> {
     // The desktop session supplies structured turns. Keep the single-string fallback for CLI
     // callers that do not have a persisted conversation.
     const messages: Array<Record<string, unknown>> = conversation?.length
@@ -412,6 +420,7 @@ export class ModelToolAgent {
     const definitions = tools.map((tool) => ({ name: tool.key, description: tool.description || tool.key, input_schema: tool.inputSchema || { type: "object", properties: {} } }));
     for (let turn = 0; ; turn++) {
       const blocks = new Map<number, { type?: string; id?: string; name?: string; text?: string; inputJson?: string; input?: Record<string, unknown> }>();
+      signal?.throwIfAborted();
       await this.streamRequest(`${this.agent.baseUrl}${this.agent.endpoint || "/v1/messages"}`, {
         "Content-Type": "application/json", "x-api-key": key, "anthropic-version": this.agent.anthropicVersion || "2023-06-01"
       }, {
@@ -449,7 +458,7 @@ export class ModelToolAgent {
         name: block.name,
         text: block.text,
         input: block.type === "tool_use" ? this.parseToolInput(block.inputJson) : undefined
-      })) }));
+      })) }), signal);
       const content = [...blocks.entries()].sort(([a], [b]) => a - b).map(([, block]) => ({
         type: block.type,
         id: block.id,
@@ -465,6 +474,7 @@ export class ModelToolAgent {
       for (const call of calls) {
         if (call.input && "_error" in call.input) throw new Error("模型返回了无法解析的工具参数，请提高 maxTokens 或重试");
         let result: unknown;
+        signal?.throwIfAborted();
         try { result = await execute(call.name!, call.input || {}); } catch (error) { result = { error: error instanceof Error ? error.message : String(error) }; }
         results.push({ type: "tool_result", tool_use_id: call.id, content: JSON.stringify(result) });
       }

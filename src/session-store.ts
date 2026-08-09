@@ -8,7 +8,7 @@ export interface ToolCallRecord { name: string; arguments: unknown; result?: unk
 export type AssistantActivity =
   | { kind: "thinking" | "summary" | "answer"; content: string; turn?: number }
   | { kind: "tool"; name: string; arguments: unknown; result?: unknown };
-export interface SessionMessage { id: string; role: "user" | "assistant"; content: string; createdAt: string; attachments?: ChatAttachment[]; toolCalls?: ToolCallRecord[]; activities?: AssistantActivity[] }
+export interface SessionMessage { id: string; role: "user" | "assistant"; content: string; createdAt: string; attachments?: ChatAttachment[]; toolCalls?: ToolCallRecord[]; activities?: AssistantActivity[]; stopped?: boolean }
 export interface SessionData { meta: SessionMeta; messages: SessionMessage[] }
 
 export class SessionStore {
@@ -43,10 +43,10 @@ export class SessionStore {
     fs.rmSync(this.sessionDir(id), { recursive: true, force: true });
     this.writeIndex(sessions.filter((item) => item.id !== id));
   }
-  appendMessage(id: string, role: SessionMessage["role"], content: string, toolCalls?: ToolCallRecord[], activities?: AssistantActivity[], attachments?: ChatAttachment[]): SessionData {
+  appendMessage(id: string, role: SessionMessage["role"], content: string, toolCalls?: ToolCallRecord[], activities?: AssistantActivity[], attachments?: ChatAttachment[], stopped = false): SessionData {
     const session = this.get(id);
     const now = new Date().toISOString();
-    session.messages.push({ id: randomUUID(), role, content, createdAt: now, ...(attachments?.length ? { attachments } : {}), ...(toolCalls?.length ? { toolCalls } : {}), ...(activities?.length ? { activities } : {}) });
+    session.messages.push({ id: randomUUID(), role, content, createdAt: now, ...(attachments?.length ? { attachments } : {}), ...(toolCalls?.length ? { toolCalls } : {}), ...(activities?.length ? { activities } : {}), ...(stopped ? { stopped: true } : {}) });
     session.meta.updatedAt = now;
     if (role === "user" && session.meta.title === "新会话") session.meta.title = content.replace(/\s+/g, " ").slice(0, 28) || "新会话";
     this.writeSession(session);

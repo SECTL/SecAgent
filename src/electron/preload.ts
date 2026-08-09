@@ -24,6 +24,7 @@ contextBridge.exposeInMainWorld("secagent", {
   deleteSession: (id: string) => ipcRenderer.invoke("sessions:delete", id),
   getSession: (id: string) => ipcRenderer.invoke("sessions:get", id),
   sendMessage: (id: string, text: string, modelId?: string, reasoningEffort?: string, attachments?: unknown[]) => ipcRenderer.invoke("sessions:send", id, text, modelId, reasoningEffort, attachments),
+  stopMessage: (id: string) => ipcRenderer.invoke("sessions:stop", id),
   startSpeech: () => ipcRenderer.invoke("speech:start"),
   sendSpeechAudio: (samples: Float32Array) => ipcRenderer.send("speech:audio", samples),
   stopSpeech: () => ipcRenderer.invoke("speech:stop"),

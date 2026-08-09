@@ -25,6 +25,7 @@ let settingsWindow: BrowserWindow | undefined;
 let pluginManager: PluginManager | undefined;
 let secAgentHttpServer: SecAgentHttpServer | undefined;
 const marketplace = new MarketplaceClient();
+const activeSessionRuns = new Map<string, AbortController>();
 
 function appIconPath(): string {
   const bundledIcon = path.join(__dirname, "../renderer/icon.png");
@@ -333,6 +334,12 @@ ipcMain.handle("tts:synthesize", async (_event, text: string) => {
   return audio.toString("base64");
 });
 ipcMain.on("speech:audio", (_event, samples: Float32Array) => sendSpeechAudio(samples));
+ipcMain.handle("sessions:stop", (_event, id: string) => {
+  const controller = activeSessionRuns.get(id);
+  if (!controller) return { ok: true, stopped: false };
+  controller.abort();
+  return { ok: true, stopped: true };
+});
 ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId?: string, reasoningEffort: ReasoningEffort = "high", rawAttachments?: unknown) => {
   const attachments = normalizeAttachments(rawAttachments);
   if (typeof text !== "string" || (!text.trim() && !attachments.length)) throw new Error("消息不能为空");
@@ -343,6 +350,8 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
   useConfiguredModel(config, modelId);
   const selectedReasoningEffort: ReasoningEffort = ["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(reasoningEffort) ? reasoningEffort : "high";
   const audit = new AuditStore(workspace);
+  const abortController = new AbortController();
+  activeSessionRuns.set(id, abortController);
   let traceSequence = 0;
   const toolCalls: ToolCallRecord[] = [];
   const activities: AssistantActivity[] = [];
@@ -384,16 +393,24 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
     trace({ stage: "user.request", data: { text } });
     const skills = [...loadEnabledSkills(config), ...(pluginManager?.getSkills() || [])];
     const runtime = new SecAgentRuntime(config, audit, skills, trace, pluginManager);
-    const result = await runtime.run(historyInput(before, text), selectedReasoningEffort, conversationInput(before, text, attachments));
+    const result = await runtime.run(historyInput(before, text), selectedReasoningEffort, conversationInput(before, text, attachments), abortController.signal);
     sessionStore.appendMessage(id, "assistant", result.message, toolCalls, activities);
     trace({ stage: "assistant.response", data: { text: result.message } });
     return sessionStore.get(id);
   } catch (error) {
+    if (abortController.signal.aborted) {
+      sessionStore.appendMessage(id, "assistant", "", toolCalls, activities, undefined, true);
+      trace({ stage: "runtime.stopped", data: { toolCount: toolCalls.length } });
+      return sessionStore.get(id);
+    }
     const message = `执行失败：${error instanceof Error ? error.message : String(error)}`;
     sessionStore.appendMessage(id, "assistant", message, toolCalls, activities);
     trace({ stage: "runtime.error", data: { message } });
     return sessionStore.get(id);
-  } finally { audit.close(); }
+  } finally {
+    if (activeSessionRuns.get(id) === abortController) activeSessionRuns.delete(id);
+    audit.close();
+  }
 });
 
 app.whenReady().then(async () => {

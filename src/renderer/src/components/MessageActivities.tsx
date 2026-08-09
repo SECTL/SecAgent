@@ -3,12 +3,12 @@ import remarkGfm from "remark-gfm";
 import { AnimatedDetails } from "./AnimatedDetails.js";
 import { toolTitle } from "../utils.js";
 
-export function MessageActivities({ activities, elapsedSeconds, isExecuting = false, activeStepKind, summaryRef }: { activities: AssistantActivity[]; elapsedSeconds?: number; isExecuting?: boolean; activeStepKind?: string; summaryRef?: { current: HTMLButtonElement | null } }) {
-  if (!activities.length && !isExecuting) return null;
+export function MessageActivities({ activities, elapsedSeconds, isExecuting = false, stopped = false, activeStepKind, summaryRef }: { activities: AssistantActivity[]; elapsedSeconds?: number; isExecuting?: boolean; stopped?: boolean; activeStepKind?: string; summaryRef?: { current: HTMLButtonElement | null } }) {
+  if (!activities.length && !isExecuting && !stopped) return null;
   const toolCount = activities.filter((activity) => activity.kind === "tool").length;
   const pending = activities.some((activity) => activity.kind === "tool" && !("result" in activity));
   const toolCountLabel = toolCount === 1 ? "一个" : `${toolCount}`;
-  return <AnimatedDetails className="execution-summary" autoOpen={isExecuting} summaryRef={summaryRef} summary={<><span>{isExecuting || pending ? "正在执行" : elapsedSeconds ? `用时${elapsedSeconds}秒` : "本轮完成"}，共调用了{toolCountLabel}个工具</span><img className="execution-chevron" src="/session-chevron.svg" alt="" /></>}>
+  return <AnimatedDetails className="execution-summary" autoOpen={isExecuting} summaryRef={summaryRef} summary={<><span>{stopped ? "已手动停止" : isExecuting || pending ? "正在执行" : elapsedSeconds ? `用时${elapsedSeconds}秒` : "本轮完成"}，共调用了{toolCountLabel}个工具</span><img className="execution-chevron" src="/session-chevron.svg" alt="" /></>}>
     <div className="message-tool-calls">
       {activities.map((activity, index) => activity.kind !== "tool"
         ? <AnimatedDetails className={`intermediate-output ${activity.kind}`} key={`${activity.kind}-${index}`} autoOpen={isExecuting && activeStepKind === "thinking" && index === activities.length - 1 && activity.kind === "thinking"} summary={<><span className="activity-dot">·</span><span>{activity.kind === "thinking" ? "推理" : activity.kind === "summary" ? "中间摘要" : "中间内容"}</span><img className="details-chevron" src="/session-chevron.svg" alt="" /></>}><div className="activity-content"><ReactMarkdown remarkPlugins={[remarkGfm]}>{activity.content}</ReactMarkdown></div></AnimatedDetails>

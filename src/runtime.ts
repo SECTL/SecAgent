@@ -28,7 +28,8 @@ export class SecAgentRuntime {
     this.registry = new McpRegistry(config);
     this.agent = new ModelToolAgent(config, skills, (stage, data) => this.emit(stage, data), () => this.plugins?.getPromptContributions() ?? Promise.resolve([]));
   }
-  async run(input: string, reasoningEffort: ReasoningEffort = "high", conversation?: ConversationMessage[]): Promise<RunResult> {
+  async run(input: string, reasoningEffort: ReasoningEffort = "high", conversation?: ConversationMessage[], signal?: AbortSignal): Promise<RunResult> {
+    signal?.throwIfAborted();
     const mcpTools = await this.registry.discover();
     for (const error of this.registry.getDiscoveryErrors()) this.emit("mcp.tools/error", error);
     const pluginTools = this.plugins?.getTools() || [];
@@ -43,7 +44,7 @@ export class SecAgentRuntime {
     this.emit("mcp.tools/list", [...mcpTools.map((tool) => ({ key: tool.key, server: tool.server, name: tool.name, description: tool.description, hidden: tool.hidden, inputSchema: tool.inputSchema })), ...pluginTools.map((tool) => ({ ...tool, source: "plugin" }))]);
     this.emit("secagent.skills/list", this.skills.map((skill) => ({ name: skill.name, description: skill.description })));
     this.emit("model.agent.request", { provider: this.config.agent.provider, model: this.config.agent.model, baseUrl: this.config.agent.baseUrl, instruction: input });
-    const message = await this.agent.run(input, tools, async (key, args) => this.callTool(input, key, args, hiddenTools), reasoningEffort, conversation);
+    const message = await this.agent.run(input, tools, async (key, args) => this.callTool(input, key, args, hiddenTools), reasoningEffort, conversation, signal);
     this.emit("model.agent.result", { message });
     return { kind: "completed", message };
   }
