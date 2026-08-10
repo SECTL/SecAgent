@@ -16,6 +16,15 @@ export type RunResult =
 
 export type TraceEvent = { sequence: number; at: string; stage: string; data: unknown };
 
+/** Resolve both fully-qualified plugin Skill names and legacy unqualified names. */
+export function resolveSkill(skills: LoadedSkill[], name: string): LoadedSkill | undefined {
+  const exact = skills.find((item) => item.name === name);
+  if (exact || name.includes("/")) return exact;
+
+  const candidates = skills.filter((item) => item.name.endsWith(`/${name}`));
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
 /**
  * Hidden MCP tools are omitted from the model schema but remain callable through the generic
  * hidden-tool entry point. Local Pi tools are always available.
@@ -93,7 +102,7 @@ export class SecAgentRuntime {
   }
   private readSkill(request: string, args: Record<string, unknown>): unknown {
     const name = typeof args.name === "string" ? args.name : "";
-    const skill = this.skills.find((item) => item.name === name);
+    const skill = resolveSkill(this.skills, name);
     if (!skill) throw new Error(`未找到已启用的 Skill：${name}`);
     const requestedFile = typeof args.file === "string" ? args.file : "";
     let filePath = skill.path;
