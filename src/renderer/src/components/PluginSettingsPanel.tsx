@@ -4,6 +4,20 @@ import remarkGfm from "remark-gfm";
 import { CircleAlert, CircleCheck, Download, ExternalLink, MoreHorizontal, PackageOpen, Power, RefreshCw, Search, Trash2 } from "lucide-react";
 import { pluginStateLabel } from "../utils.js";
 
+function compareMarketVersions(left: string, right: string): number {
+  const parse = (value: string) => value.replace(/^v/i, "").split(/[.+-]/).map((part) => Number(part) || 0);
+  const a = parse(left);
+  const b = parse(right);
+  for (let index = 0; index < Math.max(a.length, b.length); index++) {
+    if ((a[index] || 0) !== (b[index] || 0)) return (a[index] || 0) - (b[index] || 0);
+  }
+  return 0;
+}
+
+function latestMarketVersion(plugin?: MarketplacePlugin): MarketplaceVersion | undefined {
+  return plugin?.versions.slice().sort((left, right) => compareMarketVersions(right.version, left.version))[0];
+}
+
 export function PluginSettingsPanel({
   plugins,
   setPlugins,
@@ -56,7 +70,7 @@ export function PluginSettingsPanel({
   const installed = plugins.find((plugin) => plugin.id === selectedId);
   const market = marketPlugins.find((plugin) => plugin.id === selectedId);
   const selected = category === "installed" ? installed : market;
-  const selectedVersion = market?.versions[0];
+  const selectedVersion = latestMarketVersion(market);
   const selectedReadme = installed?.readme || market?.readme || (market ? `# ${market.name}\n\n${market.description}\n\n该插件的完整 README 请前往项目主页查看。` : "");
 
   const reportError = (reason: unknown) => setPanelError(reason instanceof Error ? reason.message : String(reason));
@@ -119,7 +133,7 @@ export function PluginSettingsPanel({
         <div className="plugin-list" role="listbox" aria-label={category === "installed" ? "已安装插件" : "插件市场"}>
           {visiblePlugins.map((plugin) => {
             const local = plugins.find((item) => item.id === plugin.id);
-            const version = "versions" in plugin ? plugin.versions[0]?.version : plugin.version;
+            const version = "versions" in plugin ? latestMarketVersion(plugin)?.version : plugin.version;
             const state = local ? pluginStateLabel(local) : version ? `v${version}` : "未安装";
             return <button type="button" role="option" aria-selected={selectedId === plugin.id} className={`plugin-list-item ${selectedId === plugin.id ? "selected" : ""}`} key={plugin.id} onClick={() => setSelectedId(plugin.id)}>
               <span className="plugin-list-icon">{plugin.icon ? <img src={plugin.icon} alt="" /> : plugin.name.slice(0, 1).toUpperCase()}</span>

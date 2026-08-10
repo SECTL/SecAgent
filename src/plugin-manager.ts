@@ -118,15 +118,25 @@ export class PluginManager {
     const manifestEntry = zip.getEntry("secagent-plugin.json");
     if (!manifestEntry) throw new Error("插件包缺少 secagent-plugin.json");
     const manifest = this.validateManifest(JSON.parse(manifestEntry.getData().toString("utf8")));
+    const previous = this.state.plugins.find((item) => item.id === manifest.id);
+    const pluginRoot = path.join(this.installedRoot, manifest.id);
     const target = path.join(this.installedRoot, manifest.id, manifest.version);
-    if (fs.existsSync(target)) fs.rmSync(target, { recursive: true, force: true });
-    fs.mkdirSync(target, { recursive: true });
-    zip.extractAllTo(target, true);
-    this.state.plugins = this.state.plugins.filter((item) => item.id !== manifest.id);
-    this.state.plugins.push({ id: manifest.id, version: manifest.version, enabled: true });
-    this.saveState();
-    await this.activate(manifest.id);
-    return this.list().find((item) => item.id === manifest.id)!;
+    const staging = path.join(this.workspace, "plugins", `.staging-${manifest.id}-${crypto.randomUUID()}`);
+    try {
+      fs.mkdirSync(staging, { recursive: true });
+      zip.extractAllTo(staging, true);
+      if (previous) await this.deactivate(manifest.id);
+      if (fs.existsSync(pluginRoot)) fs.rmSync(pluginRoot, { recursive: true, force: true });
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.renameSync(staging, target);
+      this.state.plugins = this.state.plugins.filter((item) => item.id !== manifest.id);
+      this.state.plugins.push({ id: manifest.id, version: manifest.version, enabled: previous?.enabled ?? true });
+      this.saveState();
+      if (previous?.enabled ?? true) await this.activate(manifest.id); else this.changed();
+      return this.list().find((item) => item.id === manifest.id)!;
+    } finally {
+      if (fs.existsSync(staging)) fs.rmSync(staging, { recursive: true, force: true });
+    }
   }
 
   async setEnabled(id: string, enabled: boolean): Promise<void> {

@@ -31,6 +31,19 @@ let activeWakeContext: { sessionId?: string; modelId?: string; reasoningEffort?:
 let wakeAbortController: AbortController | undefined;
 const marketplace = new MarketplaceClient();
 const activeSessionRuns = new Map<string, AbortController>();
+const MARKETPLACE_UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+let marketplaceUpdateTimer: NodeJS.Timeout | undefined;
+
+async function updateInstalledPlugins(): Promise<void> {
+  if (!pluginManager) return;
+  try {
+    const updates = await marketplace.updateInstalled(pluginManager);
+    if (updates.length) logMain("marketplace.plugins.updated", { updates });
+    else logMain("marketplace.plugins.checked", { updated: 0 });
+  } catch (error) {
+    logMain("marketplace.plugins.update.failed", { error: error instanceof Error ? error.message : String(error) });
+  }
+}
 
 function appIconPath(): string {
   const bundledIcon = path.join(__dirname, "../renderer/icon.png");
@@ -601,6 +614,10 @@ app.whenReady().then(async () => {
     windowRef?.webContents.send("plugins:changed", list);
     settingsWindow?.webContents.send("plugins:changed", list);
   });
+  const initialMarketplaceUpdate = setTimeout(() => { void updateInstalledPlugins(); }, 5_000);
+  initialMarketplaceUpdate.unref?.();
+  marketplaceUpdateTimer = setInterval(() => { void updateInstalledPlugins(); }, MARKETPLACE_UPDATE_INTERVAL_MS);
+  marketplaceUpdateTimer.unref?.();
   // Electron otherwise rejects getUserMedia requests in some desktop environments.
   // Speech audio is streamed to the official cloud ASR service.
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
@@ -616,5 +633,5 @@ app.whenReady().then(async () => {
   if (needsOnboarding) openSettings(true);
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
-app.on("before-quit", () => { closeWakeWindow(); globalShortcut.unregisterAll(); void secAgentHttpServer?.stop(); void pluginManager?.shutdown(); });
+app.on("before-quit", () => { closeWakeWindow(); globalShortcut.unregisterAll(); if (marketplaceUpdateTimer) clearInterval(marketplaceUpdateTimer); void secAgentHttpServer?.stop(); void pluginManager?.shutdown(); });
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });

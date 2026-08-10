@@ -45,3 +45,28 @@ export function activate(api) {
     fs.rmSync(workspace, { recursive: true, force: true });
   }
 });
+
+test("installing a newer version replaces the active plugin", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-plugin-update-"));
+  const createArchive = (version: string, marker: string): string => {
+    const archivePath = path.join(workspace, `${version}.zip`);
+    const archive = new AdmZip() as unknown as { addFile(name: string, data: Buffer): void; writeZip(file: string): void };
+    archive.addFile("secagent-plugin.json", Buffer.from(JSON.stringify({ apiVersion: 1, id: "update-test", name: "Update test", version, main: "main.mjs", permissions: ["agent.prompts"] })));
+    archive.addFile("main.mjs", Buffer.from(`export function activate(api) { api.registerPrompt("marker", () => "${marker}"); }`));
+    archive.writeZip(archivePath);
+    return archivePath;
+  };
+
+  try {
+    const manager = new PluginManager(workspace);
+    await manager.initialize();
+    await manager.install(createArchive("1.0.0", "old"));
+    assert.equal((await manager.getPromptContributions())[0].text, "old");
+    await manager.install(createArchive("1.1.0", "new"));
+    assert.equal(manager.list()[0].version, "1.1.0");
+    assert.equal((await manager.getPromptContributions())[0].text, "new");
+    await manager.shutdown();
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
