@@ -3,10 +3,12 @@ import path from "node:path";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import type { AgentTool } from "./model-provider.js";
+import type { ToolImageContent } from "./tool-content.js";
 
 const execAsync = promisify(exec);
 
 export const piTools: AgentTool[] = [
+  { key: "look_at", description: "查看本地图片并把图片内容直接提供给模型。path 可使用绝对路径或相对于工作区的路径；仅支持 png、jpg、jpeg、webp、gif 图片。需要理解图片内容时必须调用此工具，不要只读取图片文件的二进制内容。", inputSchema: { type: "object", additionalProperties: false, required: ["path"], properties: { path: { type: "string", description: "图片的绝对路径或相对于工作区的路径" } } } },
   { key: "read", description: "读取文件内容。path 可使用绝对路径或相对于工作区的路径。", inputSchema: { type: "object", additionalProperties: false, required: ["path"], properties: { path: { type: "string" }, offset: { type: "integer", minimum: 1 }, limit: { type: "integer", minimum: 1 } } } },
   { key: "write", description: "写入文件内容；父目录不存在时自动创建。", inputSchema: { type: "object", additionalProperties: false, required: ["path", "content"], properties: { path: { type: "string" }, content: { type: "string" } } } },
   { key: "edit", description: "将文件中唯一匹配的 oldText 替换为 newText。", inputSchema: { type: "object", additionalProperties: false, required: ["path", "oldText", "newText"], properties: { path: { type: "string" }, oldText: { type: "string" }, newText: { type: "string" } } } },
@@ -16,6 +18,18 @@ export const piTools: AgentTool[] = [
 function resolvePath(workspace: string, filePath: string): string { return path.isAbsolute(filePath) ? filePath : path.resolve(workspace, filePath); }
 
 export async function callPiTool(workspace: string, key: string, args: Record<string, unknown>): Promise<unknown> {
+  if (key === "look_at") {
+    if (typeof args.path !== "string" || !args.path.trim()) throw new Error("look_at 需要非空 path");
+    const filePath = resolvePath(workspace, args.path);
+    const mediaTypes: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif" };
+    const mediaType = mediaTypes[path.extname(filePath).toLowerCase()];
+    if (!mediaType) throw new Error("look_at 仅支持 png、jpg、jpeg、webp、gif 图片");
+    const stat = await fs.stat(filePath);
+    if (!stat.isFile()) throw new Error("look_at 的 path 不是文件");
+    if (stat.size > 12 * 1024 * 1024) throw new Error("look_at 图片不能超过 12 MB");
+    const result: ToolImageContent = { type: "image", data: (await fs.readFile(filePath)).toString("base64"), mimeType: mediaType, name: path.basename(filePath), path: filePath };
+    return result;
+  }
   if (key === "read") {
     if (typeof args.path !== "string" || !args.path.trim()) throw new Error("read 需要非空 path");
     const filePath = resolvePath(workspace, args.path);

@@ -3,7 +3,7 @@ import type { McpServerConfig, SecAgentConfig, Student } from "./types.js";
 interface McpToolResult {
   isError?: boolean;
   structuredContent?: unknown;
-  content?: Array<{ type?: string; text?: string }>;
+  content?: Array<{ type?: string; text?: string; data?: string; mimeType?: string; resource?: { blob?: string; mimeType?: string } }>;
 }
 
 interface RpcResponse { result?: McpToolResult; error?: { message?: string } }
@@ -40,7 +40,9 @@ export class HttpMcpClient {
     if (payload.error) throw new Error(`MCP 错误：${payload.error.message ?? "未知错误"}`);
     if (!payload.result) throw new Error("MCP 返回缺少 result");
     if (payload.result.isError) throw new Error(payload.result.content?.map((item) => item.text).filter(Boolean).join("；") || "MCP 工具调用失败");
-    return payload.result.structuredContent ?? payload.result.content;
+    const content = payload.result.content;
+    const hasImage = content?.some((item) => item.type === "image" || item.type === "resource" && item.resource?.mimeType?.startsWith("image/"));
+    return hasImage && content ? { structuredContent: payload.result.structuredContent, content } : payload.result.structuredContent ?? content;
   }
   async listTools(): Promise<McpToolDefinition[]> {
     const payload = await this.request("tools/list");

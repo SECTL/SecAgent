@@ -9,6 +9,7 @@ import type { ConversationMessage } from "./model-provider.js";
 import type { LoadedSkill } from "./skills.js";
 import { callPiTool, piTools } from "./pi-tools.js";
 import { PluginManager } from "./plugin-manager.js";
+import { summarizeToolResult } from "./tool-content.js";
 
 export type RunResult =
   | { kind: "completed"; message: string; actionId?: string }
@@ -72,8 +73,9 @@ export class SecAgentRuntime {
       this.emit("secagent.tools/call", { name: key, arguments: args });
       try {
         const result = await callPiTool(this.config.workspace, key, args);
-        this.emit("secagent.tools/result", { name: key, result });
-        this.audit.log({ id: randomUUID(), status: "completed", tool: key, request, params: args, result });
+        const summary = summarizeToolResult(result);
+        this.emit("secagent.tools/result", { name: key, result: summary });
+        this.audit.log({ id: randomUUID(), status: "completed", tool: key, request, params: args, result: summary });
         return result;
       } catch (error) {
         const result = { error: error instanceof Error ? error.message : String(error) };
@@ -95,9 +97,10 @@ export class SecAgentRuntime {
   private async executeTool(request: string, key: string, args: Record<string, unknown>): Promise<unknown> {
     this.emit("mcp.tools/call", { name: key, arguments: args });
     const result = this.plugins?.getTools().some((tool) => tool.key === key) ? await this.plugins.callTool(key, args) : await this.registry.call(key, args);
-    this.emit("mcp.tools/result", { name: key, result });
+    const summary = summarizeToolResult(result);
+    this.emit("mcp.tools/result", { name: key, result: summary });
     const id = randomUUID();
-    this.audit.log({ id, status: "completed", tool: key, request, params: args, result });
+    this.audit.log({ id, status: "completed", tool: key, request, params: args, result: summary });
     return result;
   }
   private readSkill(request: string, args: Record<string, unknown>): unknown {

@@ -1,5 +1,6 @@
 import type { PluginPromptContribution } from "./plugin-manager.js";
 import type { ChatAttachment, ReasoningEffort, SecAgentConfig } from "./types.js";
+import { toolResultParts, toolResultText } from "./tool-content.js";
 
 function isDeepSeekV4Model(modelName: string): boolean {
   return /^(?:deepseek-v4-flash|deepseek-v4-pro)(?:[-_].*)?$/i.test(modelName.trim());
@@ -223,10 +224,11 @@ export class ModelToolAgent {
       }, () => ({ choices: [{ message: { content: content || null, tool_calls: [...toolCalls.values()] } }] }), signal);
       const message = { content, tool_calls: [...toolCalls.values()] };
       const calls = message.tool_calls || [];
-      if (!calls.length) return pendingToolError ? `工具执行失败：${pendingToolError}` : message.content.trim() || "模型响应为空。";
+      if (!calls.length) return message.content.trim() || (pendingToolError ? `工具执行失败：${pendingToolError}` : "模型响应为空。");
       if (content) this.trace?.("model.output.reset", { turn: turn + 1, reason: "tool_call" });
       messages.push({ role: "assistant", content: message.content ?? null, tool_calls: calls.map((call) => ({ ...call, type: "function" })) });
       let turnToolError: string | undefined;
+      const imageFollowups = [] as ReturnType<typeof toolResultParts>["images"];
       for (const call of calls) {
         const name = call.function?.name;
         if (!name || !call.id) continue;
@@ -240,8 +242,11 @@ export class ModelToolAgent {
           turnToolError ??= message;
           result = { error: message };
         }
-        messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result) });
+        const parts = toolResultParts(result);
+        messages.push({ role: "tool", tool_call_id: call.id, content: toolResultText(parts) });
+        imageFollowups.push(...parts.images);
       }
+      if (imageFollowups.length) messages.push({ role: "user", content: [{ type: "text", text: "工具返回了图片，请直接查看这些图片并继续完成任务。" }, ...imageFollowups.map((image) => ({ type: "image_url", image_url: { url: `data:${image.mimeType};base64,${image.data}` } }))] });
       pendingToolError = turnToolError;
     }
     throw new Error("工具调用循环意外结束");
@@ -323,7 +328,7 @@ export class ModelToolAgent {
         }
       }, () => ({ output: [{ type: "message", content: answer || undefined }, ...[...calls.values()].map((call) => ({ type: "function_call", call_id: call.callId, name: call.name, arguments: call.arguments }))] }), signal);
       const functionCalls = [...calls.values()].filter((call) => call.name && call.callId);
-      if (!functionCalls.length) return pendingToolError ? `工具执行失败：${pendingToolError}` : answer.trim() || "模型响应为空。";
+      if (!functionCalls.length) return answer.trim() || (pendingToolError ? `工具执行失败：${pendingToolError}` : "模型响应为空。");
       if (answer) this.trace?.("model.output.reset", { turn: turn + 1, reason: "tool_call" });
       if (responseOutput.length) input.push(...responseOutput);
       let turnToolError: string | undefined;
@@ -339,14 +344,15 @@ export class ModelToolAgent {
           turnToolError ??= message;
           result = { error: message };
         }
-        input.push({ type: "function_call_output", call_id: call.callId, output: JSON.stringify(result) });
+        const parts = toolResultParts(result);
+        input.push({ type: "function_call_output", call_id: call.callId, output: parts.images.length ? [{ type: "input_text", text: toolResultText(parts) }, ...parts.images.map((image) => ({ type: "input_image", image_url: `data:${image.mimeType};base64,${image.data}` }))] : toolResultText(parts) });
       }
       pendingToolError = turnToolError;
     }
     throw new Error("工具调用循环意外结束");
   }
   private async runGoogle(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high", systemPrompt: string, conversation?: ConversationMessage[], signal?: AbortSignal): Promise<string> {
-    type Part = { text?: string; thought?: boolean; inlineData?: { mimeType: string; data: string }; functionCall?: { name?: string; args?: Record<string, unknown> }; functionResponse?: { name?: string; response?: unknown }; thoughtSignature?: string };
+    type Part = { text?: string; thought?: boolean; inlineData?: { mimeType: string; data: string }; functionCall?: { name?: string; args?: Record<string, unknown>; id?: string }; functionResponse?: { name?: string; response?: unknown; id?: string; parts?: Array<{ inlineData: { mimeType: string; data: string; displayName?: string } }> }; thoughtSignature?: string };
     const history = conversation?.length ? conversation : [{ role: "user" as const, content: instruction }];
     const contents: Array<{ role: "user" | "model"; parts: Part[] }> = history.map((message) => ({
       role: message.role === "assistant" ? "model" : "user",
@@ -359,7 +365,7 @@ export class ModelToolAgent {
     let pendingToolError: string | undefined;
     for (let turn = 0; ; turn++) {
       let text = "";
-      const calls = new Map<string, { name: string; args: Record<string, unknown>; thoughtSignature?: string }>();
+      const calls = new Map<string, { name: string; args: Record<string, unknown>; thoughtSignature?: string; id?: string }>();
       const body = {
         systemInstruction: { parts: [{ text: systemPrompt }] },
         contents,
@@ -378,6 +384,7 @@ export class ModelToolAgent {
             const name = part.functionCall.name;
             const current = calls.get(name) || { name, args: {} };
             current.args = { ...current.args, ...(part.functionCall.args || {}) };
+            if (part.functionCall.id) current.id = part.functionCall.id;
             const signature = part.thoughtSignature || (part as Part & { thought_signature?: string }).thought_signature;
             if (signature) current.thoughtSignature = signature;
             calls.set(name, current);
@@ -385,7 +392,7 @@ export class ModelToolAgent {
         }
       }, () => ({ candidates: [{ content: { parts: [{ text: text || undefined }, ...[...calls.values()].map((call) => ({ functionCall: call }))] } }] }), signal);
       const functionCalls = [...calls.values()];
-      if (!functionCalls.length) return pendingToolError ? `工具执行失败：${pendingToolError}` : text.trim() || "模型响应为空。";
+      if (!functionCalls.length) return text.trim() || (pendingToolError ? `工具执行失败：${pendingToolError}` : "模型响应为空。");
       if (text) this.trace?.("model.output.reset", { turn: turn + 1, reason: "tool_call" });
       const modelParts: Part[] = [];
       if (text) modelParts.push({ text });
@@ -395,6 +402,7 @@ export class ModelToolAgent {
       })));
       contents.push({ role: "model", parts: modelParts });
       let turnToolError: string | undefined;
+      const imageFallback = [] as Part[];
       for (const call of functionCalls) {
         let result: unknown;
         signal?.throwIfAborted();
@@ -403,8 +411,16 @@ export class ModelToolAgent {
           turnToolError ??= message;
           result = { error: message };
         }
-        contents.push({ role: "user", parts: [{ functionResponse: { name: call.name, response: result } }] });
+        const parts = toolResultParts(result);
+        if (parts.images.length && this.agent.model.toLowerCase().includes("gemini-3")) {
+          const refs = parts.images.map((image, index) => ({ $ref: `${call.name}-${turn}-${index}` }));
+          contents.push({ role: "user", parts: [{ functionResponse: { name: call.name, ...(call.id ? { id: call.id } : {}), response: { result: parts.text || "已返回图片。", images: refs }, parts: parts.images.map((image, index) => ({ inlineData: { mimeType: image.mimeType, data: image.data, displayName: `${call.name}-${turn}-${index}` } })) } }] });
+        } else {
+          contents.push({ role: "user", parts: [{ functionResponse: { name: call.name, ...(call.id ? { id: call.id } : {}), response: parts.images.length ? { result: toolResultText(parts) } : result } }] });
+          imageFallback.push(...parts.images.map((image) => ({ inlineData: { mimeType: image.mimeType, data: image.data } })));
+        }
       }
+      if (imageFallback.length) contents.push({ role: "user", parts: [{ text: "工具返回了图片，请直接查看这些图片并继续完成任务。" }, ...imageFallback] });
       pendingToolError = turnToolError;
     }
     throw new Error("工具调用循环意外结束");
@@ -510,7 +526,7 @@ export class ModelToolAgent {
       const calls = content.filter((item) => item.type === "tool_use" && item.id && item.name);
       if (!calls.length) {
         const answer = content.filter((item) => item.type === "text").map((item) => item.text).filter(Boolean).join("\n");
-        return pendingToolError ? `工具执行失败：${pendingToolError}` : answer || "模型响应为空。";
+        return answer || (pendingToolError ? `工具执行失败：${pendingToolError}` : "模型响应为空。");
       }
       if (content.some((item) => item.type === "text" && item.text)) this.trace?.("model.output.reset", { turn: turn + 1, reason: "tool_call" });
       messages.push({ role: "assistant", content });
@@ -525,7 +541,8 @@ export class ModelToolAgent {
           turnToolError ??= message;
           result = { error: message };
         }
-        results.push({ type: "tool_result", tool_use_id: call.id, content: JSON.stringify(result) });
+        const parts = toolResultParts(result);
+        results.push({ type: "tool_result", tool_use_id: call.id, content: parts.images.length ? [{ type: "text", text: toolResultText(parts) }, ...parts.images.map((image) => ({ type: "image", source: { type: "base64", media_type: image.mimeType, data: image.data } }))] : toolResultText(parts) });
       }
       messages.push({ role: "user", content: results });
       pendingToolError = turnToolError;

@@ -121,7 +121,7 @@ agent:
 
 桌面端输入框右侧的模型菜单可以分别选择模型和推理强度（不思考、低、中、高）。OpenAI Responses 会将其映射到 `reasoning.effort`；Anthropic 和 Gemini 会映射到各自的 thinking 配置。Responses、Anthropic thinking 和 Gemini thought summary 的流式内容会按时间顺序显示在工具执行过程内，最终答案仍单独显示。
 
-模型可直接调用所有已发现的 MCP 工具，以及 Pi 风格的 `read`、`write`、`edit`、`bash` 四个本地工具；每次调用仍会写入本地审计。
+模型可直接调用所有已发现的 MCP 工具，以及 Pi 风格的 `look_at`、`read`、`write`、`edit`、`bash` 五个本地工具；`look_at` 会读取工作区或本地路径中的图片并以多模态内容返回给模型，每次调用仍会写入本地审计。
 
 基础系统提示词从工作区 `secagent.yaml` 的 `agent.systemPrompt` 读取；新工作区会写入源码中的默认值，配置项为空时也会回退到该默认值。SecAgent 会自动扫描工作目录下三层以内、文件名大小写不敏感的 `SKILL.md`，并将扫描到的 Skill 名称、描述和入口文件追加到系统提示词中。模型需要完整流程时会调用 `secagent__read_skill` 读取对应文件。Skill 不需要写入 `secagent.yaml`，文件可直接手动编辑。
 
