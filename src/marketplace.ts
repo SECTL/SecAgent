@@ -15,7 +15,7 @@ export class MarketplaceClient {
   constructor(private readonly indexUrl = process.env.SECAGENT_PLUGIN_MARKET_URL || DEFAULT_MARKETPLACE_INDEX_URL, private readonly publicKey = process.env.SECAGENT_MARKET_PUBLIC_KEY || "") {}
   async list(): Promise<MarketplacePlugin[]> {
     if (!this.indexUrl) throw new Error("未配置插件市场地址。请设置 SECAGENT_PLUGIN_MARKET_URL。");
-    if (!this.indexUrl.startsWith("https://")) throw new Error("插件市场必须使用 HTTPS 地址");
+    if (!isAllowedMarketUrl(this.indexUrl)) throw new Error("插件市场必须使用 HTTPS 地址；本地测试仅允许回环地址");
     const response = await fetch(this.indexUrl, { signal: AbortSignal.timeout(12_000) });
     if (!response.ok) throw new Error(`无法读取插件市场：HTTP ${response.status}`);
     const index = await response.json() as MarketplaceIndex;
@@ -24,7 +24,7 @@ export class MarketplaceClient {
     return index.plugins.filter((plugin) => plugin.versions.some((version) => version.minHostApiVersion <= 1 && version.platforms.includes(process.platform)));
   }
   async install(manager: PluginManager, version: MarketplaceVersion): Promise<void> {
-    if (!version.assetUrl.startsWith("https://") || !/^[a-fA-F0-9]{64}$/.test(version.sha256)) throw new Error("市场插件资产信息无效");
+    if (!isAllowedMarketUrl(version.assetUrl) || !/^[a-fA-F0-9]{64}$/.test(version.sha256)) throw new Error("市场插件资产信息无效");
     const response = await fetch(version.assetUrl, { signal: AbortSignal.timeout(60_000) });
     if (!response.ok) throw new Error(`下载插件失败：HTTP ${response.status}`);
     const bytes = Buffer.from(await response.arrayBuffer());
@@ -39,5 +39,15 @@ export class MarketplaceClient {
     const unsigned = { ...index }; delete unsigned.signature;
     const valid = crypto.verify(null, Buffer.from(JSON.stringify(unsigned)), this.publicKey, Buffer.from(index.signature, "base64"));
     if (!valid) throw new Error("市场索引签名校验失败");
+  }
+}
+
+function isAllowedMarketUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    if (url.protocol === "https:") return true;
+    return url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]", "::1"].includes(url.hostname);
+  } catch {
+    return false;
   }
 }
