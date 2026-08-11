@@ -2,6 +2,15 @@ import type { PluginPromptContribution } from "./plugin-manager.js";
 import type { ChatAttachment, ReasoningEffort, SecAgentConfig } from "./types.js";
 import { toolResultParts, toolResultText } from "./tool-content.js";
 
+const WORKSPACE_FILE_OUTPUT_PROMPT = `
+
+## 工作区文件预览输出
+当本轮任务生成或修改了可供用户浏览的 HTML、SVG 或 Markdown 文件（例如交互效果、静态网站、图表或文档）时，请在最终回答的最后追加一个工作区文件清单。只列出确实存在于当前工作区内的文件，路径使用相对工作区根目录的路径，并严格使用以下 XML 格式；没有可预览文件时不要输出该标签：
+<workspace-files>
+  <file path="相对路径/index.html" />
+</workspace-files>
+可以列出一个或多个文件。XML 必须放在回答末尾，不要放进 Markdown 代码块。`;
+
 function isDeepSeekV4Model(modelName: string): boolean {
   return /^(?:deepseek-v4-flash|deepseek-v4-pro)(?:[-_].*)?$/i.test(modelName.trim());
 }
@@ -87,7 +96,7 @@ export class ModelToolAgent {
     const skillCatalog = _skills.length
       ? `\n\n## 可用 Skills\n${_skills.map((skill) => `- ${skill.name}: ${skill.description}（入口文件：${skill.relativePath || skill.path}）`).join("\n")}`
       : "";
-    this.agent = { ...config.agent, systemPrompt: `${config.agent.systemPrompt}${skillCatalog}` };
+    this.agent = { ...config.agent, systemPrompt: `${config.agent.systemPrompt}${skillCatalog}${WORKSPACE_FILE_OUTPUT_PROMPT}` };
   }
   async run(instruction: string, tools: AgentTool[], execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high", conversation?: ConversationMessage[], signal?: AbortSignal): Promise<string> {
     if (!tools.length) throw new Error("没有已启用且可发现的 MCP 工具");
@@ -196,6 +205,7 @@ export class ModelToolAgent {
     const messages: Array<Record<string, unknown>> = [{ role: "system", content: systemPrompt }, ...history.map((message) => ({ role: message.role, content: openAIContent(message) }))];
     const definitions = tools.map((tool) => ({ type: "function", function: { name: tool.key, description: tool.description || tool.key, parameters: tool.inputSchema || { type: "object", properties: {} } } }));
     let pendingToolError: string | undefined;
+    let emptyResponseRetries = 0;
     for (let turn = 0; ; turn++) {
       let content = "";
       const toolCalls = new Map<number, { id?: string; function: { name?: string; arguments: string } }>();
@@ -224,7 +234,14 @@ export class ModelToolAgent {
       }, () => ({ choices: [{ message: { content: content || null, tool_calls: [...toolCalls.values()] } }] }), signal);
       const message = { content, tool_calls: [...toolCalls.values()] };
       const calls = message.tool_calls || [];
-      if (!calls.length) return message.content.trim() || (pendingToolError ? `工具执行失败：${pendingToolError}` : "模型响应为空。");
+      if (!calls.length) {
+        if (!message.content.trim() && !pendingToolError && emptyResponseRetries < 1) {
+          emptyResponseRetries += 1;
+          messages.push({ role: "user", content: "请直接给出最终答复，不要只输出思考过程；如果需要调用工具，请调用工具后继续完成任务。" });
+          continue;
+        }
+        return message.content.trim() || (pendingToolError ? `工具执行失败：${pendingToolError}` : "模型响应为空。");
+      }
       if (content) this.trace?.("model.output.reset", { turn: turn + 1, reason: "tool_call" });
       messages.push({ role: "assistant", content: message.content ?? null, tool_calls: calls.map((call) => ({ ...call, type: "function" })) });
       let turnToolError: string | undefined;
@@ -232,15 +249,20 @@ export class ModelToolAgent {
       for (const call of calls) {
         const name = call.function?.name;
         if (!name || !call.id) continue;
-        let args: Record<string, unknown> = {};
-        try { args = JSON.parse(call.function?.arguments || "{}"); } catch { args = { _error: "模型返回了无法解析的工具参数" }; }
-        if ("_error" in args) throw new Error("模型返回了无法解析的工具参数，请提高 maxTokens 或重试");
+        let args: Record<string, unknown> | undefined;
         let result: unknown;
-        signal?.throwIfAborted();
-        try { result = await execute(name, args); } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          turnToolError ??= message;
-          result = { error: message };
+        try {
+          args = JSON.parse(call.function?.arguments || "{}");
+        } catch {
+          result = { error: "工具参数不是有效的 JSON，请重新生成完整且合法的工具参数。" };
+        }
+        if (!result) {
+          signal?.throwIfAborted();
+          try { result = await execute(name, args!); } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            turnToolError ??= message;
+            result = { error: message };
+          }
         }
         const parts = toolResultParts(result);
         messages.push({ role: "tool", tool_call_id: call.id, content: toolResultText(parts) });
@@ -259,6 +281,7 @@ export class ModelToolAgent {
     const input: InputItem[] = history.map((message) => ({ role: message.role, content: responsesContent(message) }));
     const definitions = tools.map((tool) => ({ type: "function", name: tool.key, description: tool.description || tool.key, parameters: tool.inputSchema || { type: "object", properties: {} }, strict: false }));
     let pendingToolError: string | undefined;
+    let emptyResponseRetries = 0;
     for (let turn = 0; ; turn++) {
       let answer = "";
       let summaryDeltaSeen = false;
@@ -328,21 +351,33 @@ export class ModelToolAgent {
         }
       }, () => ({ output: [{ type: "message", content: answer || undefined }, ...[...calls.values()].map((call) => ({ type: "function_call", call_id: call.callId, name: call.name, arguments: call.arguments }))] }), signal);
       const functionCalls = [...calls.values()].filter((call) => call.name && call.callId);
-      if (!functionCalls.length) return answer.trim() || (pendingToolError ? `工具执行失败：${pendingToolError}` : "模型响应为空。");
+      if (!functionCalls.length) {
+        if (!answer.trim() && !pendingToolError && emptyResponseRetries < 1) {
+          emptyResponseRetries += 1;
+          input.push({ role: "user", content: "请直接给出最终答复，不要只输出思考过程；如果需要调用工具，请调用工具后继续完成任务。" });
+          continue;
+        }
+        return answer.trim() || (pendingToolError ? `工具执行失败：${pendingToolError}` : "模型响应为空。");
+      }
       if (answer) this.trace?.("model.output.reset", { turn: turn + 1, reason: "tool_call" });
       if (responseOutput.length) input.push(...responseOutput);
       let turnToolError: string | undefined;
       for (const call of functionCalls) {
-        let args: Record<string, unknown> = {};
-        try { args = JSON.parse(call.arguments || "{}"); } catch { args = { _error: "模型返回了无法解析的工具参数" }; }
-        if ("_error" in args) throw new Error("模型返回了无法解析的工具参数，请提高 maxTokens 或重试");
-        if (!responseOutput.length) input.push({ type: "function_call", call_id: call.callId, name: call.name, arguments: call.arguments });
+        let args: Record<string, unknown> | undefined;
         let result: unknown;
-        signal?.throwIfAborted();
-        try { result = await execute(call.name, args); } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          turnToolError ??= message;
-          result = { error: message };
+        try {
+          args = JSON.parse(call.arguments || "{}");
+        } catch {
+          result = { error: "工具参数不是有效的 JSON，请重新生成完整且合法的工具参数。" };
+        }
+        if (!responseOutput.length) input.push({ type: "function_call", call_id: call.callId, name: call.name, arguments: call.arguments });
+        if (!result) {
+          signal?.throwIfAborted();
+          try { result = await execute(call.name, args!); } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            turnToolError ??= message;
+            result = { error: message };
+          }
         }
         const parts = toolResultParts(result);
         input.push({ type: "function_call_output", call_id: call.callId, output: parts.images.length ? [{ type: "input_text", text: toolResultText(parts) }, ...parts.images.map((image) => ({ type: "input_image", image_url: `data:${image.mimeType};base64,${image.data}` }))] : toolResultText(parts) });

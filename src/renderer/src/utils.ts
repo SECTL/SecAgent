@@ -7,6 +7,9 @@ export function isDoubaoModel(modelName?: string): boolean {
 }
 
 export function reasoningEffortsForModel(model?: ModelOption): ReasoningEffort[] {
+  // The official FreeDeepseek web aliases select their own mode server-side;
+  // expose one fixed client option instead of misleading generic effort levels.
+  if (/^(?:deepseek-default|deepseek-reasoner|deepseek-v4-pro)$/i.test((model?.model || "").trim())) return ["high"];
   if (isDeepSeekV4Model(model?.model)) return ["none", "low", "high", "max"];
   // Volcengine Ark (Doubao) only supports none/low/medium/high.
   if (isDoubaoModel(model?.model)) return ["none", "low", "medium", "high"];

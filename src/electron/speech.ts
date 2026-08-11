@@ -5,6 +5,7 @@ import readline from "node:readline";
 import { app, BrowserWindow } from "electron";
 
 const modelName = "sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23";
+const defaultHotwords = ["安全智能体", "课堂岛", "安全评分"];
 let worker: ChildProcessWithoutNullStreams | undefined;
 let remoteSocket: WebSocket | undefined;
 let speechWindow: BrowserWindow | undefined;
@@ -37,12 +38,15 @@ function remoteAsrUrl(): string | null {
   return `${wsBase}/asr/ws?token=${encodeURIComponent(token)}`;
 }
 
-export function startSpeech(window: BrowserWindow | undefined): { ok: true } {
+export function startSpeech(window: BrowserWindow | undefined, requestedHotwords?: unknown): { ok: true } {
   speechWindow = window;
   if (worker) return { ok: true };
   if (remoteSocket && (remoteSocket.readyState === WebSocket.OPEN || remoteSocket.readyState === WebSocket.CONNECTING)) return { ok: true };
 
   const url = remoteAsrUrl();
+  const hotwords = Array.isArray(requestedHotwords)
+    ? requestedHotwords.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean).slice(0, 64)
+    : defaultHotwords;
   if (url && typeof WebSocket !== "undefined") {
     try {
       const socket = new WebSocket(url);
@@ -50,6 +54,7 @@ export function startSpeech(window: BrowserWindow | undefined): { ok: true } {
       mode = "remote";
       socket.binaryType = "arraybuffer";
       socket.onopen = () => {
+        socket.send(JSON.stringify({ type: "start", hotwords }));
         if (remoteSocket === socket && socket.readyState === WebSocket.OPEN) {
           for (const pcm of pendingRemoteAudio) socket.send(pcm);
           pendingRemoteAudio = [];

@@ -65,3 +65,9 @@ POST /tools/{toolName}
 ## 安全要求
 
 HTTP 服务只绑定 loopback 不是完整鉴权。生产实现应增加随机本地令牌、用户授权或其他认证机制，并在服务端重新校验工具名、参数、权限和业务状态。写入类工具必须保留备份或使用原子替换。
+
+## SVG 预览能力
+
+声明 `agent.preview` 权限的插件可以使用宿主提供的 `api.openSvgPreview({ svg, title, fileName, openPreview })`。桌面端会将 SVG 保存到当前工作区的 `exports/handdrawn-markdown/`；默认打开独立预览窗口，传入 `openPreview: false` 时只保存文件而不打开窗口。CLI 等没有 Electron 窗口的运行环境仍会保存文件，但返回 `previewOpened: false`。
+
+宿主会限制文件大小、拒绝带目录的文件名，并使用无 Node Integration 的隔离窗口加载 SVG。插件不得通过系统命令自行启动浏览器或窗口。

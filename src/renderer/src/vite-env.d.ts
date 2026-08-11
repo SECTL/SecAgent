@@ -41,10 +41,11 @@ interface Window {
     createSession(): Promise<SessionData>;
     deleteSession(id: string): Promise<SessionMeta[]>;
     getSession(id: string): Promise<SessionData>;
+    previewWorkspaceFile(relativePath: string): Promise<{ ok: true }>;
     sendMessage(id: string, text: string, modelId?: string, reasoningEffort?: ReasoningEffort, attachments?: ChatAttachment[]): Promise<SessionData>;
     stopMessage(id: string): Promise<{ ok: true; stopped: boolean }>;
     onRuntimeEvent(listener: (event: unknown) => void): () => void;
-    startSpeech(): Promise<{ ok: true }>;
+    startSpeech(hotwords?: string[]): Promise<{ ok: true }>;
     sendSpeechAudio(samples: Float32Array): void;
     stopSpeech(): Promise<{ ok: true }>;
     synthesizeSpeech(text: string): Promise<string>;

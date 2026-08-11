@@ -33,6 +33,13 @@ export type PluginPromptProvider = string | (() => string | Promise<string>);
 /** 一次求值后来自某个插件的提示词片段，按插件注册顺序收集。 */
 export interface PluginPromptContribution { pluginId: string; name: string; text: string }
 
+export interface SvgPreviewRequest {
+  filePath: string;
+  title: string;
+}
+
+export type SvgPreviewHandler = (request: SvgPreviewRequest) => Promise<boolean>;
+
 export interface PluginHostApi {
   registerTool(definition: Omit<PluginToolDefinition, "key"> & { name: string }, call: (args: Record<string, unknown>) => Promise<unknown>): void;
   unregisterTool(name: string): void;
@@ -48,6 +55,7 @@ export interface PluginHostApi {
   getConfig(): Record<string, unknown>;
   /** Persist plugin-scoped preferences. The host stores this outside the workspace business databases. */
   setConfig(config: Record<string, unknown>): void;
+  openSvgPreview(input: { svg: string; title?: string; fileName?: string; openPreview?: boolean }): Promise<{ path: string; relativePath: string; bytes: number; previewOpened: boolean; previewError?: string }>;
   setStatus(message: string, state?: "ready" | "error"): void;
   fetch(url: string, init?: RequestInit): Promise<Response>;
 }
@@ -68,7 +76,8 @@ export class PluginManager {
   constructor(private readonly workspace: string, private readonly authBridge: {
     getSession: () => Promise<{ accessToken: string; userId?: string; email?: string; name?: string } | null>;
     oauthLogin: () => Promise<{ accessToken: string; userId?: string; email?: string; name?: string }>;
-  } = { getSession: async () => null, oauthLogin: async () => { throw new Error("SECTL OAuth login unavailable"); } }) {
+  } = { getSession: async () => null, oauthLogin: async () => { throw new Error("SECTL OAuth login unavailable"); } },
+  private readonly previewHandler?: SvgPreviewHandler) {
     this.installedRoot = path.join(workspace, "plugins", "installed");
     this.runtimeRoot = path.join(workspace, ".secagent-runtime", "plugins");
     this.configRoot = path.join(workspace, "plugins", "config");
@@ -282,9 +291,38 @@ export class PluginManager {
       sectlOAuthLogin: () => this.authBridge.oauthLogin(),
       getConfig: () => this.readPluginConfig(plugin),
       setConfig: (config) => this.writePluginConfig(plugin, config),
+      openSvgPreview: async (input) => {
+        requirePermission("agent.preview");
+        return this.saveSvgPreview(plugin, input);
+      },
       setStatus: (message, state = "ready") => { plugin.message = message; plugin.state = state; this.changed(); },
       fetch: async (url, init) => { requirePermission("network.http"); const parsed = new URL(url); if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("插件 HTTP 仅允许 http/https"); return fetch(url, init); }
     };
+  }
+  private async saveSvgPreview(plugin: ActivePlugin, input: { svg: string; title?: string; fileName?: string; openPreview?: boolean }): Promise<{ path: string; relativePath: string; bytes: number; previewOpened: boolean; previewError?: string }> {
+    if (!input || typeof input.svg !== "string" || !/^\s*(?:<\?xml[^>]*>\s*)?<svg(?:\s|>)/i.test(input.svg)) throw new Error("预览内容必须是 SVG 文档");
+    const bytes = Buffer.byteLength(input.svg, "utf8");
+    if (bytes > 20 * 1024 * 1024) throw new Error("SVG 预览文件不能超过 20 MiB");
+    const title = typeof input.title === "string" && input.title.trim() ? input.title.trim().slice(0, 120) : plugin.manifest.name;
+    const requestedName = typeof input.fileName === "string" && input.fileName.trim() ? input.fileName.trim() : "markdown-handdrawn";
+    if (path.basename(requestedName) !== requestedName || requestedName.includes("\\") || requestedName.includes("/")) throw new Error("SVG 文件名不能包含路径");
+    const stem = requestedName.replace(/\.svg$/i, "").replace(/[^a-zA-Z0-9\u4e00-\u9fff._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "markdown-handdrawn";
+    const outputRoot = path.join(this.workspace, "exports", "handdrawn-markdown");
+    fs.mkdirSync(outputRoot, { recursive: true });
+    const fileName = `${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto.randomUUID().slice(0, 8)}-${stem}.svg`;
+    const filePath = path.join(outputRoot, fileName);
+    const relativePath = path.relative(this.workspace, filePath).replace(/\\/g, "/");
+    const temporaryPath = `${filePath}.tmp-${crypto.randomUUID()}`;
+    fs.writeFileSync(temporaryPath, input.svg, "utf8");
+    fs.renameSync(temporaryPath, filePath);
+    if (input.openPreview === false) return { path: filePath, relativePath, bytes, previewOpened: false };
+    if (!this.previewHandler) return { path: filePath, relativePath, bytes, previewOpened: false, previewError: "当前运行环境没有 Electron 预览窗口" };
+    try {
+      const previewOpened = await this.previewHandler({ filePath, title });
+      return { path: filePath, relativePath, bytes, previewOpened };
+    } catch (error) {
+      return { path: filePath, relativePath, bytes, previewOpened: false, previewError: error instanceof Error ? error.message : String(error) };
+    }
   }
   private safeRelative(root: string, value: string): string { const candidate = path.resolve(root, value); if (!candidate.startsWith(`${root}${path.sep}`)) throw new Error("插件路径越界"); return candidate; }
   private assertSafeSkillTree(root: string): void {

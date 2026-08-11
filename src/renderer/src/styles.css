@@ -40,6 +40,14 @@ button { appearance: none; }
 .message-meta { display: none; }
 .bubble { white-space: pre-wrap; line-height: 1.38; padding: 8px 10px; border: 1px solid #dedede; border-radius: 4px 14px 14px; background: #fff; font-size: 14px; }
 .markdown-bubble { white-space: normal; }
+.workspace-file-strip { display: grid; gap: 6px; width: min(460px, 100%); margin-top: 12px; padding: 8px 10px; border: 1px solid #e1e1e1; border-radius: 12px; background: #fafafa; }
+.workspace-file-row { display: flex; align-items: center; gap: 12px; min-height: 30px; }
+.workspace-file-name { min-width: 0; flex: 1; overflow: hidden; color: #555; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-file-row button { flex: 0 0 auto; padding: 4px 11px; border: 1px solid #d4d4d4; border-radius: 999px; background: #fff; color: #2389ec; font-size: 12px; cursor: pointer; }
+.workspace-file-row button:hover { border-color: #2389ec; background: #f2f8ff; }
+.mermaid-block { width: 100%; max-width: 100%; min-height: 28px; margin: 12px 0; overflow-x: auto; color: #555; font-size: 12px; text-align: center; }
+.mermaid-block svg { display: block; width: auto; min-width: min(100%, 420px); max-width: 100%; height: auto; margin: 0 auto; }
+.mermaid-block.mermaid-error { padding: 10px 12px; border: 1px solid #f0caca; border-radius: 7px; background: #fff8f8; color: #a22; text-align: left; white-space: pre-wrap; }
 .user .bubble { color: #171717; background: #fff; border-color: #dedede; border-radius: 14px 4px 14px 14px; }
 .loading { color: #777; }
 .empty-state { margin: auto; text-align: center; color: #777; }.empty-state h2 { color: #222; margin-bottom: 6px; }
