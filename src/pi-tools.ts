@@ -36,8 +36,12 @@ export async function callPiTool(workspace: string, key: string, args: Record<st
     const content = await fs.readFile(filePath, "utf8");
     const lines = content.split(/\r?\n/);
     const offset = Math.max(1, Number(args.offset) || 1);
-    const limit = Math.max(1, Number(args.limit) || lines.length);
-    return { path: filePath, content: lines.slice(offset - 1, offset - 1 + limit).join("\n"), offset, limit, totalLines: lines.length };
+    const limit = Math.max(1, Number(args.limit) || 200);
+    const startIndex = Math.min(lines.length, offset - 1);
+    const selected = lines.slice(startIndex, startIndex + limit);
+    const truncated = startIndex + selected.length < lines.length;
+    const nextOffset = truncated ? offset + selected.length : undefined;
+    return { path: filePath, content: selected.join("\n"), offset, limit, totalLines: lines.length, totalChars: content.length, truncated, ...(truncated ? { nextOffset } : {}) };
   }
   if (key === "write") {
     if (typeof args.path !== "string" || !args.path.trim()) throw new Error("write 需要非空 path，例如 clock.html");
