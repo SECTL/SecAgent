@@ -3,10 +3,15 @@ import path from "node:path";
 import YAML from "yaml";
 import type { SecAgentConfig } from "./types.js";
 
-export interface LoadedSkill { name: string; description: string; path: string; relativePath?: string; content: string }
+export interface SkillAutoLoadPattern { source: string; flags: string }
+export interface LoadedSkill { name: string; description: string; path: string; relativePath?: string; content: string; autoLoadPattern?: SkillAutoLoadPattern }
 
 const MAX_SCAN_DEPTH = 3;
 const BUILTIN_SKILL_FILES = [path.resolve(process.cwd(), "src/skills/math-visualization/SKILL.md")];
+const MATH_VISUALIZATION_AUTO_LOAD_PATTERN: SkillAutoLoadPattern = {
+  source: "(?:数学|算术|代数|几何|三角|解析几何|离散数学|数论|集合|逻辑|复数|方程|不等式|函数|数列|级数|极限|导数|微分|积分|微积分|矩阵|向量|线性代数|概率|统计|排列组合|圆|圆柱|圆锥|球|多面体|面积|体积|长度|角度|距离|斜率|曲率|拓扑|画图|绘图|作图|图示|图解|可视化|示意图|坐标图|函数图像|曲线|散点图|柱状图|直方图|饼图|概率分布|统计图|几何图形|立体图|二维|三维|2D|3D|动画|旋转|轨迹|向量场|坐标系|数轴|math(?:ematics)?|equation|inequality|function|sequence|series|limit|derivative|differential|integral|calculus|matrix|vector|linear algebra|probability|statistics|geometry|trigonometry|algebra|arithmetic|number theory|complex number|set theory|logic|topology|plot|graph|chart|diagram|visuali[sz]e|draw|sketch|curve|coordinate|shape|area|volume|length|angle|distance|slope|curvature|surface|solid|3d|2d)",
+  flags: "iu"
+};
 
 function fallbackDescription(content: string): string {
   const lines = content.split(/\r?\n/).map((line) => line.trim());
@@ -33,7 +38,7 @@ export function loadEnabledSkills(config: SecAgentConfig, additionalFiles: strin
     const requestedName = metadata.name || baseName;
     const name = names.has(requestedName) ? path.relative(config.workspace, path.dirname(file)) : requestedName;
     names.set(name, file);
-    return { name, description: metadata.description, path: file, relativePath: path.relative(config.workspace, file).replace(/\\/g, "/"), content };
+    return { name, description: metadata.description, path: file, relativePath: path.relative(config.workspace, file).replace(/\\/g, "/"), content, ...(file === BUILTIN_SKILL_FILES[0] ? { autoLoadPattern: MATH_VISUALIZATION_AUTO_LOAD_PATTERN } : {}) };
   });
 }
 

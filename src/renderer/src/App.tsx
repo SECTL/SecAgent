@@ -274,6 +274,10 @@ export function App() {
         const data = item.data as { name?: unknown; arguments?: unknown };
         if (typeof data.name === "string") activities.push({ kind: "tool", name: data.name, arguments: data.arguments ?? {} });
       }
+      if (item.stage === "secagent.skills/auto-load") {
+        const skills = Array.isArray(item.data) ? item.data as Array<{ name?: unknown; path?: unknown }> : [];
+        for (const skill of skills) if (typeof skill.name === "string" && typeof skill.path === "string") activities.push({ kind: "skill-auto-load", name: skill.name, path: skill.path });
+      }
       if (item.stage === "mcp.tools/result" || item.stage === "secagent.tools/result") {
         const data = item.data as { name?: unknown; result?: unknown };
         if (typeof data.name === "string") {

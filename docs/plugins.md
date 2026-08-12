@@ -21,7 +21,7 @@ SecAgent 插件是可移植的 zip 包，包内包含 JavaScript、JSON、Skill 
 
 ```js
 export async function activate(api) {
-  const skillFile = api.registerSkill("skills/my-app");
+  const skillFile = api.registerSkill("skills/my-app", /积分|my-app/i);
   api.registerTool({
     name: "create_item",
     description: "创建一条记录",
@@ -35,6 +35,18 @@ export async function activate(api) {
 ```
 
 Skill 的 `SKILL.md` 应包含 YAML frontmatter，声明 `name` 和 `description`。工具的完整 key、参数、返回值和安全约束应写在 Skill 正文中；隐藏工具仍然可以执行，但不会进入模型的初始工具列表。
+
+### Skill 自动加载
+
+注册 Skill 时可以传入第二个参数 `autoLoadPattern`，类型为正则字符串或 JavaScript `RegExp`：
+
+```js
+api.registerSkill("skills/my-app", /画板|画布|批注|CE|ICC-CE|ICC/i);
+// 也可以传入字符串：
+api.registerSkill("skills/my-app", "积分|查询学生");
+```
+
+当正则匹配当前用户消息时，宿主会在该用户消息后追加一条 system 消息，内容包括 Skill 名称、入口路径和 `SKILL.md` 完整内容；一次消息可以命中多个 Skill。同一会话中同一个 Skill 只自动加载一次，模型已经通过 `secagent__read_skill` 读取过的 Skill 也不会再次自动加载。没有自动加载需求时省略第二个参数即可。
 
 ## 提示词注入
 

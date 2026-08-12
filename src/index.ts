@@ -176,6 +176,10 @@ function captureActivity(event: TraceEvent, toolCalls: ToolCallRecord[], activit
       activities.push({ kind: "tool", name: data.name, arguments: data.arguments ?? {} });
     }
   }
+  if (event.stage === "secagent.skills/auto-load") {
+    const skills = Array.isArray(event.data) ? event.data as Array<{ name?: unknown; path?: unknown }> : [];
+    for (const skill of skills) if (typeof skill.name === "string" && typeof skill.path === "string") activities.push({ kind: "skill-auto-load", name: skill.name, path: skill.path });
+  }
   if (event.stage === "mcp.tools/result" || event.stage === "secagent.tools/result") {
     const data = event.data as { name?: unknown; result?: unknown };
     if (typeof data.name === "string") {
@@ -208,7 +212,9 @@ async function runSessionMessage(options: CliOptions, sessionId: string | undefi
   let handle: RuntimeHandle | undefined;
   try {
     handle = await openRuntime(options.workspace, options.modelId, trace);
-    const result = await handle.runtime.run(historyInput(before, text), options.reasoningEffort, conversationInput(before, text));
+    const previousReadSkillNames = before.messages.flatMap((message) => message.toolCalls || []).filter((call) => call.name === "secagent__read_skill" || call.name === "read_skill").map((call) => typeof (call.arguments as { name?: unknown })?.name === "string" ? (call.arguments as { name: string }).name : "");
+    const result = await handle.runtime.run(historyInput(before, text), options.reasoningEffort, conversationInput(before, text), undefined, { previousAutoLoadedSkills: before.autoLoadedSkills, previousReadSkillNames });
+    if (result.autoLoadedSkills?.length) sessions.setAutoLoadedSkills(id, [...new Set([...(before.autoLoadedSkills || []), ...result.autoLoadedSkills])]);
     sessions.appendMessage(id, "assistant", result.message, toolCalls, activities);
     trace({ sequence: 0, at: new Date().toISOString(), stage: "assistant.response", data: { text: result.message } });
     printer.finishStream();
@@ -294,6 +300,7 @@ async function main(): Promise<void> {
       console.log(message.content);
       for (const activity of message.activities || []) {
         if (activity.kind === "tool") console.log(`[tool] ${activity.name}\n${formatValue(activity.arguments)}\nresult: ${formatValue(activity.result)}`);
+        else if (activity.kind === "skill-auto-load") console.log(`[skill-auto-load] ${activity.name}\n${activity.path}`);
         else console.log(`[${activity.kind}]\n${activity.content}`);
       }
     }

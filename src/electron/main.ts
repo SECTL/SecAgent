@@ -654,6 +654,10 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
         activities.push({ kind: "tool", name: data.name, arguments: data.arguments ?? {} });
       }
     }
+    if (ordered.stage === "secagent.skills/auto-load") {
+      const skills = Array.isArray(ordered.data) ? ordered.data as Array<{ name?: unknown; path?: unknown }> : [];
+      for (const skill of skills) if (typeof skill.name === "string" && typeof skill.path === "string") activities.push({ kind: "skill-auto-load", name: skill.name, path: skill.path });
+    }
     if (ordered.stage === "mcp.tools/result" || ordered.stage === "secagent.tools/result") {
       const data = ordered.data as { name?: unknown; result?: unknown };
       if (typeof data.name === "string") {
@@ -672,7 +676,14 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
     trace({ stage: "user.request", data: { text } });
     const skills = [...loadEnabledSkills(config), ...(pluginManager?.getSkills() || [])];
     const runtime = new SecAgentRuntime(config, audit, skills, trace, pluginManager);
-    const result = await runtime.run(historyInput(before, text), selectedReasoningEffort, conversationInput(before, text, attachments), abortController.signal);
+    const previousReadSkillNames = before.messages.flatMap((message) => message.toolCalls || []).filter((call) => call.name === "secagent__read_skill" || call.name === "read_skill").map((call) => typeof (call.arguments as { name?: unknown })?.name === "string" ? (call.arguments as { name: string }).name : "");
+    const result = await runtime.run(historyInput(before, text), selectedReasoningEffort, conversationInput(before, text, attachments), abortController.signal, { previousAutoLoadedSkills: before.autoLoadedSkills, previousReadSkillNames });
+    if (result.autoLoadedSkills?.length) {
+      const current = sessionStore.get(id);
+      current.autoLoadedSkills = [...new Set([...(current.autoLoadedSkills || []), ...result.autoLoadedSkills])];
+      // Reuse the store's normal persistence path without adding a visible message.
+      sessionStore.setAutoLoadedSkills(id, current.autoLoadedSkills);
+    }
     sessionStore.appendMessage(id, "assistant", result.message, toolCalls, activities);
     trace({ stage: "assistant.response", data: { text: result.message } });
     return sessionStore.get(id);

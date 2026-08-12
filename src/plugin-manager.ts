@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import AdmZip from "adm-zip";
-import type { LoadedSkill } from "./skills.js";
+import type { LoadedSkill, SkillAutoLoadPattern } from "./skills.js";
 import type { PluginStatus, PluginToolDefinition } from "./types.js";
 
 const API_VERSION = 1;
@@ -25,7 +25,7 @@ interface PluginManifest {
 }
 interface InstalledPlugin { id: string; version: string; enabled: boolean }
 interface PluginStateFile { plugins: InstalledPlugin[] }
-interface ActivePlugin { manifest: PluginManifest; root: string; state: PluginStatus["state"]; message?: string; tools: Map<string, { definition: PluginToolDefinition; call: (args: Record<string, unknown>) => Promise<unknown> }>; skills: Map<string, string>; prompts: Map<string, PluginPromptProvider>; settingsHandlers?: Map<string, (action: string, args: Record<string, unknown>) => Promise<unknown>>; dispose?: () => void | Promise<void> }
+interface ActivePlugin { manifest: PluginManifest; root: string; state: PluginStatus["state"]; message?: string; tools: Map<string, { definition: PluginToolDefinition; call: (args: Record<string, unknown>) => Promise<unknown> }>; skills: Map<string, { file: string; autoLoadPattern?: SkillAutoLoadPattern }>; prompts: Map<string, PluginPromptProvider>; settingsHandlers?: Map<string, (action: string, args: Record<string, unknown>) => Promise<unknown>>; dispose?: () => void | Promise<void> }
 
 /** 插件注册的提示词：静态文本，或每次用户发消息时求值的提供器。 */
 export type PluginPromptProvider = string | (() => string | Promise<string>);
@@ -43,7 +43,7 @@ export type SvgPreviewHandler = (request: SvgPreviewRequest) => Promise<boolean>
 export interface PluginHostApi {
   registerTool(definition: Omit<PluginToolDefinition, "key"> & { name: string }, call: (args: Record<string, unknown>) => Promise<unknown>): void;
   unregisterTool(name: string): void;
-  registerSkill(relativePath: string): string;
+  registerSkill(relativePath: string, autoLoadPattern?: string | RegExp): string;
   unregisterSkill(name: string): void;
   registerPrompt(name: string, provider: PluginPromptProvider): void;
   unregisterPrompt(name: string): void;
@@ -171,14 +171,15 @@ export class PluginManager {
   async shutdown(): Promise<void> { for (const id of [...this.active.keys()]) await this.deactivate(id); }
   getSkills(): LoadedSkill[] {
     const skills: LoadedSkill[] = [];
-    for (const plugin of this.active.values()) for (const [name, file] of plugin.skills) {
+    for (const plugin of this.active.values()) for (const [name, skill] of plugin.skills) {
+      const file = skill.file;
       if (!fs.existsSync(file)) continue;
       const content = fs.readFileSync(file, "utf8");
       // Plugin skills are always namespaced so an installed package cannot shadow a workspace Skill.
       const uniqueName = `${plugin.manifest.id}/${name}`;
       const frontmatter = content.match(/^---\s*\r?\n([\s\S]*?)\r?\n---/);
       const description = frontmatter?.[1].match(/^description:\s*["']?(.+?)["']?\s*$/m)?.[1] || "插件提供的操作说明。";
-      skills.push({ name: uniqueName, description, path: file, relativePath: path.relative(this.workspace, file).replace(/\\/g, "/"), content });
+      skills.push({ name: uniqueName, description, path: file, relativePath: path.relative(this.workspace, file).replace(/\\/g, "/"), content, autoLoadPattern: skill.autoLoadPattern });
     }
     return skills;
   }
@@ -252,7 +253,7 @@ export class PluginManager {
         plugin.tools.set(key, { definition: { key, description: definition.description, inputSchema: definition.inputSchema, hidden: definition.hidden ?? true }, call }); this.changed();
       },
       unregisterTool: (name) => { plugin.tools.delete(`${plugin.manifest.id}__${name}`); this.changed(); },
-      registerSkill: (relativePath) => {
+      registerSkill: (relativePath, autoLoadPattern) => {
         requirePermission("agent.skills");
         const requested = this.safeRelative(plugin.root, relativePath);
         if (!fs.existsSync(requested)) throw new Error(`找不到 Skill 路径：${relativePath}`);
@@ -264,10 +265,16 @@ export class PluginManager {
         const destination = path.join(this.runtimeRoot, plugin.manifest.id, plugin.manifest.version, "skills", name);
         fs.rmSync(destination, { recursive: true, force: true });
         fs.cpSync(sourceRoot, destination, { recursive: true, dereference: false, errorOnExist: false });
-        plugin.skills.set(name, path.join(destination, "SKILL.md")); this.changed(); return path.join(destination, "SKILL.md");
+        let pattern: SkillAutoLoadPattern | undefined;
+        if (autoLoadPattern !== undefined) {
+          const regex = autoLoadPattern instanceof RegExp ? autoLoadPattern : new RegExp(autoLoadPattern);
+          pattern = { source: regex.source, flags: regex.flags };
+        }
+        const file = path.join(destination, "SKILL.md");
+        plugin.skills.set(name, { file, autoLoadPattern: pattern }); this.changed(); return file;
       },
       unregisterSkill: (name) => {
-        const file = plugin.skills.get(name);
+        const file = plugin.skills.get(name)?.file;
         plugin.skills.delete(name);
         if (file) fs.rmSync(path.dirname(file), { recursive: true, force: true });
         this.changed();

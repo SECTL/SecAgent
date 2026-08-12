@@ -7,9 +7,10 @@ export interface SessionMeta { id: string; title: string; createdAt: string; upd
 export interface ToolCallRecord { name: string; arguments: unknown; result?: unknown }
 export type AssistantActivity =
   | { kind: "thinking" | "summary" | "answer"; content: string; turn?: number }
+  | { kind: "skill-auto-load"; name: string; path: string }
   | { kind: "tool"; name: string; arguments: unknown; result?: unknown };
 export interface SessionMessage { id: string; role: "user" | "assistant"; content: string; createdAt: string; attachments?: ChatAttachment[]; toolCalls?: ToolCallRecord[]; activities?: AssistantActivity[]; stopped?: boolean }
-export interface SessionData { meta: SessionMeta; messages: SessionMessage[] }
+export interface SessionData { meta: SessionMeta; messages: SessionMessage[]; autoLoadedSkills?: string[] }
 
 export class SessionStore {
   private root: string;
@@ -56,6 +57,13 @@ export class SessionStore {
   appendRuntimeEvent(id: string, event: { stage: string; data: unknown }): void {
     const entry = JSON.stringify({ at: new Date().toISOString(), ...event }) + "\n";
     fs.appendFileSync(path.join(this.sessionDir(id), "runtime.jsonl"), entry, "utf8");
+  }
+  setAutoLoadedSkills(id: string, skills: string[]): void {
+    const session = this.get(id);
+    session.autoLoadedSkills = [...new Set(skills)];
+    session.meta.updatedAt = new Date().toISOString();
+    this.writeSession(session);
+    this.writeIndex(this.readIndex().map((item) => item.id === id ? session.meta : item));
   }
   private readIndex(): SessionMeta[] {
     const file = path.join(this.root, "index.json");

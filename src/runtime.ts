@@ -12,8 +12,8 @@ import { PluginManager } from "./plugin-manager.js";
 import { summarizeToolResult } from "./tool-content.js";
 
 export type RunResult =
-  | { kind: "completed"; message: string; actionId?: string }
-  | { kind: "needs-disambiguation"; message: string };
+  | { kind: "completed"; message: string; actionId?: string; autoLoadedSkills?: string[] }
+  | { kind: "needs-disambiguation"; message: string; autoLoadedSkills?: string[] };
 
 export type TraceEvent = { sequence: number; at: string; stage: string; data: unknown };
 
@@ -24,6 +24,16 @@ export function resolveSkill(skills: LoadedSkill[], name: string): LoadedSkill |
 
   const candidates = skills.filter((item) => item.name.endsWith(`/${name}`));
   return candidates.length === 1 ? candidates[0] : undefined;
+}
+
+export function selectAutoLoadedSkills(skills: LoadedSkill[], content: string, previousAutoLoadedSkills: string[] = [], previousReadSkillNames: string[] = []): LoadedSkill[] {
+  const alreadyLoaded = new Set(previousAutoLoadedSkills);
+  const alreadyRead = new Set(previousReadSkillNames.map((name) => resolveSkill(skills, name)?.name || name));
+  return skills.filter((skill) => {
+    if (!skill.autoLoadPattern || alreadyLoaded.has(skill.name) || alreadyRead.has(skill.name)) return false;
+    try { return new RegExp(skill.autoLoadPattern.source, skill.autoLoadPattern.flags).test(content); }
+    catch { return false; }
+  });
 }
 
 /**
@@ -38,7 +48,7 @@ export class SecAgentRuntime {
     this.registry = new McpRegistry(config);
     this.agent = new ModelToolAgent(config, skills, (stage, data) => this.emit(stage, data), () => this.plugins?.getPromptContributions() ?? Promise.resolve([]));
   }
-  async run(input: string, reasoningEffort: ReasoningEffort = "high", conversation?: ConversationMessage[], signal?: AbortSignal): Promise<RunResult> {
+  async run(input: string, reasoningEffort: ReasoningEffort = "high", conversation?: ConversationMessage[], signal?: AbortSignal, state: { previousAutoLoadedSkills?: string[]; previousReadSkillNames?: string[] } = {}): Promise<RunResult> {
     signal?.throwIfAborted();
     const mcpTools = await this.registry.discover();
     for (const error of this.registry.getDiscoveryErrors()) this.emit("mcp.tools/error", error);
@@ -53,10 +63,23 @@ export class SecAgentRuntime {
     ];
     this.emit("mcp.tools/list", [...mcpTools.map((tool) => ({ key: tool.key, server: tool.server, name: tool.name, description: tool.description, hidden: tool.hidden, inputSchema: tool.inputSchema })), ...pluginTools.map((tool) => ({ ...tool, source: "plugin" }))]);
     this.emit("secagent.skills/list", this.skills.map((skill) => ({ name: skill.name, description: skill.description })));
+    const prepared = this.prepareAutoLoadedSkills(conversation, state);
+    this.emit("secagent.skills/auto-load", prepared.loaded.map((skill) => ({ name: skill.name, path: skill.path })));
     this.emit("model.agent.request", { provider: this.config.agent.provider, model: this.config.agent.model, baseUrl: this.config.agent.baseUrl, instruction: input });
-    const message = await this.agent.run(input, tools, async (key, args) => this.callTool(input, key, args, hiddenTools), reasoningEffort, conversation, signal);
+    const message = await this.agent.run(input, tools, async (key, args) => this.callTool(input, key, args, hiddenTools), reasoningEffort, prepared.conversation, signal);
     this.emit("model.agent.result", { message });
-    return { kind: "completed", message };
+    return { kind: "completed", message, autoLoadedSkills: prepared.loaded.map((skill) => skill.name) };
+  }
+  private prepareAutoLoadedSkills(conversation: ConversationMessage[] | undefined, state: { previousAutoLoadedSkills?: string[]; previousReadSkillNames?: string[] }): { conversation?: ConversationMessage[]; loaded: LoadedSkill[] } {
+    const history = conversation?.slice() || [];
+    const current = [...history].reverse().find((message) => message.role === "user");
+    if (!current) return { conversation: history, loaded: [] };
+    const loaded = selectAutoLoadedSkills(this.skills, current.content, state.previousAutoLoadedSkills, state.previousReadSkillNames);
+    if (!loaded.length) return { conversation: history, loaded };
+    const messages = loaded.map((skill) => ({ role: "system" as const, content: `已自动加载 Skill，以下是完整内容。你不需要也不应再次调用 secagent__read_skill 读取这个 Skill；请直接按照以下内容执行。\n名称：${skill.name}\n路径：${skill.path}\n\n${skill.content}` }));
+    const index = history.lastIndexOf(current);
+    history.splice(index + 1, 0, ...messages);
+    return { conversation: history, loaded };
   }
   async undo(actionId: string): Promise<RunResult> {
     const record = this.audit.getRecord(actionId);
