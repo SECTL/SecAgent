@@ -46,7 +46,7 @@ function remoteAsrLogTarget(url: string): string {
   }
 }
 
-export function startSpeech(window: BrowserWindow | undefined): { ok: true } {
+export function startSpeech(window: BrowserWindow | undefined, _hotwords?: unknown): { ok: true } {
   speechWindow = window;
   if (worker) return { ok: true };
   if (remoteSocket && (remoteSocket.readyState === WebSocket.OPEN || remoteSocket.readyState === WebSocket.CONNECTING)) {

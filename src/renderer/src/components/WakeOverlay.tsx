@@ -51,7 +51,7 @@ export function WakeOverlay() {
   const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
   const ttsRunningRef = useRef(false);
   const ttsRunRef = useRef(0);
-  const spokenTextRef = useRef("");
+  const ttsScheduledTextRef = useRef("");
   const finalTtsFlushedRef = useRef(false);
   const wakeInteractiveRef = useRef(false);
 
@@ -156,7 +156,7 @@ export function WakeOverlay() {
     setStreamingAnswer("");
     setFinalAnswerText("");
     stopTts();
-    spokenTextRef.current = "";
+    ttsScheduledTextRef.current = "";
     finalTtsFlushedRef.current = false;
     setError("");
     try {
@@ -166,9 +166,13 @@ export function WakeOverlay() {
       setFinalAnswerText(answer);
       setStatus("completed");
       if (answer && !finalTtsFlushedRef.current) {
-        const remaining = answer.slice(spokenTextRef.current.length);
+        if (!answer.startsWith(ttsScheduledTextRef.current)) {
+          stopTts();
+          ttsScheduledTextRef.current = "";
+        }
+        const remaining = answer.slice(ttsScheduledTextRef.current.length);
         if (remaining) enqueueTts(remaining);
-        spokenTextRef.current = answer;
+        ttsScheduledTextRef.current = answer;
         finalTtsFlushedRef.current = true;
       }
     } catch (reason) {
@@ -182,11 +186,12 @@ export function WakeOverlay() {
 
   useEffect(() => {
     if (status !== "streaming" || !streamingAnswer) return;
-    const pending = streamingAnswer.slice(spokenTextRef.current.length);
+    if (!streamingAnswer.startsWith(ttsScheduledTextRef.current)) ttsScheduledTextRef.current = "";
+    const pending = streamingAnswer.slice(ttsScheduledTextRef.current.length);
     const { complete } = completeSentences(pending);
     if (!complete) return;
     enqueueTts(complete);
-    spokenTextRef.current += complete.length;
+    ttsScheduledTextRef.current += complete;
   }, [streamingAnswer, status]);
 
   const startRecording = async () => {
@@ -242,7 +247,10 @@ export function WakeOverlay() {
       if (item.sessionId === sessionId) {
         setStatus((current) => current === "submitting" ? "streaming" : current);
         setEvents((current) => [...current, item]);
-        if (item.stage === "model.output.reset") setStreamingAnswer("");
+        if (item.stage === "model.output.reset") {
+          setStreamingAnswer("");
+          ttsScheduledTextRef.current = "";
+        }
         if (item.stage === "model.output.delta") {
           const data = item.data as { text?: unknown; kind?: unknown };
           if ((data.kind === undefined || data.kind === "answer") && typeof data.text === "string") {
