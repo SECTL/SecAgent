@@ -52,6 +52,7 @@ export function WakeOverlay() {
   const [recording, setRecording] = useState(false);
   const [events, setEvents] = useState<TraceEvent[]>([]);
   const [streamingAnswer, setStreamingAnswer] = useState("");
+  const [ttsPreview, setTtsPreview] = useState("");
   const [finalAnswerText, setFinalAnswerText] = useState("");
   const [error, setError] = useState("");
   const audioRef = useRef<{ context: AudioContext; stream: MediaStream; source: MediaStreamAudioSourceNode; processor: ScriptProcessorNode } | undefined>(undefined);
@@ -68,8 +69,14 @@ export function WakeOverlay() {
   const ttsRunningRef = useRef(false);
   const ttsRunRef = useRef(0);
   const ttsScheduledTextRef = useRef("");
+  const rawAnswerRef = useRef("");
+  const wakeTtsScheduledRef = useRef("");
+  const wakeTtsClosedRef = useRef(false);
+  const listenAfterTtsRef = useRef(false);
+  const statusRef = useRef(status);
   const finalTtsFlushedRef = useRef(false);
   const wakeInteractiveRef = useRef(false);
+  statusRef.current = status;
 
   const logTts = (event: Record<string, unknown>) => {
     console.info("[wake-tts]", event);
@@ -131,6 +138,16 @@ export function WakeOverlay() {
       console.error("Wake TTS failed", reason);
     } finally {
       ttsRunningRef.current = false;
+      if (listenAfterTtsRef.current && statusRef.current === "completed" && !submittingRef.current) {
+        listenAfterTtsRef.current = false;
+        setTranscript("");
+        transcriptRef.current = "";
+        setStreamingAnswer("");
+        setFinalAnswerText("");
+        setTtsPreview("");
+        setStatus("listening");
+        void startRecording();
+      }
     }
   };
 
@@ -145,6 +162,39 @@ export function WakeOverlay() {
     ttsQueueRef.current.push({ text: clean });
     logTts({ stage: "queued", characters: clean.length, queueLength: ttsQueueRef.current.length });
     void playTtsQueue();
+  };
+
+  const processWakeAnswer = (raw: string, final = false) => {
+    rawAnswerRef.current = raw;
+    const tagMatch = raw.match(/<tts\b([^>]*)>/i);
+    const tagStart = tagMatch?.index ?? -1;
+    if (tagStart < 0) return;
+    const attributes = tagMatch?.[1] || "";
+    listenAfterTtsRef.current = /\blisten_after\s*=\s*["']true["']/i.test(attributes);
+    const start = tagStart + tagMatch![0].length;
+    const close = raw.toLowerCase().indexOf("</tts>", start);
+    const ttsText = markdownToSpeech(raw.slice(start, close < 0 ? undefined : close));
+    const scheduled = wakeTtsScheduledRef.current;
+    const pending = ttsText.startsWith(scheduled) ? ttsText.slice(scheduled.length) : ttsText;
+    const sentence = completeSentences(pending).complete;
+    if (sentence) {
+      enqueueTts(sentence);
+      wakeTtsScheduledRef.current = scheduled + sentence;
+    }
+    if (close < 0) {
+      setTtsPreview(ttsText);
+      setStreamingAnswer("");
+      return;
+    }
+    if (!wakeTtsClosedRef.current) {
+      const remaining = ttsText.slice(wakeTtsScheduledRef.current.length).trim();
+      if (remaining) enqueueTts(remaining);
+      wakeTtsClosedRef.current = true;
+    }
+    const display = raw.slice(close + "</tts>".length).trimStart();
+    setTtsPreview(display ? "" : ttsText);
+    setStreamingAnswer(display);
+    if (final && !display) setTtsPreview(ttsText);
   };
 
   const stopRecording = async () => {
@@ -180,6 +230,11 @@ export function WakeOverlay() {
     setStatus("submitting");
     setEvents([]);
     setStreamingAnswer("");
+    setTtsPreview("");
+    rawAnswerRef.current = "";
+    wakeTtsScheduledRef.current = "";
+    wakeTtsClosedRef.current = false;
+    listenAfterTtsRef.current = false;
     setFinalAnswerText("");
     stopTts();
     ttsScheduledTextRef.current = "";
@@ -189,16 +244,20 @@ export function WakeOverlay() {
       const result = await bridge.sendMessage(sessionId, finalText, modelId, reasoningEffort);
       setSession(result);
       const answer = result.messages.filter((message) => message.role === "assistant").at(-1)?.content || "";
-      setFinalAnswerText(answer);
+      processWakeAnswer(answer, true);
+      const visibleAnswer = answer.replace(/^\s*<tts\b[^>]*>[\s\S]*?<\/tts>\s*/i, "").trimStart();
+      setFinalAnswerText(visibleAnswer || answer);
       setStatus("completed");
       if (answer && !finalTtsFlushedRef.current) {
         if (!answer.startsWith(ttsScheduledTextRef.current)) {
           stopTts();
           ttsScheduledTextRef.current = "";
         }
-        const remaining = answer.slice(ttsScheduledTextRef.current.length);
-        if (remaining) enqueueTts(remaining);
-        ttsScheduledTextRef.current = answer;
+        if (!/<tts\b/i.test(answer)) {
+          const remaining = answer.slice(ttsScheduledTextRef.current.length);
+          if (remaining) enqueueTts(remaining);
+          ttsScheduledTextRef.current = answer;
+        }
         finalTtsFlushedRef.current = true;
       }
     } catch (reason) {
@@ -209,16 +268,6 @@ export function WakeOverlay() {
     }
   };
   submitTranscriptRef.current = submitTranscript;
-
-  useEffect(() => {
-    if (status !== "streaming" || !streamingAnswer) return;
-    if (!streamingAnswer.startsWith(ttsScheduledTextRef.current)) ttsScheduledTextRef.current = "";
-    const pending = streamingAnswer.slice(ttsScheduledTextRef.current.length);
-    const { complete } = completeSentences(pending);
-    if (!complete) return;
-    enqueueTts(complete);
-    ttsScheduledTextRef.current += complete;
-  }, [streamingAnswer, status]);
 
   const startRecording = async () => {
     if (recording || submittingRef.current) return;
@@ -293,12 +342,17 @@ export function WakeOverlay() {
         setEvents((current) => [...current, item]);
         if (item.stage === "model.output.reset") {
           setStreamingAnswer("");
+          setTtsPreview("");
+          rawAnswerRef.current = "";
+          wakeTtsScheduledRef.current = "";
+          wakeTtsClosedRef.current = false;
+          listenAfterTtsRef.current = false;
           ttsScheduledTextRef.current = "";
         }
         if (item.stage === "model.output.delta") {
           const data = item.data as { text?: unknown; kind?: unknown };
           if ((data.kind === undefined || data.kind === "answer") && typeof data.text === "string") {
-            setStreamingAnswer((current) => current + data.text);
+            processWakeAnswer(rawAnswerRef.current + data.text);
           }
         }
       }
@@ -361,11 +415,11 @@ export function WakeOverlay() {
       </div>
       {agentStarted && <div className="wake-agent-bubble">
         <div className="wake-agent-content">
-          <div className={`wake-answer ${!(status === "completed" ? finalAnswerText : streamingAnswer) ? "wake-answer-pending" : ""}`}>
+          <div className={`wake-answer ${!(status === "completed" ? finalAnswerText : streamingAnswer || ttsPreview) ? "wake-answer-pending" : ""}`}>
             {status === "completed" && finalAnswerText
               ? <MarkdownContent>{finalAnswerText}</MarkdownContent>
-              : streamingAnswer
-                ? <MarkdownContent>{streamingAnswer}</MarkdownContent>
+              : streamingAnswer || ttsPreview
+                ? <MarkdownContent>{streamingAnswer || ttsPreview}</MarkdownContent>
                 : "···"}
           </div>
         </div>

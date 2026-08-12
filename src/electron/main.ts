@@ -365,6 +365,8 @@ function conversationInput(session: SessionData, current: string, attachments: C
   ];
 }
 
+const QUICK_WAKE_OUTPUT_PROMPT = `这是一次快速唤起请求。最终回答必须严格以 XML 标签块开头：<tts listen_after="true|false">简短的一句话</tts>。如果你的回答是一个问题、需要用户继续回答或确认，就设置 listen_after="true"；如果回答结束后不需要继续聆听，就设置 listen_after="false"。标签内只写给用户朗读的简短口语，不要 Markdown、代码、列表、链接、表格或复杂标点，尽量简洁。必须先完整输出并闭合 <tts> 标签，再输出给屏幕显示的正式回答；正式回答不要重复 TTS 文本。`;
+
 function normalizeAttachments(value: unknown): ChatAttachment[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((item): ChatAttachment[] => {
@@ -705,7 +707,10 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
     logMain("ipc.sessions.send", { sessionId: id, text });
     trace({ stage: "user.request", data: { text } });
     const skills = [...loadEnabledSkills(config), ...(pluginManager?.getSkills() || [])];
-    const runtime = new SecAgentRuntime(config, audit, skills, trace, pluginManager);
+    const runtimeConfig = isWakeRequest
+      ? { ...config, agent: { ...config.agent, systemPrompt: `${config.agent.systemPrompt}\n\n## 快速唤起输出协议\n${QUICK_WAKE_OUTPUT_PROMPT}` } }
+      : config;
+    const runtime = new SecAgentRuntime(runtimeConfig, audit, skills, trace, pluginManager);
     const previousReadSkillNames = before.messages.flatMap((message) => message.toolCalls || []).filter((call) => call.name === "secagent__read_skill" || call.name === "read_skill").map((call) => typeof (call.arguments as { name?: unknown })?.name === "string" ? (call.arguments as { name: string }).name : "");
     const result = await runtime.run(historyInput(before, text), selectedReasoningEffort, conversationInput(before, text, attachments), abortController.signal, { previousAutoLoadedSkills: before.autoLoadedSkills, previousReadSkillNames });
     if (result.autoLoadedSkills?.length) {
