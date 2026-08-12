@@ -64,8 +64,9 @@ import type { LoadedSkill } from "./skills.js";
 
 type ExecuteTool = (key: string, args: Record<string, unknown>) => Promise<unknown>;
 export type AgentTool = Pick<RegisteredMcpTool, "key" | "description" | "inputSchema">;
-export interface ConversationMessage { role: "user" | "assistant"; content: string; attachments?: ChatAttachment[] }
+export interface ConversationMessage { role: "user" | "assistant" | "system"; content: string; attachments?: ChatAttachment[] }
 type ModelTrace = (stage: string, data: unknown) => void;
+type RetryableModelError = Error & { retryable?: boolean };
 
 // Tool execution is intentionally unbounded. The model may need more than a fixed
 // number of discovery/read/write turns for complex external applications.
@@ -164,14 +165,24 @@ export class ModelToolAgent {
     completeBody: () => unknown,
     signal?: AbortSignal
   ): Promise<void> {
-    try {
-      await this.streamRequestOnce(url, headers, body, onEvent, completeBody, signal);
-    } catch (error) {
-      if (signal?.aborted) throw error;
-      const message = error instanceof Error ? error.message : String(error);
-      if (!/terminated|network|socket|closed|reset/i.test(message)) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 350));
-      await this.streamRequestOnce(url, headers, body, onEvent, completeBody, signal);
+    const maxRetries = 5;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this.streamRequestOnce(url, headers, body, onEvent, completeBody, signal);
+        return;
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        const retryable = error as RetryableModelError;
+        const message = error instanceof Error ? error.message : String(error);
+        const transientConnectionError = /terminated|network|socket|closed|reset|timeout|fetch failed/i.test(message);
+        if ((!retryable.retryable && !transientConnectionError) || attempt >= maxRetries) throw error;
+        const waitMs = Math.min(5000, 350 * 2 ** attempt);
+        this.trace?.("model.retry", { url, attempt: attempt + 1, maxRetries, waitMs, error: message });
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(resolve, waitMs);
+          signal?.addEventListener("abort", () => { clearTimeout(timer); reject(signal.reason); }, { once: true });
+        });
+      }
     }
   }
 
@@ -194,6 +205,12 @@ export class ModelToolAgent {
     if (!response.ok) {
       const payload = await response.json().catch(() => ({})) as { error?: { message?: string; type?: string } };
       this.trace?.("model.response", { url, status: response.status, body: payload });
+      const retryableStatus = response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500;
+      if (retryableStatus) {
+        const requestError = new Error(`model API request failed (${response.status})`) as RetryableModelError;
+        requestError.retryable = true;
+        throw requestError;
+      }
       if (response.status === 401 || response.status === 403) throw new Error(`模型鉴权失败（${response.status}）。请检查 ${this.agent.apiKeyEnv}、provider 和 baseUrl；密钥不要写入 YAML。`);
       if (payload.error?.type === "expired_key" || /expired\s+key/i.test(payload.error?.message ?? "")) throw new Error(`模型密钥已过期。请在工作区 .env 中更新 ${this.agent.apiKeyEnv}，然后重试。`);
       throw new Error(`模型请求失败（${response.status}）。请检查模型名、端点和服务端日志。`);
@@ -361,6 +378,27 @@ export class ModelToolAgent {
         if (type === "response.completed") {
           const response = event.response as { output?: Array<{ type?: string; call_id?: string; name?: string; arguments?: string; [key: string]: unknown }> } | undefined;
           responseOutput = (response?.output || []) as InputItem[];
+          // Some Responses-compatible relays emit the final message only in
+          // response.completed (without response.output_text.delta events).
+          // Preserve that text instead of incorrectly reporting an empty
+          // response to the caller.
+          if (!answer) {
+            const completedText = (response as { output_text?: unknown } | undefined)?.output_text;
+            if (typeof completedText === "string") {
+              answer = completedText;
+            } else {
+              const textParts = (response?.output || [])
+                .filter((item) => item.type === "message")
+                .flatMap((item) => {
+                  const content = item.content;
+                  if (typeof content === "string") return [content];
+                  if (!Array.isArray(content)) return [];
+                  return content.flatMap((part) => typeof part === "object" && part !== null && typeof (part as { text?: unknown }).text === "string" ? [(part as { text: string }).text] : []);
+                });
+              answer = textParts.join("");
+            }
+            if (answer) this.trace?.("model.output.delta", { text: answer, kind: "answer", turn: turn + 1 });
+          }
           for (const item of response?.output || []) {
             if (item.type === "function_call" && item.call_id && item.name) calls.set(item.call_id, { callId: item.call_id, name: item.name, arguments: item.arguments || "" });
           }
@@ -409,7 +447,8 @@ export class ModelToolAgent {
   private async runGoogle(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high", systemPrompt: string, conversation?: ConversationMessage[], signal?: AbortSignal): Promise<string> {
     type Part = { text?: string; thought?: boolean; inlineData?: { mimeType: string; data: string }; functionCall?: { name?: string; args?: Record<string, unknown>; id?: string }; functionResponse?: { name?: string; response?: unknown; id?: string; parts?: Array<{ inlineData: { mimeType: string; data: string; displayName?: string } }> }; thoughtSignature?: string };
     const history = conversation?.length ? conversation : [{ role: "user" as const, content: instruction }];
-    const contents: Array<{ role: "user" | "model"; parts: Part[] }> = history.map((message) => ({
+    const dynamicSystem = history.filter((message) => message.role === "system").map((message) => message.content).join("\n\n");
+    const contents: Array<{ role: "user" | "model"; parts: Part[] }> = history.filter((message) => message.role !== "system").map((message) => ({
       role: message.role === "assistant" ? "model" : "user",
       parts: [
         ...(message.content ? [{ text: message.content }] : []),
@@ -422,7 +461,7 @@ export class ModelToolAgent {
       let text = "";
       const calls = new Map<string, { name: string; args: Record<string, unknown>; thoughtSignature?: string; id?: string }>();
       const body = {
-        systemInstruction: { parts: [{ text: systemPrompt }] },
+        systemInstruction: { parts: [{ text: dynamicSystem ? `${systemPrompt}\n\n${dynamicSystem}` : systemPrompt }] },
         contents,
         tools: [{ functionDeclarations: definitions }],
         generationConfig: { maxOutputTokens: this.agent.maxTokens, thinkingConfig: this.googleThinkingConfig(reasoningEffort) }
@@ -522,8 +561,9 @@ export class ModelToolAgent {
   private async runAnthropic(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high", systemPrompt: string, conversation?: ConversationMessage[], signal?: AbortSignal): Promise<string> {
     // The desktop session supplies structured turns. Keep the single-string fallback for CLI
     // callers that do not have a persisted conversation.
+    const dynamicSystem = (conversation || []).filter((message) => message.role === "system").map((message) => message.content).join("\n\n");
     const messages: Array<Record<string, unknown>> = conversation?.length
-      ? conversation.map((message) => ({ role: message.role, content: message.attachments?.length ? [
+      ? conversation.filter((message) => message.role !== "system").map((message) => ({ role: message.role, content: message.attachments?.length ? [
         ...(message.content ? [{ type: "text", text: message.content }] : []),
         ...(message.attachments || []).map((attachment) => { const image = dataUrlParts(attachment); return { type: "image", source: { type: "base64", media_type: image.mediaType, data: image.data } }; })
       ] : message.content }))
@@ -538,7 +578,7 @@ export class ModelToolAgent {
       }, {
         model: this.agent.model,
         max_tokens: this.agent.maxTokens,
-        system: systemPrompt,
+        system: dynamicSystem ? `${systemPrompt}\n\n${dynamicSystem}` : systemPrompt,
         messages,
         tools: definitions,
         ...this.anthropicThinkingConfig(reasoningEffort)
@@ -588,6 +628,13 @@ export class ModelToolAgent {
       const results: Array<Record<string, unknown>> = [];
       let turnToolError: string | undefined;
       for (const call of calls) {
+        if (call.input && "_error" in call.input) {
+          // Malformed tool JSON is a model error, not a client-fatal error.
+          // Return it as a normal tool result so the model can regenerate the
+          // arguments and continue the task.
+          results.push({ type: "tool_result", tool_use_id: call.id, content: String(call.input._error) });
+          continue;
+        }
         if (call.input && "_error" in call.input) throw new Error("模型返回了无法解析的工具参数，请提高 maxTokens 或重试");
         let result: unknown;
         signal?.throwIfAborted();

@@ -16,6 +16,34 @@ function config() {
   } as any;
 }
 
+function responsesConfig() {
+  return {
+    agent: {
+      provider: "openai-responses",
+      model: "test-model",
+      apiKeyEnv: "TEST_MODEL_KEY",
+      baseUrl: "https://model.test",
+      endpoint: "/responses",
+      maxTokens: 256,
+      systemPrompt: "test",
+    },
+  } as any;
+}
+
+function anthropicConfig() {
+  return {
+    agent: {
+      provider: "anthropic",
+      model: "claude-test",
+      apiKeyEnv: "TEST_MODEL_KEY",
+      baseUrl: "https://model.test",
+      endpoint: "/v1/messages",
+      maxTokens: 256,
+      systemPrompt: "test",
+    },
+  } as any;
+}
+
 function response(body: string): Response {
   return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
 }
@@ -95,6 +123,70 @@ test("an empty model response is retried once", async () => {
     const result = await agent.run("say something", [{ key: "unused_tool", description: "unused", inputSchema: { type: "object" } }], async () => ({}));
     assert.equal(result, "重试成功");
     assert.equal(requestCount, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete process.env.TEST_MODEL_KEY;
+  }
+});
+
+test("Responses completed event supplies text when no text delta was sent", async () => {
+  const originalFetch = globalThis.fetch;
+  process.env.TEST_MODEL_KEY = "test-key";
+  globalThis.fetch = async () => response("data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"completed fallback\"}]}]}}\n\ndata: [DONE]\n\n");
+  try {
+    const agent = new ModelToolAgent(responsesConfig(), [], undefined);
+    const result = await agent.run("say something", [{ key: "unused_tool", description: "unused", inputSchema: { type: "object" } }], async () => ({}));
+    assert.equal(result, "completed fallback");
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete process.env.TEST_MODEL_KEY;
+  }
+});
+
+test("model API connection errors are retried up to recovery", async () => {
+  const originalFetch = globalThis.fetch;
+  process.env.TEST_MODEL_KEY = "test-key";
+  let requestCount = 0;
+  globalThis.fetch = async () => {
+    requestCount += 1;
+    if (requestCount < 3) throw new Error("fetch failed: socket reset");
+    return response("data: {\"choices\":[{\"delta\":{\"content\":\"recovered\"}}]}\n\ndata: [DONE]\n\n");
+  };
+  try {
+    const agent = new ModelToolAgent(config(), [], undefined);
+    const result = await agent.run("say something", [{ key: "unused_tool", description: "unused", inputSchema: { type: "object" } }], async () => ({}));
+    assert.equal(result, "recovered");
+    assert.equal(requestCount, 3);
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete process.env.TEST_MODEL_KEY;
+  }
+});
+
+test("malformed Anthropic tool arguments are returned as a tool result", async () => {
+  const originalFetch = globalThis.fetch;
+  process.env.TEST_MODEL_KEY = "test-key";
+  let requestCount = 0;
+  let executeCount = 0;
+  let secondRequest = "";
+  globalThis.fetch = async (_url, init) => {
+    requestCount += 1;
+    if (requestCount === 2) secondRequest = String(init?.body || "");
+    return requestCount === 1
+      ? response('data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool-1","name":"demo"}}\n\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"broken\\":"}}\n\n')
+      : response('data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}\n\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"fixed"}}\n\n');
+  };
+  try {
+    const agent = new ModelToolAgent(anthropicConfig(), [], undefined);
+    const result = await agent.run("do it", [{ key: "demo", description: "demo", inputSchema: { type: "object" } }], async () => {
+      executeCount += 1;
+      return {};
+    });
+    assert.equal(result, "fixed");
+    assert.equal(requestCount, 2);
+    assert.equal(executeCount, 0);
+    assert.match(secondRequest, /tool_result/);
+    assert.match(secondRequest, /模型返回了无法解析的工具参数/);
   } finally {
     globalThis.fetch = originalFetch;
     delete process.env.TEST_MODEL_KEY;
