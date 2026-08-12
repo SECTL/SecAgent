@@ -6,6 +6,7 @@ import type { SecAgentConfig } from "./types.js";
 export interface LoadedSkill { name: string; description: string; path: string; relativePath?: string; content: string }
 
 const MAX_SCAN_DEPTH = 3;
+const BUILTIN_SKILL_FILES = [path.resolve(process.cwd(), "src/skills/math-visualization/SKILL.md")];
 
 function fallbackDescription(content: string): string {
   const lines = content.split(/\r?\n/).map((line) => line.trim());
@@ -23,7 +24,7 @@ function skillMetadata(content: string, file: string): { name?: string; descript
 }
 
 export function loadEnabledSkills(config: SecAgentConfig, additionalFiles: string[] = []): LoadedSkill[] {
-  const files = [...discoverSkillFiles(config.workspace), ...additionalFiles].filter((file, index, all) => all.indexOf(file) === index);
+  const files = [...discoverSkillFiles(config.workspace), ...BUILTIN_SKILL_FILES, ...additionalFiles].filter((file, index, all) => fs.existsSync(file) && all.indexOf(file) === index);
   const names = new Map<string, string>();
   return files.map((file) => {
     const baseName = path.basename(path.dirname(file));

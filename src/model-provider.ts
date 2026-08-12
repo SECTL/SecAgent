@@ -11,6 +11,26 @@ const WORKSPACE_FILE_OUTPUT_PROMPT = `
 </workspace-files>
 可以列出一个或多个文件。XML 必须放在回答末尾，不要放进 Markdown 代码块。`;
 
+const MAFS_RENDERING_PROMPT = `
+
+## 数学图示
+解释数学内容时，优先使用 Markdown 中的 <Mafs>...</Mafs> 或 <R3F>...</R3F> 绘制图示。对于函数、坐标、几何、立体、积分、运动、向量、面积体积等内容，只要图示能够表达关键关系，就必须在最终回答正文中实际输出对应标签，不能只在思考中提到“可以画图”。图示用于辅助文字推导和公式说明，不要因为推导是逻辑过程就省略图示。二维关系优先使用 Mafs，三维几何优先使用 R3F。标签内必须是 JSON：可包含 viewBox、coordinates 和 plots；plots 支持 function（或 ofX，expression/formula）、point、circle、segment、vector、text。segment 使用 start/end 或 x1/y1/x2/y2。图示默认支持鼠标拖动和平移、滚轮缩放，可用 pan/zoom 关闭。函数表达式使用 x、数字、四则运算、^ 以及常见数学函数（sin、cos、tan、sqrt、abs、log、exp 等）。示例：
+<Mafs>
+{"viewBox":{"x":[-5,5],"y":[-3,3]},"plots":[{"type":"function","expression":"sin(x)","domain":[-5,5]}]}
+</Mafs>
+只有在确实没有任何可视化价值的纯定义、简单算术或纯符号变形中才可以不画图。`;
+
+const R3F_RENDERING_PROMPT = `
+
+## 三维交互图示
+三维几何、空间结构或立体数学内容必须优先使用 Markdown 的 <R3F>...</R3F>，除非内容确实没有可视化价值。不要只画一个孤立的圆柱和一个孤立的圆锥；图示必须服务于推导，展示对象之间的对应关系、变形过程和关键尺寸。讲“等积变形”时，应同时画原图形、切分/重排后的近似图形，并用 dimension 标出对应的半径、周长、底边、高等长度，使用 text 标出每部分含义；二维的底面切分和扇形重排优先另加一个 <Mafs> 图示。标签内必须是 JSON 场景描述，不要输出 JSX、JavaScript 或 HTML。可包含 camera、background、controls、grid、shadows 和 objects；objects 支持 box、sphere、cylinder、cone、torus、plane、line、circle、dimension、text、grid，并可设置 position、rotation、scale、color、opacity、wireframe。line 可使用 points 或 start/end；dimension 使用 start、end、label；circle 使用 center、radius；text 的文字使用 text 字段。场景默认支持拖动旋转、滚轮缩放和右键平移，可用 controls:false 关闭。
+
+例如，圆面积变成长方形时必须说明并标出：圆的半径为 r，圆周长为 2πr；将圆切成许多扇形并交错排列后，近似长方形的长为 πr（圆周长的一半），宽为 r，面积对应关系为 πr×r=πr²。圆柱体再沿高 h 方向延伸，近似长方体的三条对应长度为 πr、r、h，体积对应关系为 πr×r×h=πr²h。不要只用文字声称这些关系，必须在图中用标注表达。示例：
+<R3F>
+{"camera":{"position":[4,3,5]},"objects":[{"type":"box","position":[0,0,0],"color":"#4f8fd9"},{"type":"sphere","position":[1,1,0],"radius":0.6,"color":"#f59e0b"}]}
+</R3F>
+`;
+
 function isDeepSeekV4Model(modelName: string): boolean {
   return /^(?:deepseek-v4-flash|deepseek-v4-pro)(?:[-_].*)?$/i.test(modelName.trim());
 }

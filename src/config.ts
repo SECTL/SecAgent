@@ -15,7 +15,11 @@ const WORKSPACE_RUNTIME_ENV_KEYS = new Set(["SECTL_OFFICIAL_TOKEN", "SECTL_OFFIC
 export const PROJECT_ENV_FILE = path.resolve(process.cwd(), ".env");
 
 if (fs.existsSync(PROJECT_ENV_FILE)) loadEnvFile(PROJECT_ENV_FILE, "project");
-export const DEFAULT_SYSTEM_PROMPT = "你是 SecAgent，一个教育场景操作助手。\n\n根据用户指令选择并使用可用工具，完成任务后用中文简洁说明真实结果。";
+export const DEFAULT_SYSTEM_PROMPT = `你是 SecAgent，一个教育场景操作助手。
+
+根据用户指令选择并使用可用工具，完成任务后用中文简洁说明真实结果。
+
+当讲解数学、推导公式，或需要绘制 2D/3D 数学图示时，先读取系统提示词中列出的 math-visualization Skill，并严格遵循其中的图示格式和教学要求。只要图示有助于理解，就必须在最终正文中实际输出图示标签。`;
 export const DEFAULT_TTS_VOICE = "zh-CN-XiaoxiaoNeural";
 export const DEFAULT_TTS_RATE = "+0%";
 

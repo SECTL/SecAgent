@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { MarkdownContent } from "./MarkdownContent.js";
 import type { TraceEvent } from "../constants.js";
 
 type WakeStatus = "listening" | "transcribing" | "submitting" | "streaming" | "completed" | "error";
@@ -310,9 +309,9 @@ export function WakeOverlay() {
         <div className="wake-agent-content">
           <div className={`wake-answer ${!(status === "completed" ? finalAnswerText : streamingAnswer) ? "wake-answer-pending" : ""}`}>
             {status === "completed" && finalAnswerText
-              ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{finalAnswerText}</ReactMarkdown>
+              ? <MarkdownContent>{finalAnswerText}</MarkdownContent>
               : streamingAnswer
-                ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingAnswer}</ReactMarkdown>
+                ? <MarkdownContent>{streamingAnswer}</MarkdownContent>
                 : "···"}
           </div>
         </div>

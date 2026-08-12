@@ -19,13 +19,20 @@
   "dependencies": {
     "@andresaya/edge-tts": "^1.8.0",
     "@opencode-ai/models": "^0.0.35",
+    "@react-three/drei": "^10.7.8",
+    "@react-three/fiber": "^9.7.0",
     "adm-zip": "^0.5.18",
+    "katex": "^0.16.47",
     "lucide-react": "^0.468.0",
+    "mafs": "^0.21.0",
     "mermaid": "^11.16.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-markdown": "^10.1.0",
+    "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
+    "three": "^0.185.1",
     "yaml": "^2.6.1"
   },
   "devDependencies": {
