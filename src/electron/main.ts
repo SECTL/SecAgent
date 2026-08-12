@@ -592,7 +592,7 @@ ipcMain.on("wake:context", (_event, payload: unknown) => {
 });
 ipcMain.handle("wake:close", () => { closeWakeWindow(); return { ok: true }; });
 ipcMain.on("wake:interactive", (_event, interactive: boolean) => { if (wakeWindow && !wakeWindow.isDestroyed()) wakeWindow.setIgnoreMouseEvents(!interactive); });
-ipcMain.handle("speech:start", (event, hotwords?: unknown) => startSpeech(wakeWindow?.webContents.id === event.sender.id ? wakeWindow : windowRef, hotwords));
+ipcMain.handle("speech:start", (event) => startSpeech(wakeWindow?.webContents.id === event.sender.id ? wakeWindow : windowRef));
 ipcMain.handle("speech:stop", () => { stopSpeech(); return { ok: true }; });
 ipcMain.handle("tts:synthesize", async (_event, text: string) => {
   if (typeof text !== "string" || !text.trim()) return "";
