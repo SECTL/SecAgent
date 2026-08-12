@@ -25,6 +25,21 @@ function completeSentences(value: string): { complete: string; remainder: string
   return { complete: value.slice(0, end), remainder: value.slice(end) };
 }
 
+function markdownToSpeech(value: string): string {
+  return value
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*+]\s+/gm, "")
+    .replace(/^\s*>\s?/gm, "")
+    .replace(/(^|\s)\|([^\n]+)\|(?=\s|$)/g, "$1$2")
+    .replace(/[*_~`]/g, "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function WakeOverlay() {
   const bridge = window.secagent;
   const params = useMemo(() => new URLSearchParams(window.location.search), []);
@@ -47,7 +62,7 @@ export function WakeOverlay() {
   const submittingRef = useRef(false);
   const finalWaiterRef = useRef<((text: string) => void) | null>(null);
   const submitTranscriptRef = useRef<() => Promise<void>>(() => Promise.resolve());
-  const ttsQueueRef = useRef<string[]>([]);
+  const ttsQueueRef = useRef<Array<{ text: string; audio?: Promise<string> }>>([]);
   const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
   const ttsRunningRef = useRef(false);
   const ttsRunRef = useRef(0);
@@ -76,14 +91,17 @@ export function WakeOverlay() {
     const run = ttsRunRef.current;
     try {
       while (ttsQueueRef.current.length && ttsRunRef.current === run) {
-        const text = ttsQueueRef.current.shift() || "";
-        logTts({ stage: "synthesize.start", characters: text.length });
-        const buffer = await bridge.synthesizeSpeech(text);
+        const item = ttsQueueRef.current.shift();
+        if (!item) break;
+        const text = item.text;
+        const buffer = await (item.audio || synthesizeTts(text));
         logTts({ stage: "synthesize.returned", base64Characters: buffer.length });
         if (!buffer || ttsRunRef.current !== run) {
           logTts({ stage: "playback.skipped", hasAudio: Boolean(buffer), cancelled: ttsRunRef.current !== run });
           break;
         }
+        const next = ttsQueueRef.current[0];
+        if (next && !next.audio) next.audio = synthesizeTts(next.text);
         const audioUrl = audioBlobUrl(buffer);
         logTts({ stage: "audio.url.created", scheme: "blob", characters: audioUrl.length });
         const audio = new Audio(audioUrl);
@@ -115,10 +133,15 @@ export function WakeOverlay() {
     }
   };
 
+  const synthesizeTts = (text: string): Promise<string> => {
+    logTts({ stage: "synthesize.start", characters: text.length });
+    return bridge.synthesizeSpeech(text);
+  };
+
   const enqueueTts = (text: string) => {
-    const clean = text.replace(/\s+/g, " ").trim();
+    const clean = markdownToSpeech(text);
     if (!clean) return;
-    ttsQueueRef.current.push(clean);
+    ttsQueueRef.current.push({ text: clean });
     logTts({ stage: "queued", characters: clean.length, queueLength: ttsQueueRef.current.length });
     void playTtsQueue();
   };
