@@ -1,47 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { MessageActivities } from "./MessageActivities.js";
 import type { TraceEvent } from "../constants.js";
 
 type WakeStatus = "listening" | "transcribing" | "submitting" | "streaming" | "completed" | "error";
-
-function collectActivities(events: TraceEvent[]): AssistantActivity[] {
-  const activities: AssistantActivity[] = [];
-  for (const item of events) {
-    if (item.stage === "model.output.delta") {
-      const data = item.data as { text?: unknown; kind?: unknown; turn?: unknown };
-      const kind = data.kind === "thinking" || data.kind === "summary" ? data.kind : undefined;
-      if (kind && typeof data.text === "string") {
-        const last = activities.at(-1);
-        if (last?.kind === kind) last.content += data.text;
-        else activities.push({ kind, content: data.text, ...(typeof data.turn === "number" ? { turn: data.turn } : {}) });
-      }
-    }
-    if (item.stage === "mcp.tools/call" || item.stage === "secagent.tools/call") {
-      const data = item.data as { name?: unknown; arguments?: unknown };
-      if (typeof data.name === "string") activities.push({ kind: "tool", name: data.name, arguments: data.arguments ?? {} });
-    }
-    if (item.stage === "mcp.tools/result" || item.stage === "secagent.tools/result") {
-      const data = item.data as { name?: unknown; result?: unknown };
-      if (typeof data.name === "string") {
-        const activity = [...activities].reverse().find((entry): entry is Extract<AssistantActivity, { kind: "tool" }> => entry.kind === "tool" && entry.name === data.name && !("result" in entry));
-        if (activity) activity.result = data.result;
-      }
-    }
-  }
-  return activities;
-}
-
-function finalAnswer(events: TraceEvent[]): string {
-  let start = 0;
-  events.forEach((item, index) => { if (item.stage === "model.output.reset") start = index + 1; });
-  return events.slice(start).filter((item) => item.stage === "model.output.delta")
-    .map((item) => {
-      const data = item.data as { text?: string; kind?: string };
-      return data.kind === "answer" || !data.kind ? data.text || "" : "";
-    }).join("");
-}
 
 function isVoiceActive(samples: Float32Array): boolean {
   let energy = 0;
@@ -49,7 +11,14 @@ function isVoiceActive(samples: Float32Array): boolean {
   return Math.sqrt(energy / Math.max(1, samples.length)) > 0.015;
 }
 
-function takeCompleteSentences(value: string): { complete: string; remainder: string } {
+function audioBlobUrl(base64: string): string {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return URL.createObjectURL(new Blob([bytes], { type: "audio/mpeg" }));
+}
+
+function completeSentences(value: string): { complete: string; remainder: string } {
   let end = 0;
   for (let index = 0; index < value.length; index += 1) {
     if (/[。！？!?；;\n]/.test(value[index])) end = index + 1;
@@ -68,6 +37,8 @@ export function WakeOverlay() {
   const [status, setStatus] = useState<WakeStatus>("listening");
   const [recording, setRecording] = useState(false);
   const [events, setEvents] = useState<TraceEvent[]>([]);
+  const [streamingAnswer, setStreamingAnswer] = useState("");
+  const [finalAnswerText, setFinalAnswerText] = useState("");
   const [error, setError] = useState("");
   const audioRef = useRef<{ context: AudioContext; stream: MediaStream; source: MediaStreamAudioSourceNode; processor: ScriptProcessorNode } | undefined>(undefined);
   const silenceTimerRef = useRef<number | undefined>(undefined);
@@ -83,9 +54,13 @@ export function WakeOverlay() {
   const ttsRunRef = useRef(0);
   const spokenTextRef = useRef("");
   const finalTtsFlushedRef = useRef(false);
+  const wakeInteractiveRef = useRef(false);
 
-  const assistantText = useMemo(() => finalAnswer(events), [events]);
-  const activities = useMemo(() => collectActivities(events), [events]);
+  const logTts = (event: Record<string, unknown>) => {
+    console.info("[wake-tts]", event);
+    bridge.logWakeTts(event);
+  };
+
   const agentStarted = status === "submitting" || status === "streaming" || status === "completed";
 
   const stopTts = () => {
@@ -103,16 +78,39 @@ export function WakeOverlay() {
     try {
       while (ttsQueueRef.current.length && ttsRunRef.current === run) {
         const text = ttsQueueRef.current.shift() || "";
+        logTts({ stage: "synthesize.start", characters: text.length });
         const buffer = await bridge.synthesizeSpeech(text);
-        if (!buffer || ttsRunRef.current !== run) break;
-        const audio = new Audio(`data:audio/mpeg;base64,${buffer}`);
+        logTts({ stage: "synthesize.returned", base64Characters: buffer.length });
+        if (!buffer || ttsRunRef.current !== run) {
+          logTts({ stage: "playback.skipped", hasAudio: Boolean(buffer), cancelled: ttsRunRef.current !== run });
+          break;
+        }
+        const audioUrl = audioBlobUrl(buffer);
+        logTts({ stage: "audio.url.created", scheme: "blob", characters: audioUrl.length });
+        const audio = new Audio(audioUrl);
+        audio.autoplay = true;
+        audio.muted = false;
+        audio.onloadeddata = () => logTts({ stage: "audio.loaded" });
+        audio.onplay = () => logTts({ stage: "audio.play" });
+        audio.onended = () => logTts({ stage: "audio.ended" });
+        audio.onerror = () => logTts({ stage: "audio.error", error: audio.error ? { code: audio.error.code, message: audio.error.message } : "unknown" });
         ttsAudioRef.current = audio;
-        await audio.play();
-        await new Promise<void>((resolve) => { audio.onended = () => resolve(); audio.onerror = () => resolve(); });
+        try {
+          await audio.play();
+        } catch (reason) {
+          logTts({ stage: "audio.play.rejected", error: reason instanceof Error ? reason.message : String(reason) });
+          throw reason;
+        }
+        await new Promise<void>((resolve) => {
+          const finish = () => resolve();
+          audio.addEventListener("ended", finish, { once: true });
+          audio.addEventListener("error", finish, { once: true });
+        });
+        URL.revokeObjectURL(audioUrl);
         ttsAudioRef.current = null;
       }
     } catch (reason) {
-      console.warn("Wake TTS failed", reason);
+      console.error("Wake TTS failed", reason);
     } finally {
       ttsRunningRef.current = false;
     }
@@ -122,6 +120,7 @@ export function WakeOverlay() {
     const clean = text.replace(/\s+/g, " ").trim();
     if (!clean) return;
     ttsQueueRef.current.push(clean);
+    logTts({ stage: "queued", characters: clean.length, queueLength: ttsQueueRef.current.length });
     void playTtsQueue();
   };
 
@@ -155,15 +154,21 @@ export function WakeOverlay() {
     if (!finalText) { submittingRef.current = false; setStatus("listening"); return; }
     setStatus("submitting");
     setEvents([]);
+    setStreamingAnswer("");
+    setFinalAnswerText("");
+    stopTts();
+    spokenTextRef.current = "";
+    finalTtsFlushedRef.current = false;
     setError("");
     try {
       const result = await bridge.sendMessage(sessionId, finalText, modelId, reasoningEffort);
       setSession(result);
-      setStatus("completed");
       const answer = result.messages.filter((message) => message.role === "assistant").at(-1)?.content || "";
+      setFinalAnswerText(answer);
+      setStatus("completed");
       if (answer && !finalTtsFlushedRef.current) {
-        const remainder = answer.slice(spokenTextRef.current.length);
-        if (remainder) enqueueTts(remainder);
+        const remaining = answer.slice(spokenTextRef.current.length);
+        if (remaining) enqueueTts(remaining);
         spokenTextRef.current = answer;
         finalTtsFlushedRef.current = true;
       }
@@ -175,6 +180,15 @@ export function WakeOverlay() {
     }
   };
   submitTranscriptRef.current = submitTranscript;
+
+  useEffect(() => {
+    if (status !== "streaming" || !streamingAnswer) return;
+    const pending = streamingAnswer.slice(spokenTextRef.current.length);
+    const { complete } = completeSentences(pending);
+    if (!complete) return;
+    enqueueTts(complete);
+    spokenTextRef.current += complete.length;
+  }, [streamingAnswer, status]);
 
   const startRecording = async () => {
     if (recording || submittingRef.current) return;
@@ -209,6 +223,7 @@ export function WakeOverlay() {
   };
 
   useEffect(() => {
+    document.documentElement.classList.add("wake-mode");
     document.body.classList.add("wake-mode");
     void bridge.getSession(sessionId).then(setSession).catch((reason) => { setStatus("error"); setError(String(reason)); });
     const removeSpeech = bridge.onSpeechEvent((event) => {
@@ -228,10 +243,18 @@ export function WakeOverlay() {
       if (item.sessionId === sessionId) {
         setStatus((current) => current === "submitting" ? "streaming" : current);
         setEvents((current) => [...current, item]);
+        if (item.stage === "model.output.reset") setStreamingAnswer("");
+        if (item.stage === "model.output.delta") {
+          const data = item.data as { text?: unknown; kind?: unknown };
+          if ((data.kind === undefined || data.kind === "answer") && typeof data.text === "string") {
+            setStreamingAnswer((current) => current + data.text);
+          }
+        }
       }
     });
     void startRecording();
     return () => {
+      document.documentElement.classList.remove("wake-mode");
       document.body.classList.remove("wake-mode");
       removeSpeech();
       removeRuntime();
@@ -241,24 +264,21 @@ export function WakeOverlay() {
   }, []);
 
   useEffect(() => {
-    if (!agentStarted || !assistantText) return;
-    if (assistantText.length < spokenTextRef.current.length) {
-      stopTts();
-      spokenTextRef.current = "";
-      finalTtsFlushedRef.current = false;
-    }
-    const pending = assistantText.slice(spokenTextRef.current.length);
-    const { complete } = takeCompleteSentences(pending);
-    if (complete) {
-      enqueueTts(complete);
-      spokenTextRef.current += complete.length;
-    }
-  }, [assistantText, agentStarted]);
-
-  useEffect(() => {
-    bridge.setWakeInteractive(agentStarted);
-    return () => bridge.setWakeInteractive(false);
-  }, [bridge, agentStarted]);
+    const updatePointerMode = (interactive: boolean) => {
+      if (wakeInteractiveRef.current === interactive) return;
+      wakeInteractiveRef.current = interactive;
+      bridge.setWakeInteractive(interactive);
+    };
+    const onMouseMove = (event: MouseEvent) => {
+      const target = event.target;
+      updatePointerMode(target instanceof Element && Boolean(target.closest(".wake-stack")));
+    };
+    document.addEventListener("mousemove", onMouseMove);
+    return () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      updatePointerMode(false);
+    };
+  }, [bridge]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") void bridge.closeWake(); };
@@ -267,19 +287,33 @@ export function WakeOverlay() {
   }, [bridge]);
 
   return <main className="wake-root" aria-label="随时唤醒">
-    <div className="wake-edge wake-edge-soft" />
-    <div className="wake-edge wake-edge-pulse" />
-    <div className="wake-edge wake-edge-sharp" />
+    <svg className="wake-edge-svg" aria-hidden="true" preserveAspectRatio="none">
+      <defs>
+        <linearGradient id="wake-edge-gradient" x1="0" y1="0" x2="1" y2="0" gradientUnits="objectBoundingBox">
+          <stop offset="0%" stopColor="#f86437" /><stop offset="16%" stopColor="#ffb84a" />
+          <stop offset="30%" stopColor="#f5eb66" /><stop offset="48%" stopColor="#6ddf88" />
+          <stop offset="66%" stopColor="#58b7ff" /><stop offset="80%" stopColor="#8c78ff" /><stop offset="100%" stopColor="#f86437" />
+          <animateTransform attributeName="gradientTransform" type="rotate" from="0 .5 .5" to="360 .5 .5" dur="20s" repeatCount="indefinite" />
+        </linearGradient>
+        <filter id="wake-edge-blur-mid" x="-5%" y="-5%" width="110%" height="110%"><feGaussianBlur stdDeviation="7" /></filter>
+        <filter id="wake-edge-blur-near" x="-5%" y="-5%" width="110%" height="110%"><feGaussianBlur stdDeviation="4" /></filter>
+      </defs>
+      <rect className="wake-edge-svg-mid" x="7" y="7" width="calc(100% - 14px)" height="calc(100% - 14px)" rx="28" fill="none" stroke="url(#wake-edge-gradient)" strokeWidth="7" filter="url(#wake-edge-blur-mid)" />
+      <rect className="wake-edge-svg-near" x="7" y="7" width="calc(100% - 14px)" height="calc(100% - 14px)" rx="28" fill="none" stroke="url(#wake-edge-gradient)" strokeWidth="12" filter="url(#wake-edge-blur-near)" />
+      <rect className="wake-edge-svg-crisp" x="7" y="7" width="calc(100% - 14px)" height="calc(100% - 14px)" rx="28" fill="none" stroke="url(#wake-edge-gradient)" strokeWidth="7" />
+    </svg>
     <div className={`wake-stack ${agentStarted ? "agent-started" : ""}`}>
       <div className={`wake-user-bubble ${agentStarted ? "submitted" : ""}`}>
         <span className={!transcript ? "wake-listening" : "wake-transcript"}>{transcript || (status === "error" ? "语音识别失败" : "聆听中...")}</span>
       </div>
       {agentStarted && <div className="wake-agent-bubble">
-        <div className="wake-agent-avatar"><img src="/icon.svg" alt="SecAgent" /></div>
         <div className="wake-agent-content">
-          <MessageActivities activities={activities} isExecuting={status === "submitting" || status === "streaming"} activeStepKind={activities.at(-1)?.kind} />
-          <div className={`wake-answer ${!assistantText ? "wake-answer-pending" : ""}`}>
-            {assistantText ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{assistantText}</ReactMarkdown> : "···"}
+          <div className={`wake-answer ${!(status === "completed" ? finalAnswerText : streamingAnswer) ? "wake-answer-pending" : ""}`}>
+            {status === "completed" && finalAnswerText
+              ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{finalAnswerText}</ReactMarkdown>
+              : streamingAnswer
+                ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingAnswer}</ReactMarkdown>
+                : "···"}
           </div>
         </div>
       </div>}

@@ -252,7 +252,7 @@ export interface SettingsPayload {
   /** Compatibility field for older IPC callers; the settings UI uses providers. */
   models: Array<ModelProfile & { apiKey?: string; apiKeyConfigured?: boolean }>;
   tts: { voice: string; rate: string };
-  wake: { hotkey: string };
+  wake: { hotkey: string; modelId?: string };
   mcp: { servers: Record<string, McpServerConfig> };
   defaultModelId?: string;
   defaultReasoningEffort?: ReasoningEffort;
@@ -276,7 +276,7 @@ export function readSettings(workspaceInput: string): SettingsPayload {
       maxTokens: config.agent.maxTokens
     }];
   const providers = config.agent.providers?.length ? config.agent.providers : groupLegacyModels(configured);
-  return { providers: providers.map((provider) => ({ ...provider, apiKeyConfigured: Boolean(process.env[provider.apiKeyEnv]) })), models: configured.map((model) => ({ ...model, apiKeyConfigured: Boolean(process.env[model.apiKeyEnv]) })), tts: { voice: config.tts?.voice || DEFAULT_TTS_VOICE, rate: config.tts?.rate || DEFAULT_TTS_RATE }, wake: { hotkey: config.wake?.hotkey || DEFAULT_WAKE_HOTKEY }, mcp: config.mcp, defaultModelId: config.defaults?.modelId, defaultReasoningEffort: config.defaults?.reasoningEffort, customModelMode: config.defaults?.customModelMode ?? false };
+  return { providers: providers.map((provider) => ({ ...provider, apiKeyConfigured: Boolean(process.env[provider.apiKeyEnv]) })), models: configured.map((model) => ({ ...model, apiKeyConfigured: Boolean(process.env[model.apiKeyEnv]) })), tts: { voice: config.tts?.voice || DEFAULT_TTS_VOICE, rate: config.tts?.rate || DEFAULT_TTS_RATE }, wake: { hotkey: config.wake?.hotkey || DEFAULT_WAKE_HOTKEY, ...(config.wake?.modelId ? { modelId: config.wake.modelId } : {}) }, mcp: config.mcp, defaultModelId: config.defaults?.modelId, defaultReasoningEffort: config.defaults?.reasoningEffort, customModelMode: config.defaults?.customModelMode ?? false };
 }
 
 function groupLegacyModels(models: ModelProfile[]): ProviderConfig[] {
@@ -304,7 +304,7 @@ export function saveSettings(workspaceInput: string, payload: SettingsPayload): 
   });
   const models = providers.flatMap((provider) => provider.models.map((model) => ({ id: `${provider.id}:${model.id}`, name: model.name || model.id, enabled: model.enabled, provider: provider.provider, model: model.id, apiKeyEnv: provider.apiKeyEnv, baseUrl: provider.baseUrl, endpoint: provider.endpoint, anthropicVersion: provider.anthropicVersion, maxTokens: provider.maxTokens })));
   const nextTts = { voice: payload.tts?.voice || DEFAULT_TTS_VOICE, rate: payload.tts?.rate || DEFAULT_TTS_RATE };
-  const nextWake = { hotkey: normalizeWakeHotkey(payload.wake?.hotkey || DEFAULT_WAKE_HOTKEY) };
+  const nextWake = { hotkey: normalizeWakeHotkey(payload.wake?.hotkey || DEFAULT_WAKE_HOTKEY), ...(payload.wake?.modelId ? { modelId: payload.wake.modelId } : {}) };
   const canonicalAgent = { ...(raw.agent as unknown as Record<string, unknown>), providers, models } as SecAgentConfig["agent"];
   for (const field of LEGACY_AGENT_MODEL_FIELDS) delete (canonicalAgent as unknown as Record<string, unknown>)[field];
   const candidateAgent = { ...canonicalAgent, models: models.map((model) => ({ ...model })) } as SecAgentConfig["agent"];

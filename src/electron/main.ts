@@ -178,15 +178,15 @@ async function openWakeWindow(): Promise<void> {
   }
   const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
   const workArea = display.workArea;
-  let sessionId = activeWakeContext.sessionId;
-  if (!sessionId) {
-    const first = store().list()[0];
-    sessionId = first?.id || store().create().meta.id;
-  }
+  // Every wake invocation gets an isolated, unlisted session. It remains
+  // available to the overlay while never entering the main session index.
+  const wakeSettings = readSettings(DEFAULT_WORKSPACE);
+  const sessionId = store().create("随时唤醒", { listed: false }).meta.id;
+  const wakeModelId = wakeSettings.wake.modelId || activeWakeContext.modelId;
   const query = new URLSearchParams({
     wake: "1",
     sessionId,
-    ...(activeWakeContext.modelId ? { modelId: activeWakeContext.modelId } : {}),
+    ...(wakeModelId ? { modelId: wakeModelId } : {}),
     ...(activeWakeContext.reasoningEffort ? { reasoningEffort: activeWakeContext.reasoningEffort } : {})
   }).toString();
   wakeWindow = new BrowserWindow({
@@ -205,10 +205,13 @@ async function openWakeWindow(): Promise<void> {
     focusable: true,
     show: false,
     alwaysOnTop: true,
-    webPreferences: { preload: path.join(__dirname, "../preload/preload.cjs"), contextIsolation: true, nodeIntegration: false }
+    webPreferences: { preload: path.join(__dirname, "../preload/preload.cjs"), contextIsolation: true, nodeIntegration: false, autoplayPolicy: "no-user-gesture-required" }
   });
   wakeWindow.setAlwaysOnTop(true, "floating");
-  wakeWindow.setIgnoreMouseEvents(true);
+  // The overlay should not block the application below. Mouse-move events are
+  // still forwarded to the renderer so it can temporarily enable interaction
+  // when the pointer is over the visible response card.
+  wakeWindow.setIgnoreMouseEvents(true, { forward: true });
   wakeWindow.webContents.on("before-input-event", (_event, input) => {
     if (input.type === "keyDown" && input.key === "Escape") closeWakeWindow();
   });
@@ -225,7 +228,7 @@ async function openWakeWindow(): Promise<void> {
     wakeWindow = undefined;
   });
   if (process.env.ELECTRON_RENDERER_URL) await wakeWindow.loadURL(`${process.env.ELECTRON_RENDERER_URL}?${query}`);
-  else await wakeWindow.loadFile(rendererPath(), { query: { wake: "1", sessionId, ...(activeWakeContext.modelId ? { modelId: activeWakeContext.modelId } : {}), ...(activeWakeContext.reasoningEffort ? { reasoningEffort: activeWakeContext.reasoningEffort } : {}) } });
+  else await wakeWindow.loadFile(rendererPath(), { query: { wake: "1", sessionId, ...(wakeModelId ? { modelId: wakeModelId } : {}), ...(activeWakeContext.reasoningEffort ? { reasoningEffort: activeWakeContext.reasoningEffort } : {}) } });
   // Transparent windows do not consistently emit ready-to-show on every
   // platform, so make the post-load path an additional safe fallback.
   showWakeWindow();
@@ -565,7 +568,7 @@ ipcMain.handle("settings:save", (_event, payload: SettingsPayload) => {
   }
   let saved: SettingsPayload;
   try {
-    saved = saveSettings(DEFAULT_WORKSPACE, { ...payload, providers, wake: { hotkey: nextWakeHotkey } });
+    saved = saveSettings(DEFAULT_WORKSPACE, { ...payload, providers, wake: { hotkey: nextWakeHotkey, ...(payload.wake?.modelId ? { modelId: payload.wake.modelId } : {}) } });
   } catch (error) {
     if (wakeShortcutChanged) globalShortcut.unregister(nextWakeHotkey);
     throw error;
@@ -593,10 +596,20 @@ ipcMain.handle("speech:start", (event, hotwords?: unknown) => startSpeech(wakeWi
 ipcMain.handle("speech:stop", () => { stopSpeech(); return { ok: true }; });
 ipcMain.handle("tts:synthesize", async (_event, text: string) => {
   if (typeof text !== "string" || !text.trim()) return "";
-  const { config } = loadConfig(DEFAULT_WORKSPACE);
-  const audio = await synthesizeSpeech(text.slice(0, 1800), config.tts);
-  return audio.toString("base64");
+  const clean = text.slice(0, 1800);
+  logMain("tts.synthesize.start", { characters: clean.length });
+  try {
+    const { config } = loadConfig(DEFAULT_WORKSPACE);
+    const audio = await synthesizeSpeech(clean, config.tts);
+    const encoded = audio.toString("base64");
+    logMain("tts.synthesize.success", { bytes: audio.length, base64Characters: encoded.length, voice: config.tts?.voice, rate: config.tts?.rate });
+    return encoded;
+  } catch (error) {
+    logMain("tts.synthesize.failed", { characters: clean.length, message: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
 });
+ipcMain.on("wake:tts-log", (_event, payload: unknown) => logMain("wake.tts.playback", payload));
 ipcMain.on("speech:audio", (_event, samples: Float32Array) => sendSpeechAudio(samples));
 ipcMain.handle("sessions:stop", (_event, id: string) => {
   const controller = activeSessionRuns.get(id);

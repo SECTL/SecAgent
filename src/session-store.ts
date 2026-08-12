@@ -21,13 +21,13 @@ export class SessionStore {
     const index = this.readIndex();
     return index.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
-  create(title = "新会话"): SessionData {
+  create(title = "新会话", options: { listed?: boolean } = {}): SessionData {
     const now = new Date().toISOString();
     const meta: SessionMeta = { id: randomUUID(), title, createdAt: now, updatedAt: now };
     const data: SessionData = { meta, messages: [] };
     fs.mkdirSync(this.sessionDir(meta.id), { recursive: true });
     this.writeSession(data);
-    this.writeIndex([meta, ...this.readIndex()]);
+    if (options.listed !== false) this.writeIndex([meta, ...this.readIndex()]);
     return data;
   }
   get(id: string): SessionData {

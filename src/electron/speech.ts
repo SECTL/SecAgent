@@ -5,7 +5,6 @@ import readline from "node:readline";
 import { app, BrowserWindow } from "electron";
 
 const modelName = "sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23";
-const defaultHotwords = ["安全智能体", "课堂岛", "安全评分"];
 let worker: ChildProcessWithoutNullStreams | undefined;
 let remoteSocket: WebSocket | undefined;
 let speechWindow: BrowserWindow | undefined;
@@ -38,23 +37,35 @@ function remoteAsrUrl(): string | null {
   return `${wsBase}/asr/ws?token=${encodeURIComponent(token)}`;
 }
 
-export function startSpeech(window: BrowserWindow | undefined, requestedHotwords?: unknown): { ok: true } {
+function remoteAsrLogTarget(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+  } catch {
+    return "<invalid-url>";
+  }
+}
+
+export function startSpeech(window: BrowserWindow | undefined): { ok: true } {
   speechWindow = window;
   if (worker) return { ok: true };
-  if (remoteSocket && (remoteSocket.readyState === WebSocket.OPEN || remoteSocket.readyState === WebSocket.CONNECTING)) return { ok: true };
+  if (remoteSocket && (remoteSocket.readyState === WebSocket.OPEN || remoteSocket.readyState === WebSocket.CONNECTING)) {
+    // The main chat window and the wake overlay share one ASR connection. If the
+    // other window started it first, route subsequent events to the latest caller.
+    if (remoteSocket.readyState === WebSocket.OPEN) send(speechWindow, { type: "ready" });
+    return { ok: true };
+  }
 
   const url = remoteAsrUrl();
-  const hotwords = Array.isArray(requestedHotwords)
-    ? requestedHotwords.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean).slice(0, 64)
-    : defaultHotwords;
   if (url && typeof WebSocket !== "undefined") {
+    console.info(`[speech] connecting to ${remoteAsrLogTarget(url)}`);
     try {
       const socket = new WebSocket(url);
       remoteSocket = socket;
       mode = "remote";
       socket.binaryType = "arraybuffer";
       socket.onopen = () => {
-        socket.send(JSON.stringify({ type: "start", hotwords }));
+        console.info("[speech] ASR WebSocket opened");
         if (remoteSocket === socket && socket.readyState === WebSocket.OPEN) {
           for (const pcm of pendingRemoteAudio) socket.send(pcm);
           pendingRemoteAudio = [];
@@ -65,8 +76,12 @@ export function startSpeech(window: BrowserWindow | undefined, requestedHotwords
         try { send(speechWindow, typeof event.data === "string" ? JSON.parse(event.data) : event.data); }
         catch { send(speechWindow, { type: "log", message: String(event.data ?? "") }); }
       };
-      socket.onerror = () => { if (mode === "remote") send(speechWindow, { type: "error", message: "云端语音识别连接失败" }); };
-      socket.onclose = () => {
+      socket.onerror = (event) => {
+        console.error("[speech] ASR WebSocket error", event);
+        if (mode === "remote") send(speechWindow, { type: "error", message: "云端语音识别连接失败" });
+      };
+      socket.onclose = (event) => {
+        console.warn(`[speech] ASR WebSocket closed (code=${event.code}, reason=${event.reason || ""})`);
         const wasRemote = mode === "remote";
         if (remoteSocket === socket) { remoteSocket = undefined; mode = "idle"; }
         pendingRemoteAudio = [];
