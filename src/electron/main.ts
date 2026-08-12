@@ -618,7 +618,7 @@ ipcMain.on("wake:context", (_event, payload: unknown) => {
 });
 ipcMain.handle("wake:close", () => { closeWakeWindow(); return { ok: true }; });
 ipcMain.on("wake:interactive", (_event, interactive: boolean) => { if (wakeWindow && !wakeWindow.isDestroyed()) wakeWindow.setIgnoreMouseEvents(!interactive); });
-ipcMain.handle("speech:start", (event) => startSpeech(wakeWindow?.webContents.id === event.sender.id ? wakeWindow : windowRef));
+ipcMain.handle("speech:start", (event) => startSpeech(wakeWindow?.webContents.id === event.sender.id ? wakeWindow : windowRef, { betterRecognition: readSettings(DEFAULT_WORKSPACE).speech.betterRecognition === true }));
 ipcMain.handle("speech:stop", () => { stopSpeech(); return { ok: true }; });
 ipcMain.handle("voice-wake:start", (event, phrase: string) => startVoiceWake(voiceWakeWindow?.webContents.id === event.sender.id ? voiceWakeWindow : undefined, phrase, () => {
   closeVoiceWakeWindow();

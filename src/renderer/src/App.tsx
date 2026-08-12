@@ -66,6 +66,7 @@ export function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<{ context: AudioContext; stream: MediaStream; source: MediaStreamAudioSourceNode; processor: ScriptProcessorNode } | undefined>(undefined);
   const speechInsert = useRef({ start: 0, end: 0 });
+  const speechAnchor = useRef(0);
   const speechAudio = useRef<HTMLAudioElement | null>(null);
   const speechRun = useRef(0);
 
@@ -118,24 +119,26 @@ export function App() {
     return bridge.onSpeechEvent((event) => {
       const data = event as { type?: string; text?: string; message?: string };
       if (data.type === "ready") setSpeechStatus("正在聆听…");
-      if (data.type === "partial" || data.type === "final") {
+      if (data.type === "optimizing") setSpeechStatus("识别优化中…");
+      if (data.type === "partial" || data.type === "final" || data.type === "enhanced") {
         const text = data.text || "";
         // Capture the range before queueing the React update. The updater runs later;
         // reading speechInsert.current inside it would otherwise see the advanced
         // insertion point from the final-event bookkeeping and append the same text twice.
-        const insertion = speechInsert.current;
+        const insertion = data.type === "enhanced" ? { start: speechAnchor.current, end: speechInsert.current.end } : speechInsert.current;
         setDraft((current) => {
           const next = current.slice(0, insertion.start) + text + current.slice(insertion.end);
           const nextPoint = insertion.start + text.length;
-          speechInsert.current = data.type === "final"
+          speechInsert.current = data.type === "final" || data.type === "enhanced"
             ? { start: nextPoint, end: nextPoint }
             : { start: insertion.start, end: nextPoint };
           return next;
         });
-        if (data.type === "final") {
+        if (data.type === "final" || data.type === "enhanced") {
           setSpeechStatus("正在聆听…");
         }
       }
+      if (data.type === "enhance_error") setSpeechStatus("增强识别失败，已使用流式结果");
       if (data.type === "error") {
         setSpeechStatus(data.message || "语音识别失败");
         setRecording(false);
@@ -413,6 +416,7 @@ export function App() {
       const start = textArea?.selectionStart ?? draft.length;
       const end = textArea?.selectionEnd ?? start;
       speechInsert.current = { start, end };
+      speechAnchor.current = start;
       setRecording(true);
       setSpeechStatus("正在启动语音识别…");
       await bridge.startSpeech();

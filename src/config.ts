@@ -258,6 +258,7 @@ export interface SettingsPayload {
   models: Array<ModelProfile & { apiKey?: string; apiKeyConfigured?: boolean }>;
   tts: { voice: string; rate: string };
   wake: { hotkey: string; modelId?: string; voiceEnabled?: boolean; voicePhrase?: string };
+  speech: { betterRecognition?: boolean };
   mcp: { servers: Record<string, McpServerConfig> };
   defaultModelId?: string;
   defaultReasoningEffort?: ReasoningEffort;
@@ -281,7 +282,7 @@ export function readSettings(workspaceInput: string): SettingsPayload {
       maxTokens: config.agent.maxTokens
     }];
   const providers = config.agent.providers?.length ? config.agent.providers : groupLegacyModels(configured);
-  return { providers: providers.map((provider) => ({ ...provider, apiKeyConfigured: Boolean(process.env[provider.apiKeyEnv]) })), models: configured.map((model) => ({ ...model, apiKeyConfigured: Boolean(process.env[model.apiKeyEnv]) })), tts: { voice: config.tts?.voice || DEFAULT_TTS_VOICE, rate: config.tts?.rate || DEFAULT_TTS_RATE }, wake: { hotkey: config.wake?.hotkey || DEFAULT_WAKE_HOTKEY, ...(config.wake?.modelId ? { modelId: config.wake.modelId } : {}), voiceEnabled: config.wake?.voiceEnabled === true, voicePhrase: config.wake?.voicePhrase || DEFAULT_WAKE_PHRASE }, mcp: config.mcp, defaultModelId: config.defaults?.modelId, defaultReasoningEffort: config.defaults?.reasoningEffort, customModelMode: config.defaults?.customModelMode ?? false };
+  return { providers: providers.map((provider) => ({ ...provider, apiKeyConfigured: Boolean(process.env[provider.apiKeyEnv]) })), models: configured.map((model) => ({ ...model, apiKeyConfigured: Boolean(process.env[model.apiKeyEnv]) })), tts: { voice: config.tts?.voice || DEFAULT_TTS_VOICE, rate: config.tts?.rate || DEFAULT_TTS_RATE }, wake: { hotkey: config.wake?.hotkey || DEFAULT_WAKE_HOTKEY, ...(config.wake?.modelId ? { modelId: config.wake.modelId } : {}), voiceEnabled: config.wake?.voiceEnabled === true, voicePhrase: config.wake?.voicePhrase || DEFAULT_WAKE_PHRASE }, speech: { betterRecognition: config.speech?.betterRecognition === true }, mcp: config.mcp, defaultModelId: config.defaults?.modelId, defaultReasoningEffort: config.defaults?.reasoningEffort, customModelMode: config.defaults?.customModelMode ?? false };
 }
 
 function groupLegacyModels(models: ModelProfile[]): ProviderConfig[] {
@@ -313,7 +314,8 @@ export function saveSettings(workspaceInput: string, payload: SettingsPayload): 
   const canonicalAgent = { ...(raw.agent as unknown as Record<string, unknown>), providers, models } as SecAgentConfig["agent"];
   for (const field of LEGACY_AGENT_MODEL_FIELDS) delete (canonicalAgent as unknown as Record<string, unknown>)[field];
   const candidateAgent = { ...canonicalAgent, models: models.map((model) => ({ ...model })) } as SecAgentConfig["agent"];
-  const candidate: SecAgentConfig = { ...raw, agent: candidateAgent, tts: nextTts, wake: nextWake, mcp: payload.mcp };
+  const nextSpeech = { betterRecognition: payload.speech?.betterRecognition === true };
+  const candidate: SecAgentConfig = { ...raw, agent: candidateAgent, tts: nextTts, wake: nextWake, speech: nextSpeech, mcp: payload.mcp };
   delete (candidate as SecAgentConfig & { policy?: unknown }).policy;
   // Validate a normalized copy, then persist only the canonical multi-model fields.
   normalizeAndValidate(candidate, workspace);
@@ -321,6 +323,7 @@ export function saveSettings(workspaceInput: string, payload: SettingsPayload): 
   raw.agent = canonicalAgent;
   raw.tts = nextTts;
   raw.wake = nextWake;
+  raw.speech = nextSpeech;
   raw.mcp = payload.mcp;
   raw.defaults = { modelId: payload.defaultModelId || undefined, reasoningEffort: payload.defaultReasoningEffort || undefined, customModelMode: Boolean(payload.customModelMode) };
   delete (raw as SecAgentConfig & { policy?: unknown }).policy;

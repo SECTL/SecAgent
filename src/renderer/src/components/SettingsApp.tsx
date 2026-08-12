@@ -36,7 +36,7 @@ export function SettingsApp() {
   const skipAutosave = useRef(true);
   const [activePage, setActivePage] = useState(() => {
     const hash = window.location.hash.replace(/^#/, "");
-    const builtInPage = ["settings-wake", "settings-tts", "settings-models", "settings-mcp", "settings-plugins"].includes(hash);
+    const builtInPage = ["settings-wake", "settings-tts", "settings-speech", "settings-models", "settings-mcp", "settings-plugins"].includes(hash);
     return isOobe ? "settings-models" : (builtInPage || hash.startsWith("plugin-") ? hash : "settings-tts");
   });
 
@@ -175,6 +175,9 @@ export function SettingsApp() {
     </section>
     <section id="settings-plugins" className={`settings-section ${isOobe || activePage === "settings-plugins" ? "settings-section-active" : ""}`}>
       <PluginSettingsPanel plugins={plugins} setPlugins={setPlugins} marketPlugins={marketPlugins} setMarketPlugins={setMarketPlugins} marketError={marketError} setMarketError={setMarketError} />
+    </section>
+    <section id="settings-speech" className={`settings-section ${activePage === "settings-speech" ? "settings-section-active" : ""}`}><div className="section-title"><div><h2>语音识别</h2><p>开启后先使用服务器本地流式识别，停止说话后再由豆包语音优化结果。</p></div></div>
+      <article className="settings-card"><label className="toggle-row"><span className="toggle-copy"><strong>使用更好的语音识别</strong><small>每日前 20 分钟免费；超出部分按 10 Points / 60 分钟计费。优化期间输入框会显示“识别优化中”。</small></span><input type="checkbox" checked={settings.speech.betterRecognition === true} onChange={(event) => setSettings((current) => current && { ...current, speech: { ...current.speech, betterRecognition: event.target.checked } })} /></label></article>
     </section>
     {!isOobe && plugins.flatMap((plugin) => plugin.settingsPages.map((page) => activePage === `plugin-${plugin.id}-${page.id}` && <section className="settings-section settings-section-active plugin-settings-section" key={`${plugin.id}-${page.id}`}>
       <div className="section-title"><h2>{page.title}</h2></div>

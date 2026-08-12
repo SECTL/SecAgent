@@ -35,6 +35,9 @@ importers:
       mermaid:
         specifier: ^11.16.1
         version: 11.16.1
+      pinyin-pro:
+        specifier: ^3.28.2
+        version: 3.28.2
       react:
         specifier: ^19.2.8
         version: 19.2.8
@@ -53,6 +56,9 @@ importers:
       remark-math:
         specifier: ^6.0.0
         version: 6.0.0
+      sherpa-onnx:
+        specifier: ^1.13.5
+        version: 1.13.5
       three:
         specifier: ^0.185.1
         version: 0.185.1
@@ -1790,6 +1796,9 @@ packages:
     resolution: {integrity: sha512-RvwwcruNjI1ncT5xRakeyS9Lf8lcItv34KD+aif+VH9kduAyfYBipGh12274xtenIPZ119/R9BdTBa8gAwSh0A==}
     engines: {node: '>=12'}
 
+  pinyin-pro@3.28.2:
+    resolution: {integrity: sha512-jV38yxXHLfidirMC4hrXasLDozLCSq/4DfX88GnHcSEJ2+GpSedG6I9VOiEXJu6iQ5dbJC/RjmzyMuS5h/wH5A==}
+
   points-on-curve@0.2.0:
     resolution: {integrity: sha512-0mYKnYYe9ZcqMCWhUjItv/oHjvgEsfKvnUTg8sAtnHr3GVy7rGkXCb6d5cSyqrWqL4k81b9CPg3urd+T7aop3A==}
 
@@ -1923,6 +1932,9 @@ packages:
   shebang-regex@3.0.0:
     resolution: {integrity: sha512-7++dFhtcx3353uBaq8DDR4NuxBetBzC7ZQOhmTQInHEd6bSrXdiEyzCvG07Z44UYdLShWUyXt5M/yhz8ekcb1A==}
     engines: {node: '>=8'}
+
+  sherpa-onnx@1.13.5:
+    resolution: {integrity: sha512-kq3HgrXdbYCgK44U0gd2Cpnahf7qa59caPnROI7dy1+nKou8KdAsV9yUsCScZqTewvRyR/khUS97X26KE4JRMw==}
 
   source-map-js@1.2.1:
     resolution: {integrity: sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==}
@@ -4125,6 +4137,8 @@ snapshots:
 
   picomatch@4.0.5: {}
 
+  pinyin-pro@3.28.2: {}
+
   points-on-curve@0.2.0: {}
 
   points-on-path@0.2.1:
@@ -4321,6 +4335,8 @@ snapshots:
       shebang-regex: 3.0.0
 
   shebang-regex@3.0.0: {}
+
+  sherpa-onnx@1.13.5: {}
 
   source-map-js@1.2.1: {}
 

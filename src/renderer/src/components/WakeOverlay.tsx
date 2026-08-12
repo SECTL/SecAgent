@@ -320,7 +320,8 @@ export function WakeOverlay() {
     const removeSpeech = bridge.onSpeechEvent((event) => {
       const data = event as { type?: string; text?: string; message?: string };
       if (data.type === "ready") setStatus((current) => current === "listening" ? "listening" : current);
-      if (data.type === "partial" || data.type === "final") {
+      if (data.type === "optimizing") setStatus("transcribing");
+      if (data.type === "partial" || data.type === "final" || data.type === "enhanced") {
         const text = data.text || "";
         transcriptRef.current = text;
         setTranscript(text);
@@ -331,7 +332,7 @@ export function WakeOverlay() {
           lastVoiceAtRef.current = Date.now();
           setStatus("transcribing");
         }
-        if (data.type === "final") finalWaiterRef.current?.(text);
+        if (data.type === "final" || data.type === "enhanced") finalWaiterRef.current?.(text);
       }
       if (data.type === "error") { setStatus("error"); setError(data.message || "语音识别失败"); }
     });

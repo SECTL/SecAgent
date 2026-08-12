@@ -13,6 +13,7 @@ let speechWindow: BrowserWindow | undefined;
 let pendingRemoteAudio: ArrayBuffer[] = [];
 /** "remote" = backend relay /asr/ws; "local" = bundled sherpa-onnx worker; "idle" = none. */
 let mode: "remote" | "local" | "idle" = "idle";
+let enhancedRecognition = false;
 let voiceWakeKws: ReturnType<typeof createKws> | undefined;
 let voiceWakeStream: ReturnType<NonNullable<typeof voiceWakeKws>["createStream"]> | undefined;
 let voiceWakePhrase = "";
@@ -109,8 +110,9 @@ export function stopVoiceWake(): void {
   voiceWakeKws = undefined;
 }
 
-export function startSpeech(window: BrowserWindow | undefined, _hotwords?: unknown): { ok: true } {
+export function startSpeech(window: BrowserWindow | undefined, options?: { betterRecognition?: boolean }): { ok: true } {
   speechWindow = window;
+  enhancedRecognition = options?.betterRecognition === true;
   if (worker) return { ok: true };
   if (remoteSocket && (remoteSocket.readyState === WebSocket.OPEN || remoteSocket.readyState === WebSocket.CONNECTING)) {
     // The main chat window and the wake overlay share one ASR connection. If the
@@ -133,6 +135,7 @@ export function startSpeech(window: BrowserWindow | undefined, _hotwords?: unkno
           for (const pcm of pendingRemoteAudio) socket.send(pcm);
           pendingRemoteAudio = [];
         }
+        try { socket.send(JSON.stringify({ type: "start", better_recognition: enhancedRecognition })); } catch { /* Socket may close during startup. */ }
         send(speechWindow, { type: "ready" });
       };
       socket.onmessage = (event) => {
