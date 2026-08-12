@@ -22,6 +22,7 @@ export const DEFAULT_SYSTEM_PROMPT = `你是 SecAgent，一个教育场景操作
 当讲解数学、推导公式，或需要绘制 2D/3D 数学图示时，先读取系统提示词中列出的 math-visualization Skill，并严格遵循其中的图示格式和教学要求。只要图示有助于理解，就必须在最终正文中实际输出图示标签。`;
 export const DEFAULT_TTS_VOICE = "zh-CN-XiaoxiaoNeural";
 export const DEFAULT_TTS_RATE = "+0%";
+export const DEFAULT_WAKE_PHRASE = "小泽同学";
 
 const template = (workspace: string): SecAgentConfig => ({
   version: 1,
@@ -40,7 +41,7 @@ const template = (workspace: string): SecAgentConfig => ({
     }]
   } as SecAgentConfig["agent"],
   tts: { voice: DEFAULT_TTS_VOICE, rate: DEFAULT_TTS_RATE },
-  wake: { hotkey: DEFAULT_WAKE_HOTKEY },
+  wake: { hotkey: DEFAULT_WAKE_HOTKEY, voiceEnabled: false, voicePhrase: DEFAULT_WAKE_PHRASE },
   mcp: { servers: {} }
 });
 
@@ -162,7 +163,7 @@ export function normalizeAndValidate(raw: SecAgentConfig, workspace: string): Se
     raw.agent.systemPrompt = DEFAULT_SYSTEM_PROMPT;
   }
   raw.tts = { voice: raw.tts?.voice || DEFAULT_TTS_VOICE, rate: raw.tts?.rate || DEFAULT_TTS_RATE };
-  try { raw.wake = { hotkey: normalizeWakeHotkey(raw.wake?.hotkey || DEFAULT_WAKE_HOTKEY) }; }
+  try { raw.wake = { hotkey: normalizeWakeHotkey(raw.wake?.hotkey || DEFAULT_WAKE_HOTKEY), ...(raw.wake?.modelId ? { modelId: raw.wake.modelId } : {}), voiceEnabled: raw.wake?.voiceEnabled === true, voicePhrase: typeof raw.wake?.voicePhrase === "string" && raw.wake.voicePhrase.trim() ? raw.wake.voicePhrase.trim() : DEFAULT_WAKE_PHRASE }; }
   catch (error) { errors.push(error instanceof Error ? error.message : "随时唤醒快捷键无效"); }
   delete (raw.agent as { systemPromptFile?: unknown }).systemPromptFile;
   if (!raw?.agent?.provider || !["openai-compatible", "openai-responses", "anthropic", "google"].includes(raw.agent.provider)) errors.push("agent.provider 必须是 openai-compatible、openai-responses、anthropic 或 google");
@@ -256,7 +257,7 @@ export interface SettingsPayload {
   /** Compatibility field for older IPC callers; the settings UI uses providers. */
   models: Array<ModelProfile & { apiKey?: string; apiKeyConfigured?: boolean }>;
   tts: { voice: string; rate: string };
-  wake: { hotkey: string; modelId?: string };
+  wake: { hotkey: string; modelId?: string; voiceEnabled?: boolean; voicePhrase?: string };
   mcp: { servers: Record<string, McpServerConfig> };
   defaultModelId?: string;
   defaultReasoningEffort?: ReasoningEffort;
@@ -280,7 +281,7 @@ export function readSettings(workspaceInput: string): SettingsPayload {
       maxTokens: config.agent.maxTokens
     }];
   const providers = config.agent.providers?.length ? config.agent.providers : groupLegacyModels(configured);
-  return { providers: providers.map((provider) => ({ ...provider, apiKeyConfigured: Boolean(process.env[provider.apiKeyEnv]) })), models: configured.map((model) => ({ ...model, apiKeyConfigured: Boolean(process.env[model.apiKeyEnv]) })), tts: { voice: config.tts?.voice || DEFAULT_TTS_VOICE, rate: config.tts?.rate || DEFAULT_TTS_RATE }, wake: { hotkey: config.wake?.hotkey || DEFAULT_WAKE_HOTKEY, ...(config.wake?.modelId ? { modelId: config.wake.modelId } : {}) }, mcp: config.mcp, defaultModelId: config.defaults?.modelId, defaultReasoningEffort: config.defaults?.reasoningEffort, customModelMode: config.defaults?.customModelMode ?? false };
+  return { providers: providers.map((provider) => ({ ...provider, apiKeyConfigured: Boolean(process.env[provider.apiKeyEnv]) })), models: configured.map((model) => ({ ...model, apiKeyConfigured: Boolean(process.env[model.apiKeyEnv]) })), tts: { voice: config.tts?.voice || DEFAULT_TTS_VOICE, rate: config.tts?.rate || DEFAULT_TTS_RATE }, wake: { hotkey: config.wake?.hotkey || DEFAULT_WAKE_HOTKEY, ...(config.wake?.modelId ? { modelId: config.wake.modelId } : {}), voiceEnabled: config.wake?.voiceEnabled === true, voicePhrase: config.wake?.voicePhrase || DEFAULT_WAKE_PHRASE }, mcp: config.mcp, defaultModelId: config.defaults?.modelId, defaultReasoningEffort: config.defaults?.reasoningEffort, customModelMode: config.defaults?.customModelMode ?? false };
 }
 
 function groupLegacyModels(models: ModelProfile[]): ProviderConfig[] {
@@ -308,7 +309,7 @@ export function saveSettings(workspaceInput: string, payload: SettingsPayload): 
   });
   const models = providers.flatMap((provider) => provider.models.map((model) => ({ id: `${provider.id}:${model.id}`, name: model.name || model.id, enabled: model.enabled, provider: provider.provider, model: model.id, apiKeyEnv: provider.apiKeyEnv, baseUrl: provider.baseUrl, endpoint: provider.endpoint, anthropicVersion: provider.anthropicVersion, maxTokens: provider.maxTokens })));
   const nextTts = { voice: payload.tts?.voice || DEFAULT_TTS_VOICE, rate: payload.tts?.rate || DEFAULT_TTS_RATE };
-  const nextWake = { hotkey: normalizeWakeHotkey(payload.wake?.hotkey || DEFAULT_WAKE_HOTKEY), ...(payload.wake?.modelId ? { modelId: payload.wake.modelId } : {}) };
+  const nextWake = { hotkey: normalizeWakeHotkey(payload.wake?.hotkey || DEFAULT_WAKE_HOTKEY), ...(payload.wake?.modelId ? { modelId: payload.wake.modelId } : {}), voiceEnabled: payload.wake?.voiceEnabled === true, voicePhrase: payload.wake?.voicePhrase?.trim() || DEFAULT_WAKE_PHRASE };
   const canonicalAgent = { ...(raw.agent as unknown as Record<string, unknown>), providers, models } as SecAgentConfig["agent"];
   for (const field of LEGACY_AGENT_MODEL_FIELDS) delete (canonicalAgent as unknown as Record<string, unknown>)[field];
   const candidateAgent = { ...canonicalAgent, models: models.map((model) => ({ ...model })) } as SecAgentConfig["agent"];

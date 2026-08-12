@@ -61,7 +61,7 @@ export interface SecAgentConfig {
   workspace: string;
   agent: AgentConfig;
   tts?: { voice?: string; rate?: string };
-  wake?: { hotkey?: string; modelId?: string };
+  wake?: { hotkey?: string; modelId?: string; voiceEnabled?: boolean; voicePhrase?: string };
   mcp: { servers: Record<string, McpServerConfig> };
   defaults?: { modelId?: string; reasoningEffort?: ReasoningEffort; customModelMode?: boolean };
 }

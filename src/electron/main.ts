@@ -11,7 +11,7 @@ import { AuditStore } from "../audit.js";
 import { SecAgentRuntime, type TraceEvent } from "../runtime.js";
 import type { ConversationMessage } from "../model-provider.js";
 import { SessionStore, type AssistantActivity, type SessionData, type ToolCallRecord } from "../session-store.js";
-import { sendSpeechAudio, startSpeech, stopSpeech } from "./speech.js";
+import { sendSpeechAudio, sendVoiceWakeAudio, startSpeech, startVoiceWake, stopSpeech, stopVoiceWake } from "./speech.js";
 import type { ChatAttachment, ReasoningEffort } from "../types.js";
 import { listGoogleModels } from "../google-models.js";
 import { synthesizeSpeech } from "./tts.js";
@@ -24,6 +24,7 @@ import { DEFAULT_WAKE_HOTKEY, normalizeWakeHotkey } from "../wake-hotkey.js";
 let windowRef: BrowserWindow | undefined;
 let settingsWindow: BrowserWindow | undefined;
 let wakeWindow: BrowserWindow | undefined;
+let voiceWakeWindow: BrowserWindow | undefined;
 let pluginManager: PluginManager | undefined;
 let secAgentHttpServer: SecAgentHttpServer | undefined;
 let activeWakeShortcut: string | undefined;
@@ -169,6 +170,27 @@ function closeWakeWindow(): void {
   stopSpeech();
   if (wakeWindow && !wakeWindow.isDestroyed()) wakeWindow.close();
   wakeWindow = undefined;
+}
+
+function closeVoiceWakeWindow(): void {
+  stopVoiceWake();
+  if (voiceWakeWindow && !voiceWakeWindow.isDestroyed()) voiceWakeWindow.close();
+  voiceWakeWindow = undefined;
+}
+
+async function startConfiguredVoiceWake(): Promise<void> {
+  const settings = readSettings(DEFAULT_WORKSPACE);
+  if (!settings.wake.voiceEnabled) { closeVoiceWakeWindow(); return; }
+  if (voiceWakeWindow && !voiceWakeWindow.isDestroyed()) return;
+  const phrase = settings.wake.voicePhrase || "小泽同学";
+  voiceWakeWindow = new BrowserWindow({
+    width: 1, height: 1, show: false, frame: false, skipTaskbar: true,
+    webPreferences: { preload: path.join(__dirname, "../preload/preload.cjs"), contextIsolation: true, nodeIntegration: false, autoplayPolicy: "no-user-gesture-required" }
+  });
+  voiceWakeWindow.on("closed", () => { stopVoiceWake(); voiceWakeWindow = undefined; });
+  const query = new URLSearchParams({ "voice-wake": "1", phrase }).toString();
+  if (process.env.ELECTRON_RENDERER_URL) await voiceWakeWindow.loadURL(`${process.env.ELECTRON_RENDERER_URL}?${query}`);
+  else await voiceWakeWindow.loadFile(rendererPath(), { query: { "voice-wake": "1", phrase } });
 }
 
 async function openWakeWindow(): Promise<void> {
@@ -568,7 +590,7 @@ ipcMain.handle("settings:save", (_event, payload: SettingsPayload) => {
   }
   let saved: SettingsPayload;
   try {
-    saved = saveSettings(DEFAULT_WORKSPACE, { ...payload, providers, wake: { hotkey: nextWakeHotkey, ...(payload.wake?.modelId ? { modelId: payload.wake.modelId } : {}) } });
+    saved = saveSettings(DEFAULT_WORKSPACE, { ...payload, providers, wake: { hotkey: nextWakeHotkey, ...(payload.wake?.modelId ? { modelId: payload.wake.modelId } : {}), voiceEnabled: payload.wake?.voiceEnabled === true, voicePhrase: payload.wake?.voicePhrase } });
   } catch (error) {
     if (wakeShortcutChanged) globalShortcut.unregister(nextWakeHotkey);
     throw error;
@@ -579,6 +601,8 @@ ipcMain.handle("settings:save", (_event, payload: SettingsPayload) => {
   }
   markOnboardingComplete(DEFAULT_WORKSPACE);
   sendToAppWindows("settings:changed", saved);
+  closeVoiceWakeWindow();
+  if (saved.wake.voiceEnabled) void startConfiguredVoiceWake().catch((error) => logMain("voice-wake.start.failed", { error: String(error) }));
   return saved;
 });
 ipcMain.on("wake:context", (_event, payload: unknown) => {
@@ -594,6 +618,11 @@ ipcMain.handle("wake:close", () => { closeWakeWindow(); return { ok: true }; });
 ipcMain.on("wake:interactive", (_event, interactive: boolean) => { if (wakeWindow && !wakeWindow.isDestroyed()) wakeWindow.setIgnoreMouseEvents(!interactive); });
 ipcMain.handle("speech:start", (event) => startSpeech(wakeWindow?.webContents.id === event.sender.id ? wakeWindow : windowRef));
 ipcMain.handle("speech:stop", () => { stopSpeech(); return { ok: true }; });
+ipcMain.handle("voice-wake:start", (event, phrase: string) => startVoiceWake(voiceWakeWindow?.webContents.id === event.sender.id ? voiceWakeWindow : undefined, phrase, () => {
+  closeVoiceWakeWindow();
+  void openWakeWindow().catch((error) => logMain("wake.open.failed", { error: String(error), reason: "voice" }));
+}));
+ipcMain.handle("voice-wake:stop", () => { stopVoiceWake(); return { ok: true }; });
 ipcMain.handle("tts:synthesize", async (_event, text: string) => {
   if (typeof text !== "string" || !text.trim()) return "";
   const clean = text.slice(0, 1800);
@@ -611,6 +640,7 @@ ipcMain.handle("tts:synthesize", async (_event, text: string) => {
 });
 ipcMain.on("wake:tts-log", (_event, payload: unknown) => logMain("wake.tts.playback", payload));
 ipcMain.on("speech:audio", (_event, samples: Float32Array) => sendSpeechAudio(samples));
+ipcMain.on("voice-wake:audio", (_event, samples: Float32Array) => sendVoiceWakeAudio(samples));
 ipcMain.handle("sessions:stop", (_event, id: string) => {
   const controller = activeSessionRuns.get(id);
   if (!controller) return { ok: true, stopped: false };
@@ -738,10 +768,14 @@ app.whenReady().then(async () => {
   if (process.platform === "darwin") app.dock?.setIcon(appIconPath());
   logMain("app.ready");
   createWindow();
-  try { registerWakeShortcut(readSettings(DEFAULT_WORKSPACE).wake.hotkey || DEFAULT_WAKE_HOTKEY); }
+  try {
+    const initialSettings = readSettings(DEFAULT_WORKSPACE);
+    registerWakeShortcut(initialSettings.wake.hotkey || DEFAULT_WAKE_HOTKEY);
+    if (initialSettings.wake.voiceEnabled) void startConfiguredVoiceWake().catch((error) => logMain("voice-wake.start.failed", { error: String(error) }));
+  }
   catch (error) { logMain("wake.shortcut.register.failed", { error: error instanceof Error ? error.message : String(error) }); }
   if (needsOnboarding) openSettings(true);
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
-app.on("before-quit", () => { closeWakeWindow(); globalShortcut.unregisterAll(); if (marketplaceUpdateTimer) clearInterval(marketplaceUpdateTimer); void secAgentHttpServer?.stop(); void pluginManager?.shutdown(); });
+app.on("before-quit", () => { closeWakeWindow(); closeVoiceWakeWindow(); globalShortcut.unregisterAll(); if (marketplaceUpdateTimer) clearInterval(marketplaceUpdateTimer); void secAgentHttpServer?.stop(); void pluginManager?.shutdown(); });
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });

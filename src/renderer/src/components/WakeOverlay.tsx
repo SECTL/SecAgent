@@ -56,6 +56,7 @@ export function WakeOverlay() {
   const [error, setError] = useState("");
   const audioRef = useRef<{ context: AudioContext; stream: MediaStream; source: MediaStreamAudioSourceNode; processor: ScriptProcessorNode } | undefined>(undefined);
   const silenceTimerRef = useRef<number | undefined>(undefined);
+  const listenTimeoutRef = useRef<number | undefined>(undefined);
   const lastVoiceAtRef = useRef(0);
   const hasVoiceRef = useRef(false);
   const transcriptRef = useRef("");
@@ -151,6 +152,8 @@ export function WakeOverlay() {
     audioRef.current = undefined;
     if (silenceTimerRef.current !== undefined) window.clearInterval(silenceTimerRef.current);
     silenceTimerRef.current = undefined;
+    if (listenTimeoutRef.current !== undefined) window.clearTimeout(listenTimeoutRef.current);
+    listenTimeoutRef.current = undefined;
     audio?.processor.disconnect();
     audio?.source.disconnect();
     audio?.stream.getTracks().forEach((track) => track.stop());
@@ -222,6 +225,9 @@ export function WakeOverlay() {
     try {
       setStatus("listening");
       setError("");
+      hasVoiceRef.current = false;
+      transcriptRef.current = "";
+      lastVoiceAtRef.current = 0;
       await bridge.startSpeech();
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
       const context = new AudioContext({ sampleRate: 16000 });
@@ -231,6 +237,8 @@ export function WakeOverlay() {
         const samples = new Float32Array(event.inputBuffer.getChannelData(0));
         bridge.sendSpeechAudio(samples);
         if (isVoiceActive(samples)) {
+          if (listenTimeoutRef.current !== undefined) window.clearTimeout(listenTimeoutRef.current);
+          listenTimeoutRef.current = undefined;
           hasVoiceRef.current = true;
           lastVoiceAtRef.current = Date.now();
         }
@@ -239,6 +247,13 @@ export function WakeOverlay() {
       processor.connect(context.destination);
       audioRef.current = { context, stream, source, processor };
       setRecording(true);
+      listenTimeoutRef.current = window.setTimeout(() => {
+        listenTimeoutRef.current = undefined;
+        if (!hasVoiceRef.current && !transcriptRef.current.trim() && !submittingRef.current) {
+          console.info("[wake] no voice detected within 2s, closing wake window");
+          void bridge.closeWake();
+        }
+      }, 2000);
       silenceTimerRef.current = window.setInterval(() => {
         if (hasVoiceRef.current && transcriptRef.current.trim() && Date.now() - lastVoiceAtRef.current >= 1500) void submitTranscriptRef.current();
       }, 100);
@@ -260,7 +275,13 @@ export function WakeOverlay() {
         const text = data.text || "";
         transcriptRef.current = text;
         setTranscript(text);
-        if (text.trim()) { hasVoiceRef.current = true; lastVoiceAtRef.current = Date.now(); setStatus("transcribing"); }
+        if (text.trim()) {
+          if (listenTimeoutRef.current !== undefined) window.clearTimeout(listenTimeoutRef.current);
+          listenTimeoutRef.current = undefined;
+          hasVoiceRef.current = true;
+          lastVoiceAtRef.current = Date.now();
+          setStatus("transcribing");
+        }
         if (data.type === "final") finalWaiterRef.current?.(text);
       }
       if (data.type === "error") { setStatus("error"); setError(data.message || "语音识别失败"); }
@@ -325,8 +346,10 @@ export function WakeOverlay() {
           <stop offset="66%" stopColor="#58b7ff" /><stop offset="80%" stopColor="#8c78ff" /><stop offset="100%" stopColor="#f86437" />
           <animateTransform attributeName="gradientTransform" type="rotate" from="0 .5 .5" to="360 .5 .5" dur="20s" repeatCount="indefinite" />
         </linearGradient>
-        <filter id="wake-edge-blur-mid" x="-5%" y="-5%" width="110%" height="110%"><feGaussianBlur stdDeviation="7" /></filter>
-        <filter id="wake-edge-blur-near" x="-5%" y="-5%" width="110%" height="110%"><feGaussianBlur stdDeviation="4" /></filter>
+        {/* Keep the full-screen glow visually smooth without allocating a
+            full native-resolution blur surface on 4K/high-DPI displays. */}
+        <filter id="wake-edge-blur-mid" x="-5%" y="-5%" width="110%" height="110%" filterRes="512 512"><feGaussianBlur stdDeviation="7" /></filter>
+        <filter id="wake-edge-blur-near" x="-5%" y="-5%" width="110%" height="110%" filterRes="768 768"><feGaussianBlur stdDeviation="4" /></filter>
       </defs>
       <rect className="wake-edge-svg-mid" x="7" y="7" width="calc(100% - 14px)" height="calc(100% - 14px)" rx="28" fill="none" stroke="url(#wake-edge-gradient)" strokeWidth="7" filter="url(#wake-edge-blur-mid)" />
       <rect className="wake-edge-svg-near" x="7" y="7" width="calc(100% - 14px)" height="calc(100% - 14px)" rx="28" fill="none" stroke="url(#wake-edge-gradient)" strokeWidth="12" filter="url(#wake-edge-blur-near)" />

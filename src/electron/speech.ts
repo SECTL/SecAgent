@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import { app, BrowserWindow } from "electron";
+import { createKws } from "sherpa-onnx";
+import { pinyin } from "pinyin-pro";
 
 const modelName = "sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23";
 let worker: ChildProcessWithoutNullStreams | undefined;
@@ -11,6 +13,10 @@ let speechWindow: BrowserWindow | undefined;
 let pendingRemoteAudio: ArrayBuffer[] = [];
 /** "remote" = backend relay /asr/ws; "local" = bundled sherpa-onnx worker; "idle" = none. */
 let mode: "remote" | "local" | "idle" = "idle";
+let voiceWakeKws: ReturnType<typeof createKws> | undefined;
+let voiceWakeStream: ReturnType<NonNullable<typeof voiceWakeKws>["createStream"]> | undefined;
+let voiceWakePhrase = "";
+let voiceWakeDetected: (() => void) | undefined;
 
 function projectPath(...parts: string[]): string {
   const candidates = [
@@ -44,6 +50,63 @@ function remoteAsrLogTarget(url: string): string {
   } catch {
     return "<invalid-url>";
   }
+}
+
+function keywordTokens(phrase: string): string {
+  const syllables = pinyin(phrase.replace(/\s+/g, ""), { toneType: "symbol", type: "array" }) as string[];
+  const initials = ["zh", "ch", "sh", "b", "p", "m", "f", "d", "t", "n", "l", "g", "k", "h", "j", "q", "x", "r", "z", "c", "s", "y", "w"];
+  return syllables.map((syllable) => {
+    const initial = initials.find((candidate) => syllable.startsWith(candidate)) || "";
+    return `${initial} ${syllable.slice(initial.length)}`;
+  }).join(" ");
+}
+
+export function startVoiceWake(window: BrowserWindow | undefined, phrase: string, onDetected: () => void): { ok: true } {
+  void window;
+  voiceWakePhrase = phrase.trim();
+  voiceWakeDetected = onDetected;
+  if (voiceWakeKws) return { ok: true };
+  const model = projectPath("models", "sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20");
+  voiceWakeKws = createKws({
+    featConfig: { samplingRate: 16000, featureDim: 80 },
+    modelConfig: {
+      transducer: {
+        encoder: path.join(model, "encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx"),
+        decoder: path.join(model, "decoder-epoch-13-avg-2-chunk-16-left-64.onnx"),
+        joiner: path.join(model, "joiner-epoch-13-avg-2-chunk-16-left-64.int8.onnx")
+      },
+      tokens: path.join(model, "tokens.txt"), provider: "cpu", numThreads: 1, modelingUnit: "ppinyin"
+    },
+    maxActivePaths: 4, numTrailingBlanks: 1, keywordsScore: 1.5, keywordsThreshold: 0.55,
+    keywords: `${keywordTokens(voiceWakePhrase)} @${voiceWakePhrase}`
+  });
+  voiceWakeStream = voiceWakeKws.createStream();
+  console.info(`[voice-wake] local KWS ready phrase=${voiceWakePhrase}`);
+  return { ok: true };
+}
+
+export function sendVoiceWakeAudio(samples: Float32Array): void {
+  const kws = voiceWakeKws;
+  const stream = voiceWakeStream;
+  if (!kws || !stream) return;
+  stream.acceptWaveform(16000, samples);
+  while (kws.isReady(stream)) kws.decode(stream);
+  const result = kws.getResult(stream);
+  if (result.keyword) {
+    console.info(`[voice-wake] local KWS detected keyword=${result.keyword}`);
+    // Reset before invoking the callback. The callback closes the hidden
+    // window and releases the KWS instance immediately.
+    kws.reset(stream);
+    const detected = voiceWakeDetected;
+    detected?.();
+  }
+}
+
+export function stopVoiceWake(): void {
+  voiceWakeDetected = undefined;
+  voiceWakeStream = undefined;
+  voiceWakeKws?.free();
+  voiceWakeKws = undefined;
 }
 
 export function startSpeech(window: BrowserWindow | undefined, _hotwords?: unknown): { ok: true } {
