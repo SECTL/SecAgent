@@ -5,7 +5,7 @@ import path from "node:path";
 import { PluginManager } from "./plugin-manager.js";
 
 export interface MarketplaceVersion { version: string; minHostApiVersion: number; assetUrl: string; sha256: string; signature?: string; permissions: string[]; platforms: string[] }
-export interface MarketplacePlugin { id: string; name: string; description: string; repository: string; readme?: string; versions: MarketplaceVersion[] }
+export interface MarketplacePlugin { id: string; name: string; description: string; repository: string; icon?: string; readme?: string; versions: MarketplaceVersion[] }
 export interface MarketplaceIndex { schemaVersion: 1; generatedAt: string; plugins: MarketplacePlugin[]; signature?: string }
 export interface MarketplaceUpdate { id: string; from: string; to: string }
 
