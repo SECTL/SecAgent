@@ -77,6 +77,7 @@ export interface PluginToolDefinition {
 
 export interface PluginStatus {
   id: string;
+  format?: "secagent" | "agent";
   name: string;
   version: string;
   icon?: string;

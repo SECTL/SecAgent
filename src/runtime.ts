@@ -45,7 +45,7 @@ export class SecAgentRuntime {
   private agent: ModelToolAgent;
   private sequence = 0;
   constructor(private config: SecAgentConfig, private audit: AuditStore, private skills: LoadedSkill[], private trace?: (event: TraceEvent) => void, private plugins?: PluginManager) {
-    this.registry = new McpRegistry(config);
+    this.registry = new McpRegistry(config, plugins?.getMcpServers());
     this.agent = new ModelToolAgent(config, skills, (stage, data) => this.emit(stage, data), () => this.plugins?.getPromptContributions() ?? Promise.resolve([]));
   }
   async run(input: string, reasoningEffort: ReasoningEffort = "high", conversation?: ConversationMessage[], signal?: AbortSignal, state: { previousAutoLoadedSkills?: string[]; previousReadSkillNames?: string[] } = {}): Promise<RunResult> {
@@ -70,6 +70,7 @@ export class SecAgentRuntime {
     this.emit("model.agent.result", { message });
     return { kind: "completed", message, autoLoadedSkills: prepared.loaded.map((skill) => skill.name) };
   }
+  async close(): Promise<void> { await this.registry.close(); }
   private prepareAutoLoadedSkills(conversation: ConversationMessage[] | undefined, state: { previousAutoLoadedSkills?: string[]; previousReadSkillNames?: string[] }): { conversation?: ConversationMessage[]; loaded: LoadedSkill[] } {
     const history = conversation?.slice() || [];
     const current = [...history].reverse().find((message) => message.role === "user");

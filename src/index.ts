@@ -155,6 +155,7 @@ async function openRuntime(workspace: string, modelId: string | undefined, trace
 
 async function closeRuntime(handle: RuntimeHandle | undefined): Promise<void> {
   if (!handle) return;
+  await handle.runtime.close().catch(() => undefined);
   await handle.plugins.shutdown().catch(() => undefined);
   handle.audit.close();
 }

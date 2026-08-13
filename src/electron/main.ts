@@ -664,6 +664,7 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
   let traceSequence = 0;
   const toolCalls: ToolCallRecord[] = [];
   const activities: AssistantActivity[] = [];
+  let runtime: SecAgentRuntime | undefined;
   const isWakeRequest = Boolean(wakeWindow && wakeWindow.webContents.id === _event.sender.id);
   if (isWakeRequest) wakeAbortController = abortController;
   const trace = (event: Omit<TraceEvent, "sequence" | "at"> | TraceEvent) => {
@@ -710,7 +711,7 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
     const runtimeConfig = isWakeRequest
       ? { ...config, agent: { ...config.agent, systemPrompt: `${config.agent.systemPrompt}\n\n## 快速唤起输出协议\n${QUICK_WAKE_OUTPUT_PROMPT}` } }
       : config;
-    const runtime = new SecAgentRuntime(runtimeConfig, audit, skills, trace, pluginManager);
+    runtime = new SecAgentRuntime(runtimeConfig, audit, skills, trace, pluginManager);
     const previousReadSkillNames = before.messages.flatMap((message) => message.toolCalls || []).filter((call) => call.name === "secagent__read_skill" || call.name === "read_skill").map((call) => typeof (call.arguments as { name?: unknown })?.name === "string" ? (call.arguments as { name: string }).name : "");
     const result = await runtime.run(historyInput(before, text), selectedReasoningEffort, conversationInput(before, text, attachments), abortController.signal, { previousAutoLoadedSkills: before.autoLoadedSkills, previousReadSkillNames });
     if (result.autoLoadedSkills?.length) {
@@ -735,6 +736,7 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
   } finally {
     if (activeSessionRuns.get(id) === abortController) activeSessionRuns.delete(id);
     if (wakeAbortController === abortController) wakeAbortController = undefined;
+    await runtime?.close().catch(() => undefined);
     audit.close();
   }
 });

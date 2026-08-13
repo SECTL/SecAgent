@@ -3,14 +3,32 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import AdmZip from "adm-zip";
+import YAML from "yaml";
 import type { LoadedSkill, SkillAutoLoadPattern } from "./skills.js";
 import type { PluginStatus, PluginToolDefinition } from "./types.js";
 
 const API_VERSION = 1;
 const MAX_PACKAGE_BYTES = 25 * 1024 * 1024;
 
+type PluginFormat = "secagent" | "agent";
+
+export interface PluginMcpServer {
+  pluginId: string;
+  name: string;
+  root: string;
+  dataRoot: string;
+  type: "stdio" | "streamable-http" | "sse";
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+  url?: string;
+  headers?: Record<string, string>;
+}
+
 interface PluginManifest {
   apiVersion: number;
+  format: PluginFormat;
   id: string;
   name: string;
   version: string;
@@ -22,10 +40,15 @@ interface PluginManifest {
   readme?: string;
   permissions?: string[];
   settingsPages?: Array<{ id: string; title: string; description?: string }>;
+  agentSchema?: string;
 }
 interface InstalledPlugin { id: string; version: string; enabled: boolean }
 interface PluginStateFile { plugins: InstalledPlugin[] }
-interface ActivePlugin { manifest: PluginManifest; root: string; state: PluginStatus["state"]; message?: string; tools: Map<string, { definition: PluginToolDefinition; call: (args: Record<string, unknown>) => Promise<unknown> }>; skills: Map<string, { file: string; autoLoadPattern?: SkillAutoLoadPattern }>; prompts: Map<string, PluginPromptProvider>; settingsHandlers?: Map<string, (action: string, args: Record<string, unknown>) => Promise<unknown>>; dispose?: () => void | Promise<void> }
+interface ActivePlugin { manifest: PluginManifest; root: string; state: PluginStatus["state"]; message?: string; tools: Map<string, { definition: PluginToolDefinition; call: (args: Record<string, unknown>) => Promise<unknown> }>; skills: Map<string, { file: string; autoLoadPattern?: SkillAutoLoadPattern }>; mcpServers: Map<string, PluginMcpServer>; prompts: Map<string, PluginPromptProvider>; settingsHandlers?: Map<string, (action: string, args: Record<string, unknown>) => Promise<unknown>>; dispose?: () => void | Promise<void> }
+
+function isAgentPluginName(value: string): boolean {
+  return value.length >= 1 && value.length <= 64 && /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(value) && !value.includes("--") && !value.includes("..");
+}
 
 /** 插件注册的提示词：静态文本，或每次用户发消息时求值的提供器。 */
 export type PluginPromptProvider = string | (() => string | Promise<string>);
@@ -68,6 +91,7 @@ export class PluginManager {
   private readonly installedRoot: string;
   private readonly runtimeRoot: string;
   private readonly configRoot: string;
+  private readonly dataRoot: string;
   private readonly statePath: string;
   private active = new Map<string, ActivePlugin>();
   private state: PluginStateFile = { plugins: [] };
@@ -81,6 +105,7 @@ export class PluginManager {
     this.installedRoot = path.join(workspace, "plugins", "installed");
     this.runtimeRoot = path.join(workspace, ".secagent-runtime", "plugins");
     this.configRoot = path.join(workspace, "plugins", "config");
+    this.dataRoot = path.join(workspace, "plugins", "data");
     this.statePath = path.join(workspace, "plugins", "plugins.json");
   }
 
@@ -100,6 +125,7 @@ export class PluginManager {
       const manifest = active?.manifest || this.readManifest(path.join(this.installedRoot, installed.id, installed.version));
       return {
         id: installed.id,
+        format: manifest?.format,
         name: manifest?.name || installed.id,
         version: installed.version,
         icon: manifest ? this.readIcon(path.join(this.installedRoot, installed.id, installed.version), manifest) : undefined,
@@ -124,9 +150,12 @@ export class PluginManager {
     for (const entry of zip.getEntries()) {
       if (entry.entryName.includes("..") || path.isAbsolute(entry.entryName) || entry.entryName.startsWith("/")) throw new Error(`插件包包含不安全路径：${entry.entryName}`);
     }
-    const manifestEntry = zip.getEntry("secagent-plugin.json");
-    if (!manifestEntry) throw new Error("插件包缺少 secagent-plugin.json");
-    const manifest = this.validateManifest(JSON.parse(manifestEntry.getData().toString("utf8")));
+    const ownManifestEntry = this.findArchiveManifest(zip, "secagent-plugin.json");
+    const agentManifestEntry = this.findArchiveManifest(zip, "plugin.json");
+    if (ownManifestEntry && agentManifestEntry) throw new Error("插件包不能同时包含两种根清单");
+    const manifestEntry = ownManifestEntry || agentManifestEntry;
+    if (!manifestEntry) throw new Error("插件包缺少 secagent-plugin.json 或 plugin.json");
+    const manifest = this.validateManifest(JSON.parse(manifestEntry.getData().toString("utf8")), ownManifestEntry ? "secagent" : "agent");
     const previous = this.state.plugins.find((item) => item.id === manifest.id);
     const pluginRoot = path.join(this.installedRoot, manifest.id);
     const target = path.join(this.installedRoot, manifest.id, manifest.version);
@@ -134,10 +163,11 @@ export class PluginManager {
     try {
       fs.mkdirSync(staging, { recursive: true });
       zip.extractAllTo(staging, true);
+      const extractedRoot = this.findPackageRoot(staging, manifest.format === "secagent" ? "secagent-plugin.json" : "plugin.json");
       if (previous) await this.deactivate(manifest.id);
       if (fs.existsSync(pluginRoot)) fs.rmSync(pluginRoot, { recursive: true, force: true });
       fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.renameSync(staging, target);
+      fs.renameSync(extractedRoot, target);
       this.state.plugins = this.state.plugins.filter((item) => item.id !== manifest.id);
       this.state.plugins.push({ id: manifest.id, version: manifest.version, enabled: previous?.enabled ?? true });
       this.saveState();
@@ -184,6 +214,7 @@ export class PluginManager {
     return skills;
   }
   getTools(): PluginToolDefinition[] { return [...this.active.values()].flatMap((plugin) => [...plugin.tools.values()].map((item) => item.definition)); }
+  getMcpServers(): PluginMcpServer[] { return [...this.active.values()].flatMap((plugin) => [...plugin.mcpServers.values()]); }
   /** 收集所有激活插件注册的提示词；单个提供器失败时记录错误并跳过，不中断其他插件。 */
   async getPromptContributions(): Promise<PluginPromptContribution[]> {
     const contributions: PluginPromptContribution[] = [];
@@ -221,12 +252,18 @@ export class PluginManager {
     if (!installed || this.active.has(id)) return;
     const root = path.join(this.installedRoot, installed.id, installed.version);
     const manifest = this.readManifest(root);
-    if (!manifest) { this.active.set(id, { manifest: { apiVersion: API_VERSION, id, name: id, version: installed.version }, root, state: "error", message: "找不到或无法读取插件清单", tools: new Map(), skills: new Map(), prompts: new Map() }); this.changed(); return; }
-    const plugin: ActivePlugin = { manifest, root, state: "starting", tools: new Map(), skills: new Map(), prompts: new Map(), settingsHandlers: new Map() };
+    if (!manifest) { this.active.set(id, { manifest: { format: "secagent", apiVersion: API_VERSION, id, name: id, version: installed.version }, root, state: "error", message: "找不到或无法读取插件清单", tools: new Map(), skills: new Map(), mcpServers: new Map(), prompts: new Map() }); this.changed(); return; }
+    const plugin: ActivePlugin = { manifest, root, state: "starting", tools: new Map(), skills: new Map(), mcpServers: new Map(), prompts: new Map(), settingsHandlers: new Map() };
     this.active.set(id, plugin); this.changed();
     try {
+      if (manifest.format === "agent") {
+        this.activateAgentPlugin(plugin);
+        plugin.state = "ready";
+        this.changed();
+        return;
+      }
       if (!manifest.main) throw new Error("插件清单缺少 main 入口");
-      const entry = this.safeRelative(root, manifest.main);
+      const entry = this.safeRelative(root, manifest.main!);
       if (!fs.existsSync(entry)) throw new Error(`找不到主入口：${manifest.main}`);
       const mod = await import(`${pathToFileURL(entry).href}?v=${Date.now()}`) as { activate?: (api: PluginHostApi) => void | (() => void) | Promise<void | (() => void)> };
       if (typeof mod.activate !== "function") throw new Error("插件主入口必须导出 activate(api)");
@@ -340,7 +377,12 @@ export class PluginManager {
       if (stat.isDirectory()) this.assertSafeSkillTree(file);
     }
   }
-  private readManifest(root: string): PluginManifest | undefined { try { return this.validateManifest(JSON.parse(fs.readFileSync(path.join(root, "secagent-plugin.json"), "utf8"))); } catch { return undefined; } }
+  private readManifest(root: string): PluginManifest | undefined {
+    for (const [file, format] of [["secagent-plugin.json", "secagent"], ["plugin.json", "agent"]] as const) {
+      try { return this.validateManifest(JSON.parse(fs.readFileSync(path.join(root, file), "utf8")), format); } catch { /* Try the other supported format. */ }
+    }
+    return undefined;
+  }
   private readReadme(root: string, manifest: PluginManifest): string | undefined {
     const requested = manifest.readme || "README.md";
     try {
@@ -364,12 +406,105 @@ export class PluginManager {
       return undefined;
     }
   }
-  private validateManifest(input: unknown): PluginManifest {
+  private findPackageRoot(staging: string, manifestFile: string): string {
+    if (fs.existsSync(path.join(staging, manifestFile))) return staging;
+    const children = fs.readdirSync(staging, { withFileTypes: true });
+    const candidates = children.filter((entry) => entry.isDirectory() && fs.existsSync(path.join(staging, entry.name, manifestFile)));
+    if (candidates.length === 1 && children.every((entry) => entry.name === candidates[0].name || entry.name === ".DS_Store")) return path.join(staging, candidates[0].name);
+    throw new Error(`插件包根目录缺少 ${manifestFile}`);
+  }
+  private findArchiveManifest(zip: AdmZip, fileName: string) {
+    const entries = zip.getEntries().filter((entry) => entry.entryName === fileName || entry.entryName.endsWith(`/${fileName}`));
+    return entries.length === 1 ? entries[0] : undefined;
+  }
+  private activateAgentPlugin(plugin: ActivePlugin): void {
+    const skillsRoot = path.join(plugin.root, "skills");
+    if (fs.existsSync(skillsRoot)) {
+      if (!fs.statSync(skillsRoot).isDirectory()) console.error(`[secagent] Agent Plugin ${plugin.manifest.id} 的 skills 不是目录`);
+      else {
+        for (const entry of fs.readdirSync(skillsRoot, { withFileTypes: true })) {
+          if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+          const sourceRoot = path.join(skillsRoot, entry.name);
+          const skillFile = path.join(sourceRoot, "SKILL.md");
+          try {
+            const stat = fs.lstatSync(skillFile);
+            if (!stat.isFile() || !this.isValidAgentSkill(skillFile)) continue;
+            this.assertSafeSkillTree(sourceRoot);
+            const destination = path.join(this.runtimeRoot, plugin.manifest.id, plugin.manifest.version, "skills", entry.name);
+            fs.rmSync(destination, { recursive: true, force: true });
+            fs.mkdirSync(path.dirname(destination), { recursive: true });
+            fs.cpSync(sourceRoot, destination, { recursive: true, dereference: false });
+            plugin.skills.set(entry.name, { file: path.join(destination, "SKILL.md") });
+          } catch (error) {
+            console.error(`[secagent] 跳过无效 Agent Skill ${plugin.manifest.id}/${entry.name}: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+      }
+    }
+    this.loadAgentMcp(plugin);
+  }
+  private isValidAgentSkill(file: string): boolean {
+    const content = fs.readFileSync(file, "utf8");
+    const match = content.match(/^---\s*\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n|$)/);
+    if (!match) return false;
+    const metadata = YAML.parse(match[1]) as { name?: unknown; description?: unknown } | null;
+    return typeof metadata?.name === "string" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(metadata.name) && typeof metadata.description === "string" && metadata.description.trim().length > 0;
+  }
+  private loadAgentMcp(plugin: ActivePlugin): void {
+    const file = path.join(plugin.root, "mcp.json");
+    if (!fs.existsSync(file)) return;
+    try {
+      const raw = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
+      if (!raw || raw.$schema !== "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json" || !raw.mcpServers || typeof raw.mcpServers !== "object" || Array.isArray(raw.mcpServers) || Object.keys(raw).some((key) => key !== "$schema" && key !== "mcpServers")) throw new Error("mcp.json 顶层格式无效");
+      for (const [name, value] of Object.entries(raw.mcpServers as Record<string, unknown>)) {
+        try {
+          const server = this.validateAgentMcpServer(plugin, name, value);
+          if (server) plugin.mcpServers.set(name, server);
+        } catch (error) { console.error(`[secagent] 跳过无效 Agent MCP ${plugin.manifest.id}/${name}: ${error instanceof Error ? error.message : String(error)}`); }
+      }
+    } catch (error) { console.error(`[secagent] 禁用 Agent Plugin ${plugin.manifest.id} 的 MCP：${error instanceof Error ? error.message : String(error)}`); }
+  }
+  private validateAgentMcpServer(plugin: ActivePlugin, name: string, input: unknown): PluginMcpServer {
+    if (!input || typeof input !== "object" || Array.isArray(input) || !/^[a-zA-Z0-9._-]+$/.test(name)) throw new Error("服务名称或配置无效");
+    const data = input as Record<string, unknown>;
+    const type = data.type;
+    if (type !== "stdio" && type !== "streamable-http" && type !== "sse") throw new Error("不支持的 MCP transport");
+    const allowed = type === "stdio" ? new Set(["type", "command", "args", "env", "cwd"]) : new Set(["type", "url", "headers"]);
+    if (Object.keys(data).some((key) => !allowed.has(key))) throw new Error("MCP server 包含未知字段");
+    const result: PluginMcpServer = { pluginId: plugin.manifest.id, name, root: plugin.root, dataRoot: path.join(this.dataRoot, plugin.manifest.id), type };
+    if (type === "stdio") {
+      if (typeof data.command !== "string" || !data.command || /[\s\0]/.test(data.command) || data.command.startsWith("../") || data.command.startsWith("..\\")) throw new Error("stdio command 必须是单个可执行 token 或 ./ 相对路径");
+      if (data.args !== undefined && (!Array.isArray(data.args) || data.args.some((item) => typeof item !== "string"))) throw new Error("stdio args 必须是字符串数组");
+      if (data.env !== undefined && (!data.env || typeof data.env !== "object" || Array.isArray(data.env) || Object.values(data.env as object).some((item) => typeof item !== "string"))) throw new Error("stdio env 无效");
+      if (data.cwd !== undefined && typeof data.cwd !== "string") throw new Error("stdio cwd 无效");
+      result.command = data.command; result.args = data.args as string[] | undefined; result.env = data.env as Record<string, string> | undefined; result.cwd = data.cwd as string | undefined;
+    } else {
+      if (typeof data.url !== "string") throw new Error("HTTP MCP 缺少 url");
+      const url = new URL(data.url);
+      if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("MCP url 必须使用 http/https");
+      if (url.protocol === "http:" && !["127.0.0.1", "localhost", "::1", "[::1]"].includes(url.hostname)) throw new Error("非本地 MCP url 必须使用 HTTPS");
+      if (data.headers !== undefined && (!data.headers || typeof data.headers !== "object" || Array.isArray(data.headers) || Object.values(data.headers as object).some((item) => typeof item !== "string"))) throw new Error("HTTP headers 无效");
+      result.url = data.url; result.headers = data.headers as Record<string, string> | undefined;
+    }
+    return result;
+  }
+  private validateManifest(input: unknown, format: PluginFormat): PluginManifest {
+    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("插件清单必须是 JSON 对象");
+    const raw = input as Record<string, unknown>;
+    if (format === "agent") {
+      const name = raw.name;
+      if (raw.$schema !== "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json" || typeof name !== "string" || !isAgentPluginName(name)) throw new Error("无效 Agent Plugins 清单：需要受支持的 $schema 和合法 name");
+      for (const field of ["version", "description", "homepage", "repository", "license"] as const) if (raw[field] !== undefined && typeof raw[field] !== "string") throw new Error(`Agent Plugins ${field} 必须是字符串`);
+      if (raw.keywords !== undefined && (!Array.isArray(raw.keywords) || raw.keywords.some((item) => typeof item !== "string"))) throw new Error("Agent Plugins keywords 必须是字符串数组");
+      if (raw.author !== undefined && (!raw.author || typeof raw.author !== "object" || Array.isArray(raw.author) || Object.keys(raw.author as object).some((key) => !["name", "email", "url"].includes(key)) || Object.values(raw.author as object).some((item) => typeof item !== "string"))) throw new Error("Agent Plugins author 无效");
+      const author = raw.author as { name?: string } | undefined;
+      return { format, apiVersion: API_VERSION, id: name, name, version: typeof raw.version === "string" && raw.version ? raw.version : "0.0.0", description: raw.description as string | undefined, author: author?.name, repository: typeof raw.repository === "string" ? raw.repository : undefined, readme: "README.md", agentSchema: raw.$schema };
+    }
     const data = input as Partial<PluginManifest>;
     if (data.apiVersion !== API_VERSION || !data.id || !/^[a-z][a-z0-9-]*$/.test(data.id) || !data.name || !data.version) throw new Error("无效插件清单：需要 apiVersion=1、合法 id、name 和 version");
     if (data.main && (!data.main.endsWith(".mjs") || data.main.includes(".."))) throw new Error("main 必须是包内 .mjs 文件");
     if (data.icon !== undefined && (typeof data.icon !== "string" || !data.icon || path.isAbsolute(data.icon) || data.icon.includes(".."))) throw new Error("icon 必须是包内的图标文件");
-    return { apiVersion: API_VERSION, id: data.id, name: data.name, version: data.version, main: data.main, icon: data.icon, description: data.description, author: data.author, repository: data.repository, readme: data.readme, permissions: data.permissions || [], settingsPages: data.settingsPages || [] };
+    return { format, apiVersion: API_VERSION, id: data.id, name: data.name, version: data.version, main: data.main, icon: data.icon, description: data.description, author: data.author, repository: data.repository, readme: data.readme, permissions: data.permissions || [], settingsPages: data.settingsPages || [] };
   }
   private readState(): PluginStateFile { try { const raw = JSON.parse(fs.readFileSync(this.statePath, "utf8")) as PluginStateFile; return { plugins: Array.isArray(raw.plugins) ? raw.plugins : [] }; } catch { return { plugins: [] }; } }
   private saveState(): void { fs.mkdirSync(path.dirname(this.statePath), { recursive: true }); fs.writeFileSync(this.statePath, `${JSON.stringify(this.state, null, 2)}\n`, "utf8"); }

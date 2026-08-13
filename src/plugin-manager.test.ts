@@ -145,3 +145,37 @@ export function activate(api) {
     fs.rmSync(workspace, { recursive: true, force: true });
   }
 });
+
+test("loads an Agent Plugin package with nested archive root, skills, and MCP metadata", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-agent-plugin-"));
+  const archivePath = path.join(workspace, "agent-plugin.zip");
+  const archive = new AdmZip() as unknown as { addFile(name: string, data: Buffer): void; writeZip(file: string): void };
+  const root = "agent-package/";
+  archive.addFile(`${root}plugin.json`, Buffer.from(JSON.stringify({
+    $schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+    name: "acme.tools",
+    version: "1.2.3",
+    description: "Portable tools",
+    repository: "https://example.com/acme/tools"
+  })));
+  archive.addFile(`${root}skills/deploy/SKILL.md`, Buffer.from("---\nname: deploy\ndescription: Deploy the service safely.\n---\n# Deploy\n"));
+  archive.addFile(`${root}skills/broken/SKILL.md`, Buffer.from("This is not an Agent Skill."));
+  archive.addFile(`${root}mcp.json`, Buffer.from(JSON.stringify({
+    $schema: "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+    mcpServers: { local: { type: "stdio", command: "./bin/server", args: ["--data", "${PLUGIN_DATA}"] } }
+  })));
+  archive.writeZip(archivePath);
+  const manager = new PluginManager(workspace);
+  try {
+    await manager.initialize();
+    const status = await manager.install(archivePath);
+    assert.equal(status.id, "acme.tools");
+    assert.equal(status.format, "agent");
+    assert.equal(status.version, "1.2.3");
+    assert.deepEqual(manager.getSkills().map((skill) => skill.name), ["acme.tools/deploy"]);
+    assert.deepEqual(manager.getMcpServers().map((server) => `${server.pluginId}/${server.name}/${server.type}`), ["acme.tools/local/stdio"]);
+  } finally {
+    await manager.shutdown();
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
