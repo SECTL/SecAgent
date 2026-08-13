@@ -22,7 +22,11 @@ export class MarketplaceClient {
     const index = await response.json() as MarketplaceIndex;
     if (index.schemaVersion !== 1 || !Array.isArray(index.plugins)) throw new Error("插件市场索引格式无效");
     this.verifyIndex(index);
-    return index.plugins.filter((plugin) => plugin.versions.some((version) => version.minHostApiVersion <= 1 && version.platforms.includes(process.platform)));
+    const compatible = index.plugins.filter((plugin) => plugin.versions.some((version) => version.minHostApiVersion <= 1 && version.platforms.includes(process.platform)));
+    return Promise.all(compatible.map(async (plugin) => {
+      const readme = await resolveMarketplaceReadme(plugin.readme);
+      return readme === plugin.readme ? plugin : { ...plugin, readme };
+    }));
   }
   async install(manager: PluginManager, version: MarketplaceVersion): Promise<void> {
     if (!isAllowedMarketUrl(version.assetUrl) || !/^[a-fA-F0-9]{64}$/.test(version.sha256)) throw new Error("市场插件资产信息无效");
@@ -98,5 +102,18 @@ function isAllowedMarketUrl(value: string): boolean {
     return url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]", "::1"].includes(url.hostname);
   } catch {
     return false;
+  }
+}
+
+async function resolveMarketplaceReadme(value?: string): Promise<string | undefined> {
+  if (!value || !/^https:\/\//i.test(value)) return value;
+  if (!isAllowedMarketUrl(value)) return undefined;
+  try {
+    const response = await fetch(value, { signal: AbortSignal.timeout(12_000) });
+    if (!response.ok) return undefined;
+    const readme = await response.text();
+    return readme.length <= 1024 * 1024 ? readme : undefined;
+  } catch {
+    return undefined;
   }
 }
