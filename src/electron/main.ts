@@ -453,11 +453,12 @@ ipcMain.handle("official:balance", async () => {
   loadConfig(DEFAULT_WORKSPACE);
   const token = process.env.SECTL_OFFICIAL_TOKEN;
   const baseUrl = (process.env.SECTL_OFFICIAL_API_URL || "").replace(/\/$/, "");
-  if (!token || !baseUrl) return { points: null };
+  if (!token || !baseUrl) return { points: null, expired: false };
   const response = await fetch(`${baseUrl}/account`, { headers: { Authorization: `Bearer ${token}` } });
   const payload = await response.json().catch(() => ({})) as { points?: number; detail?: string };
+  if (response.status === 401) return { points: null, expired: true };
   if (!response.ok || typeof payload.points !== "number") throw new Error(payload.detail || "无法获取 Points 余额");
-  return { points: payload.points };
+  return { points: payload.points, expired: false };
 });
 ipcMain.handle("official:login", async (_event, email: string, password: string) => {
   loadConfig(DEFAULT_WORKSPACE);

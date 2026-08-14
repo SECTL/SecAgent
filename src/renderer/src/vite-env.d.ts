@@ -24,7 +24,7 @@ interface Window {
     listProviders(): Promise<ProviderPreset[]>;
     getSettings(): Promise<SettingsPayload>;
     officialStatus(): Promise<{ loggedIn: boolean; email: string }>;
-    officialBalance(): Promise<{ points: number | null }>;
+    officialBalance(): Promise<{ points: number | null; expired: boolean }>;
     officialOAuthLogin(): Promise<SettingsPayload>;
     officialLogout(): Promise<{ loggedIn: boolean }>;
     saveSettings(payload: SettingsPayload): Promise<SettingsPayload>;
