@@ -20,6 +20,7 @@ import { MarketplaceClient, type MarketplacePlugin, type MarketplaceVersion } fr
 import { SecAgentHttpServer } from "../secagent-http.js";
 import { Models } from "@opencode-ai/models";
 import { DEFAULT_WAKE_HOTKEY, normalizeWakeHotkey } from "../wake-hotkey.js";
+import { generateSessionTitle } from "../session-title.js";
 
 let windowRef: BrowserWindow | undefined;
 let settingsWindow: BrowserWindow | undefined;
@@ -680,6 +681,13 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
   const activities: AssistantActivity[] = [];
   let runtime: SecAgentRuntime | undefined;
   const isWakeRequest = Boolean(wakeWindow && wakeWindow.webContents.id === _event.sender.id);
+  const shouldGenerateTitle = !before.messages.some((message) => message.role === "user");
+  const titlePromise = shouldGenerateTitle
+    ? generateSessionTitle(config, text, attachments, abortController.signal).catch((error) => {
+      logMain("session.title.failed", { sessionId: id, error: error instanceof Error ? error.message : String(error) });
+      return "";
+    })
+    : Promise.resolve("");
   if (isWakeRequest) wakeAbortController = abortController;
   const trace = (event: Omit<TraceEvent, "sequence" | "at"> | TraceEvent) => {
     // The main process owns the sequence so its own request/error events and runtime events share
@@ -735,9 +743,13 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
       sessionStore.setAutoLoadedSkills(id, current.autoLoadedSkills);
     }
     sessionStore.appendMessage(id, "assistant", result.message, toolCalls, activities);
+    const title = await titlePromise;
+    if (title) sessionStore.setTitle(id, title);
     trace({ stage: "assistant.response", data: { text: result.message } });
     return sessionStore.get(id);
   } catch (error) {
+    const title = await titlePromise;
+    if (title) sessionStore.setTitle(id, title);
     if (abortController.signal.aborted) {
       sessionStore.appendMessage(id, "assistant", "", toolCalls, activities, undefined, true);
       trace({ stage: "runtime.stopped", data: { toolCount: toolCalls.length } });

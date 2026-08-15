@@ -21,3 +21,16 @@ test("restores only the latest session run from the runtime log", () => {
     fs.rmSync(workspace, { recursive: true, force: true });
   }
 });
+
+test("persists a generated session title in the session index", () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-session-title-"));
+  try {
+    const store = new SessionStore(workspace);
+    const session = store.create();
+    store.setTitle(session.meta.id, "整理课程安排");
+    assert.equal(store.get(session.meta.id).meta.title, "整理课程安排");
+    assert.equal(store.list()[0]?.title, "整理课程安排");
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});

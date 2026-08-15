@@ -186,14 +186,14 @@ function toGoogleSchema(input: unknown): Record<string, unknown> {
 
 export class ModelToolAgent {
   private agent: SecAgentConfig["agent"];
-  constructor(config: SecAgentConfig, _skills: LoadedSkill[], private trace?: ModelTrace, private getExtraPrompts?: () => Promise<PluginPromptContribution[]>) {
-    const skillCatalog = _skills.length
+  constructor(config: SecAgentConfig, _skills: LoadedSkill[], private trace?: ModelTrace, private getExtraPrompts?: () => Promise<PluginPromptContribution[]>, includeRuntimePrompts = true, private allowEmptyTools = false) {
+    const skillCatalog = includeRuntimePrompts && _skills.length
       ? `\n\n## 可用 Skills\n${_skills.map((skill) => `- ${skill.name}: ${skill.description}（入口文件：${skill.relativePath || skill.path}）`).join("\n")}`
       : "";
-    this.agent = { ...config.agent, systemPrompt: `${config.agent.systemPrompt}${skillCatalog}${WORKSPACE_FILE_OUTPUT_PROMPT}` };
+    this.agent = { ...config.agent, systemPrompt: includeRuntimePrompts ? `${config.agent.systemPrompt}${skillCatalog}${WORKSPACE_FILE_OUTPUT_PROMPT}` : config.agent.systemPrompt };
   }
   async run(instruction: string, tools: AgentTool[], execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high", conversation?: ConversationMessage[], signal?: AbortSignal): Promise<string> {
-    if (!tools.length) throw new Error("没有已启用且可发现的 MCP 工具");
+    if (!tools.length && !this.allowEmptyTools) throw new Error("没有已启用且可发现的 MCP 工具");
     const key = process.env[this.agent.apiKeyEnv];
     if (!key) throw new Error(`未配置模型密钥环境变量 ${this.agent.apiKeyEnv}。请设置后重试；密钥不要写入 secagent.yaml。`);
     const systemPrompt = await this.resolveSystemPrompt();

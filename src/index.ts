@@ -11,6 +11,7 @@ import { SecScoreMcpAdapter } from "./mcp-adapter.js";
 import { PluginManager } from "./plugin-manager.js";
 import { SessionStore, type AssistantActivity, type SessionData, type ToolCallRecord } from "./session-store.js";
 import type { ReasoningEffort } from "./types.js";
+import { generateSessionTitle } from "./session-title.js";
 
 type CliOptions = {
   workspace: string;
@@ -25,6 +26,7 @@ type RuntimeHandle = {
   runtime: SecAgentRuntime;
   audit: AuditStore;
   plugins: PluginManager;
+  config: ReturnType<typeof loadConfig>["config"];
 };
 
 function usage(): string {
@@ -158,7 +160,7 @@ async function openRuntime(workspace: string, modelId: string | undefined, trace
   const plugins = new PluginManager(workspace);
   await plugins.initialize();
   const skills = [...loadEnabledSkills(config), ...plugins.getSkills()];
-  return { runtime: new SecAgentRuntime(config, audit, skills, trace, plugins), audit, plugins };
+  return { runtime: new SecAgentRuntime(config, audit, skills, trace, plugins), audit, plugins, config };
 }
 
 async function closeRuntime(handle: RuntimeHandle | undefined): Promise<void> {
@@ -205,6 +207,7 @@ async function runSessionMessage(options: CliOptions, sessionId: string | undefi
   const before = sessionId ? sessions.get(sessionId) : sessions.create();
   const created = !sessionId;
   const id = before.meta.id;
+  const shouldGenerateTitle = !before.messages.some((message) => message.role === "user");
   const toolCalls: ToolCallRecord[] = [];
   const activities: AssistantActivity[] = [];
   const printer = new CliTracePrinter(options.verbose);
@@ -219,12 +222,18 @@ async function runSessionMessage(options: CliOptions, sessionId: string | undefi
   sessions.appendMessage(id, "user", text);
   trace({ sequence: 0, at: new Date().toISOString(), stage: "user.request", data: { text } });
   let handle: RuntimeHandle | undefined;
+  let titlePromise: Promise<string> = Promise.resolve("");
   try {
     handle = await openRuntime(options.workspace, options.modelId, trace);
+    titlePromise = shouldGenerateTitle
+      ? generateSessionTitle(handle.config, text).catch(() => "")
+      : Promise.resolve("");
     const previousReadSkillNames = before.messages.flatMap((message) => message.toolCalls || []).filter((call) => call.name === "secagent__read_skill" || call.name === "read_skill").map((call) => typeof (call.arguments as { name?: unknown })?.name === "string" ? (call.arguments as { name: string }).name : "");
     const result = await handle.runtime.run(historyInput(before, text), options.reasoningEffort, conversationInput(before, text), undefined, { previousAutoLoadedSkills: before.autoLoadedSkills, previousReadSkillNames });
     if (result.autoLoadedSkills?.length) sessions.setAutoLoadedSkills(id, [...new Set([...(before.autoLoadedSkills || []), ...result.autoLoadedSkills])]);
     sessions.appendMessage(id, "assistant", result.message, toolCalls, activities);
+    const title = await titlePromise;
+    if (title) sessions.setTitle(id, title);
     trace({ sequence: 0, at: new Date().toISOString(), stage: "assistant.response", data: { text: result.message } });
     printer.finishStream();
     process.stdout.write(`[final] ${result.message}\n`);
@@ -232,6 +241,8 @@ async function runSessionMessage(options: CliOptions, sessionId: string | undefi
   } catch (error) {
     const message = `Execution failed: ${error instanceof Error ? error.message : String(error)}`;
     sessions.appendMessage(id, "assistant", message, toolCalls, activities);
+    const title = await titlePromise;
+    if (title) sessions.setTitle(id, title);
     trace({ sequence: 0, at: new Date().toISOString(), stage: "runtime.error", data: { message } });
     printer.finishStream();
     process.stderr.write(`${message}\n`);

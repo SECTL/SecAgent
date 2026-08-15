@@ -55,6 +55,16 @@ export class SessionStore {
     this.writeIndex(this.readIndex().map((item) => item.id === id ? session.meta : item));
     return session;
   }
+  setTitle(id: string, title: string): SessionData {
+    const session = this.get(id);
+    const cleanTitle = title.trim();
+    if (!cleanTitle) return session;
+    session.meta.title = cleanTitle;
+    session.meta.updatedAt = new Date().toISOString();
+    this.writeSession(session);
+    this.writeIndex(this.readIndex().map((item) => item.id === id ? session.meta : item));
+    return session;
+  }
   appendRuntimeEvent(id: string, event: { sequence?: number; at?: string; stage: string; data: unknown }): void {
     const entry = JSON.stringify({ at: new Date().toISOString(), ...event }) + "\n";
     fs.appendFileSync(path.join(this.sessionDir(id), "runtime.jsonl"), entry, "utf8");
