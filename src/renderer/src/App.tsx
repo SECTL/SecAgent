@@ -74,22 +74,32 @@ export function App() {
     if (!bridge || initializing.current) return;
     initializing.current = true;
     void (async () => {
-      const [list, configured] = await Promise.all([bridge.listSessions(), bridge.listModels()]);
-      const active = list[0] ? await bridge.getSession(list[0].id) : await bridge.createSession();
-      const savedSettings = await bridge.getSettings();
+      // The remote official model catalog can be slow or temporarily unavailable.
+      // Start it in the background so restoring the session remains responsive.
+      const modelsPromise = bridge.listModels()
+        .then((configured) => {
+          setModels(configured);
+          return configured;
+        })
+        .catch(() => [] as ModelOption[]);
+      const list = await bridge.listSessions();
+      const [active, savedSettings] = await Promise.all([
+        list[0] ? bridge.getSession(list[0].id) : bridge.createSession(),
+        bridge.getSettings()
+      ]);
       const customMode = Boolean(savedSettings.customModelMode);
       setCustomModelMode(customMode);
-      setModels(configured);
+      const defaultReasoning = (savedSettings.defaultReasoningEffort || "high") as ReasoningEffort;
+      setDefaultEffort(defaultReasoning);
+      setReasoningEffort(defaultReasoning);
+      setSessions(list);
+      setSession(active);
+      requestAnimationFrame(() => textareaRef.current?.focus());
+      const configured = await modelsPromise;
       const preferred = configured.find((model) => model.id === savedSettings.defaultModelId)
         || configured.find((model) => isOfficialTierModel(model) && model.model === tierDefaultId)
         || configured[0];
       setSelectedModelId(preferred?.id || "");
-      const defaultReasoning = (savedSettings.defaultReasoningEffort || "high") as ReasoningEffort;
-      setDefaultEffort(defaultReasoning);
-      setReasoningEffort(defaultReasoning);
-      setSessions(await bridge.listSessions());
-      setSession(active);
-      requestAnimationFrame(() => textareaRef.current?.focus());
     })();
   }, [bridge]);
 
