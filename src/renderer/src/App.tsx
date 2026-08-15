@@ -300,7 +300,16 @@ export function App() {
     return "tool";
   }, [activeTrace]);
   const latestAssistantId = useMemo(() => session?.messages.filter((message) => message.role === "assistant").at(-1)?.id, [session?.messages]);
-  const changeSession = async (id: string) => { if (bridge) { setSession(await bridge.getSession(id)); setTrace([]); } };
+  const changeSession = async (id: string) => {
+    if (!bridge) return;
+    const [next, runtimeEvents] = await Promise.all([bridge.getSession(id), bridge.getRuntimeEvents(id)]);
+    setSession(next);
+    setTrace((current) => {
+      const merged = new Map(current.map((item) => [`${item.sessionId}:${item.sequence}`, item]));
+      for (const item of runtimeEvents) merged.set(`${item.sessionId}:${item.sequence}`, item);
+      return [...merged.values()].sort((left, right) => left.sessionId.localeCompare(right.sessionId) || left.sequence - right.sequence);
+    });
+  };
   const createSession = async () => { if (bridge) { const next = await bridge.createSession(); setSessions(await bridge.listSessions()); setSession(next); setTrace([]); requestAnimationFrame(() => textareaRef.current?.focus()); } };
   const deleteSession = async (id: string) => {
     if (!bridge) return;

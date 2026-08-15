@@ -11,6 +11,7 @@ export type AssistantActivity =
   | { kind: "tool"; name: string; arguments: unknown; result?: unknown };
 export interface SessionMessage { id: string; role: "user" | "assistant"; content: string; createdAt: string; attachments?: ChatAttachment[]; toolCalls?: ToolCallRecord[]; activities?: AssistantActivity[]; stopped?: boolean }
 export interface SessionData { meta: SessionMeta; messages: SessionMessage[]; autoLoadedSkills?: string[] }
+export interface SessionRuntimeEvent { sequence: number; at: string; stage: string; data: unknown }
 
 export class SessionStore {
   private root: string;
@@ -54,9 +55,26 @@ export class SessionStore {
     this.writeIndex(this.readIndex().map((item) => item.id === id ? session.meta : item));
     return session;
   }
-  appendRuntimeEvent(id: string, event: { stage: string; data: unknown }): void {
+  appendRuntimeEvent(id: string, event: { sequence?: number; at?: string; stage: string; data: unknown }): void {
     const entry = JSON.stringify({ at: new Date().toISOString(), ...event }) + "\n";
     fs.appendFileSync(path.join(this.sessionDir(id), "runtime.jsonl"), entry, "utf8");
+  }
+  getRuntimeEvents(id: string): SessionRuntimeEvent[] {
+    const file = path.join(this.sessionDir(id), "runtime.jsonl");
+    if (!fs.existsSync(file)) return [];
+    const events = fs.readFileSync(file, "utf8").split("\n").flatMap((line): SessionRuntimeEvent[] => {
+      if (!line) return [];
+      try {
+        const event = JSON.parse(line) as Partial<SessionRuntimeEvent>;
+        return typeof event.sequence === "number" && typeof event.at === "string" && typeof event.stage === "string"
+          ? [{ sequence: event.sequence, at: event.at, stage: event.stage, data: event.data }]
+          : [];
+      } catch {
+        return [];
+      }
+    });
+    const lastRequest = events.findLastIndex((event) => event.stage === "user.request");
+    return lastRequest >= 0 ? events.slice(lastRequest) : events;
   }
   setAutoLoadedSkills(id: string, skills: string[]): void {
     const session = this.get(id);
