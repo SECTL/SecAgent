@@ -137,7 +137,15 @@ function conversationInput(session: SessionData, current: string): ConversationM
   const history = session.messages.slice(-20).map((message) => ({
     role: message.role,
     content: message.content,
-    ...(message.attachments?.length ? { attachments: message.attachments } : {})
+    ...(message.attachments?.length ? { attachments: message.attachments } : {}),
+    ...(message.toolCalls?.length ? {
+      toolCalls: message.toolCalls.map((call, index) => ({
+        id: `history-${message.id}-${index}`,
+        name: call.name,
+        arguments: call.arguments && typeof call.arguments === "object" && !Array.isArray(call.arguments) ? call.arguments as Record<string, unknown> : {},
+        ...(call.result !== undefined ? { result: call.result } : {})
+      }))
+    } : {})
   }));
   if (history[0]?.role === "assistant") history.shift();
   return [...history, { role: "user", content: current }];

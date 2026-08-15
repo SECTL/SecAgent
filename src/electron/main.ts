@@ -355,7 +355,19 @@ function historyInput(session: SessionData, current: string): string {
 }
 
 function conversationInput(session: SessionData, current: string, attachments: ChatAttachment[] = []): ConversationMessage[] {
-  const history = session.messages.slice(-20).map((message) => ({ role: message.role, content: message.content, ...(message.attachments?.length ? { attachments: message.attachments } : {}) }));
+  const history = session.messages.slice(-20).map((message) => ({
+    role: message.role,
+    content: message.content,
+    ...(message.attachments?.length ? { attachments: message.attachments } : {}),
+    ...(message.toolCalls?.length ? {
+      toolCalls: message.toolCalls.map((call, index) => ({
+        id: `history-${message.id}-${index}`,
+        name: call.name,
+        arguments: call.arguments && typeof call.arguments === "object" && !Array.isArray(call.arguments) ? call.arguments as Record<string, unknown> : {},
+        ...(call.result !== undefined ? { result: call.result } : {})
+      }))
+    } : {})
+  }));
   // Anthropic requires a conversation to start with a user turn. A 20-message window can
   // otherwise start at an assistant turn when older messages were truncated.
   if (history[0]?.role === "assistant") history.shift();
