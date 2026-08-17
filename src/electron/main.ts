@@ -682,7 +682,8 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
   let runtime: SecAgentRuntime | undefined;
   const isWakeRequest = Boolean(wakeWindow && wakeWindow.webContents.id === _event.sender.id);
   const shouldGenerateTitle = !before.messages.some((message) => message.role === "user");
-  const titlePromise = shouldGenerateTitle
+  const preRule = await pluginManager?.matchPreRule(text);
+  const titlePromise = shouldGenerateTitle && !preRule
     ? generateSessionTitle(config, text, attachments, abortController.signal).catch((error) => {
       logMain("session.title.failed", { sessionId: id, error: error instanceof Error ? error.message : String(error) });
       return "";
@@ -735,7 +736,7 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
       : config;
     runtime = new SecAgentRuntime(runtimeConfig, audit, skills, trace, pluginManager);
     const previousReadSkillNames = before.messages.flatMap((message) => message.toolCalls || []).filter((call) => call.name === "secagent__read_skill" || call.name === "read_skill").map((call) => typeof (call.arguments as { name?: unknown })?.name === "string" ? (call.arguments as { name: string }).name : "");
-    const result = await runtime.run(historyInput(before, text), selectedReasoningEffort, conversationInput(before, text, attachments), abortController.signal, { previousAutoLoadedSkills: before.autoLoadedSkills, previousReadSkillNames });
+    const result = await runtime.run(historyInput(before, text), selectedReasoningEffort, conversationInput(before, text, attachments), abortController.signal, { previousAutoLoadedSkills: before.autoLoadedSkills, previousReadSkillNames, preRule });
     if (result.autoLoadedSkills?.length) {
       const current = sessionStore.get(id);
       current.autoLoadedSkills = [...new Set([...(current.autoLoadedSkills || []), ...result.autoLoadedSkills])];
