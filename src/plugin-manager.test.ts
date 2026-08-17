@@ -46,6 +46,42 @@ export function activate(api) {
   }
 });
 
+test("plugin pre-rules resolve a structured tool action without model involvement", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-plugin-pre-rule-"));
+  const archivePath = path.join(workspace, "pre-rule-test.zip");
+  const archive = new AdmZip() as unknown as { addFile(name: string, data: Buffer): void; writeZip(file: string): void };
+  archive.addFile("secagent-plugin.json", Buffer.from(JSON.stringify({
+    apiVersion: 1,
+    id: "pre-rule-test",
+    name: "Pre-rule test",
+    version: "1.0.0",
+    main: "main.mjs",
+    permissions: ["agent.tools", "agent.pre_rules"]
+  })));
+  archive.addFile("main.mjs", Buffer.from(`
+export function activate(api) {
+  api.registerTool({ name: "draw", description: "draw", hidden: true, inputSchema: { type: "object" } }, async (args) => ({ students: [{ name: args.name || "Alice" }] }));
+  api.registerPreRule("draw_command", (input) => input === "点名" ? { tool: "draw", arguments: { name: "Alice" }, render: (result) => result.students[0].name } : undefined);
+}
+`));
+  archive.writeZip(archivePath);
+
+  try {
+    const manager = new PluginManager(workspace);
+    await manager.initialize();
+    await manager.install(archivePath);
+    const match = await manager.matchPreRule("点名");
+    assert.ok(match);
+    assert.equal(match?.toolKey, "pre-rule-test__draw");
+    assert.deepEqual(match?.arguments, { name: "Alice" });
+    assert.equal(await match?.render?.(await manager.callTool(match.toolKey, match.arguments)), "Alice");
+    assert.equal(await manager.matchPreRule("普通问题"), undefined);
+    await manager.shutdown();
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("installing a newer version replaces the active plugin", async () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-plugin-update-"));
   const createArchive = (version: string, marker: string): string => {

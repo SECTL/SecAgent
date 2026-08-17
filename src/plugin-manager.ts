@@ -44,7 +44,7 @@ interface PluginManifest {
 }
 interface InstalledPlugin { id: string; version: string; enabled: boolean }
 interface PluginStateFile { plugins: InstalledPlugin[] }
-interface ActivePlugin { manifest: PluginManifest; root: string; state: PluginStatus["state"]; message?: string; tools: Map<string, { definition: PluginToolDefinition; call: (args: Record<string, unknown>) => Promise<unknown> }>; skills: Map<string, { file: string; autoLoadPattern?: SkillAutoLoadPattern }>; mcpServers: Map<string, PluginMcpServer>; prompts: Map<string, PluginPromptProvider>; settingsHandlers?: Map<string, (action: string, args: Record<string, unknown>) => Promise<unknown>>; dispose?: () => void | Promise<void> }
+interface ActivePlugin { manifest: PluginManifest; root: string; state: PluginStatus["state"]; message?: string; tools: Map<string, { definition: PluginToolDefinition; call: (args: Record<string, unknown>) => Promise<unknown> }>; skills: Map<string, { file: string; autoLoadPattern?: SkillAutoLoadPattern }>; mcpServers: Map<string, PluginMcpServer>; prompts: Map<string, PluginPromptProvider>; preRules: Map<string, PluginPreRuleMatcher>; settingsHandlers?: Map<string, (action: string, args: Record<string, unknown>) => Promise<unknown>>; dispose?: () => void | Promise<void> }
 
 function isAgentPluginName(value: string): boolean {
   return value.length >= 1 && value.length <= 64 && /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(value) && !value.includes("--") && !value.includes("..");
@@ -52,6 +52,25 @@ function isAgentPluginName(value: string): boolean {
 
 /** 插件注册的提示词：静态文本，或每次用户发消息时求值的提供器。 */
 export type PluginPromptProvider = string | (() => string | Promise<string>);
+
+/** A structured action returned by a plugin pre-rule matcher. */
+export interface PluginPreRuleMatch {
+  /** Tool name relative to the registering plugin. */
+  tool: string;
+  arguments: Record<string, unknown>;
+  /** Optional deterministic renderer for the tool result. */
+  render?: (result: unknown) => string | Promise<string>;
+}
+
+export type PluginPreRuleMatcher = (input: string) => PluginPreRuleMatch | null | undefined | Promise<PluginPreRuleMatch | null | undefined>;
+
+export interface ResolvedPluginPreRule {
+  pluginId: string;
+  name: string;
+  toolKey: string;
+  arguments: Record<string, unknown>;
+  render?: (result: unknown) => string | Promise<string>;
+}
 
 /** 一次求值后来自某个插件的提示词片段，按插件注册顺序收集。 */
 export interface PluginPromptContribution { pluginId: string; name: string; text: string }
@@ -70,6 +89,8 @@ export interface PluginHostApi {
   unregisterSkill(name: string): void;
   registerPrompt(name: string, provider: PluginPromptProvider): void;
   unregisterPrompt(name: string): void;
+  registerPreRule(name: string, matcher: PluginPreRuleMatcher): void;
+  unregisterPreRule(name: string): void;
   registerSettingsHandler(pageId: string, handler: (action: string, args: Record<string, unknown>) => Promise<unknown>): void;
   unregisterSettingsHandler(pageId: string): void;
   getSectlSession(): Promise<{ accessToken: string; userId?: string; email?: string; name?: string } | null>;
@@ -215,6 +236,31 @@ export class PluginManager {
   }
   getTools(): PluginToolDefinition[] { return [...this.active.values()].flatMap((plugin) => [...plugin.tools.values()].map((item) => item.definition)); }
   getMcpServers(): PluginMcpServer[] { return [...this.active.values()].flatMap((plugin) => [...plugin.mcpServers.values()]); }
+  async matchPreRule(input: string): Promise<ResolvedPluginPreRule | undefined> {
+    for (const plugin of this.active.values()) {
+      for (const [name, matcher] of plugin.preRules) {
+        let match: PluginPreRuleMatch | null | undefined;
+        try {
+          match = await matcher(input);
+        } catch (error) {
+          console.error(`[secagent] 插件 ${plugin.manifest.id} 的前置规则 ${name} 匹配失败：${error instanceof Error ? error.message : String(error)}`);
+          continue;
+        }
+        if (!match) continue;
+        if (!match || typeof match !== "object" || typeof match.tool !== "string" || !/^[a-z][a-z0-9_]*$/.test(match.tool) || !match.arguments || typeof match.arguments !== "object" || Array.isArray(match.arguments) || (match.render !== undefined && typeof match.render !== "function")) {
+          console.error(`[secagent] 插件 ${plugin.manifest.id} 的前置规则 ${name} 返回了无效动作`);
+          continue;
+        }
+        const toolKey = `${plugin.manifest.id}__${match.tool}`;
+        if (!plugin.tools.has(toolKey)) {
+          console.error(`[secagent] 插件 ${plugin.manifest.id} 的前置规则 ${name} 引用了未注册工具 ${match.tool}`);
+          continue;
+        }
+        return { pluginId: plugin.manifest.id, name, toolKey, arguments: match.arguments, render: match.render };
+      }
+    }
+    return undefined;
+  }
   /** 收集所有激活插件注册的提示词；单个提供器失败时记录错误并跳过，不中断其他插件。 */
   async getPromptContributions(): Promise<PluginPromptContribution[]> {
     const contributions: PluginPromptContribution[] = [];
@@ -252,8 +298,8 @@ export class PluginManager {
     if (!installed || this.active.has(id)) return;
     const root = path.join(this.installedRoot, installed.id, installed.version);
     const manifest = this.readManifest(root);
-    if (!manifest) { this.active.set(id, { manifest: { format: "secagent", apiVersion: API_VERSION, id, name: id, version: installed.version }, root, state: "error", message: "找不到或无法读取插件清单", tools: new Map(), skills: new Map(), mcpServers: new Map(), prompts: new Map() }); this.changed(); return; }
-    const plugin: ActivePlugin = { manifest, root, state: "starting", tools: new Map(), skills: new Map(), mcpServers: new Map(), prompts: new Map(), settingsHandlers: new Map() };
+    if (!manifest) { this.active.set(id, { manifest: { format: "secagent", apiVersion: API_VERSION, id, name: id, version: installed.version }, root, state: "error", message: "找不到或无法读取插件清单", tools: new Map(), skills: new Map(), mcpServers: new Map(), prompts: new Map(), preRules: new Map() }); this.changed(); return; }
+    const plugin: ActivePlugin = { manifest, root, state: "starting", tools: new Map(), skills: new Map(), mcpServers: new Map(), prompts: new Map(), preRules: new Map(), settingsHandlers: new Map() };
     this.active.set(id, plugin); this.changed();
     try {
       if (manifest.format === "agent") {
@@ -323,6 +369,13 @@ export class PluginManager {
         plugin.prompts.set(name, provider); this.changed();
       },
       unregisterPrompt: (name) => { plugin.prompts.delete(name); this.changed(); },
+      registerPreRule: (name, matcher) => {
+        requirePermission("agent.pre_rules");
+        if (!/^[a-z][a-z0-9_]*$/.test(name)) throw new Error("插件前置规则名称只能使用小写字母、数字和下划线");
+        if (typeof matcher !== "function") throw new Error("插件前置规则必须是函数");
+        plugin.preRules.set(name, matcher); this.changed();
+      },
+      unregisterPreRule: (name) => { plugin.preRules.delete(name); this.changed(); },
       registerSettingsHandler: (pageId, handler) => {
         requirePermission("agent.settings");
         if (!/^[a-z][a-z0-9_-]*$/.test(pageId)) throw new Error("插件设置页 ID 无效");

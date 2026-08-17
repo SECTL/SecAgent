@@ -9,6 +9,7 @@ import type { ConversationMessage } from "./model-provider.js";
 import type { LoadedSkill } from "./skills.js";
 import { callPiTool, piTools } from "./pi-tools.js";
 import { PluginManager } from "./plugin-manager.js";
+import type { ResolvedPluginPreRule } from "./plugin-manager.js";
 import { summarizeToolResult } from "./tool-content.js";
 
 export type RunResult =
@@ -48,8 +49,17 @@ export class SecAgentRuntime {
     this.registry = new McpRegistry(config, plugins?.getMcpServers());
     this.agent = new ModelToolAgent(config, skills, (stage, data) => this.emit(stage, data), () => this.plugins?.getPromptContributions() ?? Promise.resolve([]));
   }
-  async run(input: string, reasoningEffort: ReasoningEffort = "high", conversation?: ConversationMessage[], signal?: AbortSignal, state: { previousAutoLoadedSkills?: string[]; previousReadSkillNames?: string[] } = {}): Promise<RunResult> {
+  async run(input: string, reasoningEffort: ReasoningEffort = "high", conversation?: ConversationMessage[], signal?: AbortSignal, state: { previousAutoLoadedSkills?: string[]; previousReadSkillNames?: string[]; preRule?: ResolvedPluginPreRule } = {}): Promise<RunResult> {
     signal?.throwIfAborted();
+    const currentUserMessage = [...(conversation || [])].reverse().find((message) => message.role === "user")?.content || input;
+    const preRule = state.preRule || await this.plugins?.matchPreRule(currentUserMessage);
+    if (preRule) {
+      this.emit("secagent.pre-rule/match", { pluginId: preRule.pluginId, name: preRule.name, tool: preRule.toolKey, arguments: preRule.arguments });
+      const result = await this.callTool(input, preRule.toolKey, preRule.arguments);
+      const message = preRule.render ? await preRule.render(result) : this.renderPreRuleResult(result);
+      this.emit("secagent.pre-rule/result", { pluginId: preRule.pluginId, name: preRule.name, tool: preRule.toolKey, result: summarizeToolResult(result) });
+      return { kind: "completed", message: message || this.renderPreRuleResult(result) };
+    }
     const mcpTools = await this.registry.discover();
     for (const error of this.registry.getDiscoveryErrors()) this.emit("mcp.tools/error", error);
     const pluginTools = this.plugins?.getTools() || [];
@@ -151,5 +161,9 @@ export class SecAgentRuntime {
   }
   private emit(stage: string, data: unknown): void {
     this.trace?.({ sequence: ++this.sequence, at: new Date().toISOString(), stage, data });
+  }
+  private renderPreRuleResult(result: unknown): string {
+    if (typeof result === "string") return result;
+    try { return JSON.stringify(result); } catch { return String(result); }
   }
 }
