@@ -83,7 +83,13 @@ export class SessionStore {
         return [];
       }
     });
-    const lastRequest = events.findLastIndex((event) => event.stage === "user.request");
+    let lastRequest = -1;
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      if (events[index].stage === "user.request") {
+        lastRequest = index;
+        break;
+      }
+    }
     return lastRequest >= 0 ? events.slice(lastRequest) : events;
   }
   setAutoLoadedSkills(id: string, skills: string[]): void {
