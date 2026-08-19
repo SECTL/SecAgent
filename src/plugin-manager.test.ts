@@ -74,6 +74,42 @@ export function activate(api) {
   }
 });
 
+test("plugin pre-rules resolve a structured tool action without model involvement", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-plugin-pre-rule-"));
+  const archivePath = path.join(workspace, "pre-rule-test.zip");
+  const archive = new AdmZip() as unknown as { addFile(name: string, data: Buffer): void; writeZip(file: string): void };
+  archive.addFile("secagent-plugin.json", Buffer.from(JSON.stringify({
+    apiVersion: 1,
+    id: "pre-rule-test",
+    name: "Pre-rule test",
+    version: "1.0.0",
+    main: "main.mjs",
+    permissions: ["agent.tools", "agent.pre_rules"]
+  })));
+  archive.addFile("main.mjs", Buffer.from(`
+export function activate(api) {
+  api.registerTool({ name: "draw", description: "draw", hidden: true, inputSchema: { type: "object" } }, async (args) => ({ students: [{ name: args.name || "Alice" }] }));
+  api.registerPreRule("draw_command", (input) => input === "点名" ? { tool: "draw", arguments: { name: "Alice" }, render: (result) => result.students[0].name } : undefined);
+}
+`));
+  archive.writeZip(archivePath);
+
+  try {
+    const manager = new PluginManager(workspace);
+    await manager.initialize();
+    await manager.install(archivePath);
+    const match = await manager.matchPreRule("点名");
+    assert.ok(match);
+    assert.equal(match?.toolKey, "pre-rule-test__draw");
+    assert.deepEqual(match?.arguments, { name: "Alice" });
+    assert.equal(await match?.render?.(await manager.callTool(match.toolKey, match.arguments)), "Alice");
+    assert.equal(await manager.matchPreRule("普通问题"), undefined);
+    await manager.shutdown();
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("installing a newer version replaces the active plugin", async () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-plugin-update-"));
   const createArchive = (version: string, marker: string): string => {
@@ -168,6 +204,40 @@ export function activate(api) {
     await manager.initialize();
     await manager.install(archivePath);
     await assert.rejects(() => manager.callTool("preview-permission-test__preview", { svg: "<svg></svg>" }), /agent\.preview/);
+  } finally {
+    await manager.shutdown();
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("loads an Agent Plugin package with nested archive root, skills, and MCP metadata", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-agent-plugin-"));
+  const archivePath = path.join(workspace, "agent-plugin.zip");
+  const archive = new AdmZip() as unknown as { addFile(name: string, data: Buffer): void; writeZip(file: string): void };
+  const root = "agent-package/";
+  archive.addFile(`${root}plugin.json`, Buffer.from(JSON.stringify({
+    $schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+    name: "acme.tools",
+    version: "1.2.3",
+    description: "Portable tools",
+    repository: "https://example.com/acme/tools"
+  })));
+  archive.addFile(`${root}skills/deploy/SKILL.md`, Buffer.from("---\nname: deploy\ndescription: Deploy the service safely.\n---\n# Deploy\n"));
+  archive.addFile(`${root}skills/broken/SKILL.md`, Buffer.from("This is not an Agent Skill."));
+  archive.addFile(`${root}mcp.json`, Buffer.from(JSON.stringify({
+    $schema: "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+    mcpServers: { local: { type: "stdio", command: "./bin/server", args: ["--data", "${PLUGIN_DATA}"] } }
+  })));
+  archive.writeZip(archivePath);
+  const manager = new PluginManager(workspace);
+  try {
+    await manager.initialize();
+    const status = await manager.install(archivePath);
+    assert.equal(status.id, "acme.tools");
+    assert.equal(status.format, "agent");
+    assert.equal(status.version, "1.2.3");
+    assert.deepEqual(manager.getSkills().map((skill) => skill.name), ["acme.tools/deploy"]);
+    assert.deepEqual(manager.getMcpServers().map((server) => `${server.pluginId}/${server.name}/${server.type}`), ["acme.tools/local/stdio"]);
   } finally {
     await manager.shutdown();
     fs.rmSync(workspace, { recursive: true, force: true });

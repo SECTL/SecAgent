@@ -11,6 +11,7 @@ import { SecScoreMcpAdapter } from "./mcp-adapter.js";
 import { PluginManager } from "./plugin-manager.js";
 import { SessionStore, type AssistantActivity, type SessionData, type ToolCallRecord } from "./session-store.js";
 import type { ReasoningEffort } from "./types.js";
+import { generateSessionTitle } from "./session-title.js";
 
 type CliOptions = {
   workspace: string;
@@ -25,6 +26,7 @@ type RuntimeHandle = {
   runtime: SecAgentRuntime;
   audit: AuditStore;
   plugins: PluginManager;
+  config: ReturnType<typeof loadConfig>["config"];
 };
 
 function usage(): string {
@@ -137,7 +139,15 @@ function conversationInput(session: SessionData, current: string): ConversationM
   const history = session.messages.slice(-20).map((message) => ({
     role: message.role,
     content: message.content,
-    ...(message.attachments?.length ? { attachments: message.attachments } : {})
+    ...(message.attachments?.length ? { attachments: message.attachments } : {}),
+    ...(message.toolCalls?.length ? {
+      toolCalls: message.toolCalls.map((call, index) => ({
+        id: `history-${message.id}-${index}`,
+        name: call.name,
+        arguments: call.arguments && typeof call.arguments === "object" && !Array.isArray(call.arguments) ? call.arguments as Record<string, unknown> : {},
+        ...(call.result !== undefined ? { result: call.result } : {})
+      }))
+    } : {})
   }));
   if (history[0]?.role === "assistant") history.shift();
   return [...history, { role: "user", content: current }];
@@ -150,11 +160,12 @@ async function openRuntime(workspace: string, modelId: string | undefined, trace
   const plugins = new PluginManager(workspace);
   await plugins.initialize();
   const skills = [...loadEnabledSkills(config), ...plugins.getSkills()];
-  return { runtime: new SecAgentRuntime(config, audit, skills, trace, plugins), audit, plugins };
+  return { runtime: new SecAgentRuntime(config, audit, skills, trace, plugins), audit, plugins, config };
 }
 
 async function closeRuntime(handle: RuntimeHandle | undefined): Promise<void> {
   if (!handle) return;
+  await handle.runtime.close().catch(() => undefined);
   await handle.plugins.shutdown().catch(() => undefined);
   handle.audit.close();
 }
@@ -196,6 +207,7 @@ async function runSessionMessage(options: CliOptions, sessionId: string | undefi
   const before = sessionId ? sessions.get(sessionId) : sessions.create();
   const created = !sessionId;
   const id = before.meta.id;
+  const shouldGenerateTitle = !before.messages.some((message) => message.role === "user");
   const toolCalls: ToolCallRecord[] = [];
   const activities: AssistantActivity[] = [];
   const printer = new CliTracePrinter(options.verbose);
@@ -210,12 +222,19 @@ async function runSessionMessage(options: CliOptions, sessionId: string | undefi
   sessions.appendMessage(id, "user", text);
   trace({ sequence: 0, at: new Date().toISOString(), stage: "user.request", data: { text } });
   let handle: RuntimeHandle | undefined;
+  let titlePromise: Promise<string> = Promise.resolve("");
   try {
     handle = await openRuntime(options.workspace, options.modelId, trace);
+    const preRule = await handle.plugins.matchPreRule(text);
+    titlePromise = shouldGenerateTitle && !preRule
+      ? generateSessionTitle(handle.config, text).catch(() => "")
+      : Promise.resolve("");
     const previousReadSkillNames = before.messages.flatMap((message) => message.toolCalls || []).filter((call) => call.name === "secagent__read_skill" || call.name === "read_skill").map((call) => typeof (call.arguments as { name?: unknown })?.name === "string" ? (call.arguments as { name: string }).name : "");
-    const result = await handle.runtime.run(historyInput(before, text), options.reasoningEffort, conversationInput(before, text), undefined, { previousAutoLoadedSkills: before.autoLoadedSkills, previousReadSkillNames });
+    const result = await handle.runtime.run(historyInput(before, text), options.reasoningEffort, conversationInput(before, text), undefined, { previousAutoLoadedSkills: before.autoLoadedSkills, previousReadSkillNames, preRule });
     if (result.autoLoadedSkills?.length) sessions.setAutoLoadedSkills(id, [...new Set([...(before.autoLoadedSkills || []), ...result.autoLoadedSkills])]);
     sessions.appendMessage(id, "assistant", result.message, toolCalls, activities);
+    const title = await titlePromise;
+    if (title) sessions.setTitle(id, title);
     trace({ sequence: 0, at: new Date().toISOString(), stage: "assistant.response", data: { text: result.message } });
     printer.finishStream();
     process.stdout.write(`[final] ${result.message}\n`);
@@ -223,6 +242,8 @@ async function runSessionMessage(options: CliOptions, sessionId: string | undefi
   } catch (error) {
     const message = `Execution failed: ${error instanceof Error ? error.message : String(error)}`;
     sessions.appendMessage(id, "assistant", message, toolCalls, activities);
+    const title = await titlePromise;
+    if (title) sessions.setTitle(id, title);
     trace({ sequence: 0, at: new Date().toISOString(), stage: "runtime.error", data: { message } });
     printer.finishStream();
     process.stderr.write(`${message}\n`);

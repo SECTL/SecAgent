@@ -20,6 +20,7 @@ import { MarketplaceClient, type MarketplacePlugin, type MarketplaceVersion } fr
 import { SecAgentHttpServer } from "../secagent-http.js";
 import { Models } from "@opencode-ai/models";
 import { DEFAULT_WAKE_HOTKEY, normalizeWakeHotkey } from "../wake-hotkey.js";
+import { generateSessionTitle } from "../session-title.js";
 
 let windowRef: BrowserWindow | undefined;
 let settingsWindow: BrowserWindow | undefined;
@@ -355,7 +356,19 @@ function historyInput(session: SessionData, current: string): string {
 }
 
 function conversationInput(session: SessionData, current: string, attachments: ChatAttachment[] = []): ConversationMessage[] {
-  const history = session.messages.slice(-20).map((message) => ({ role: message.role, content: message.content, ...(message.attachments?.length ? { attachments: message.attachments } : {}) }));
+  const history = session.messages.slice(-20).map((message) => ({
+    role: message.role,
+    content: message.content,
+    ...(message.attachments?.length ? { attachments: message.attachments } : {}),
+    ...(message.toolCalls?.length ? {
+      toolCalls: message.toolCalls.map((call, index) => ({
+        id: `history-${message.id}-${index}`,
+        name: call.name,
+        arguments: call.arguments && typeof call.arguments === "object" && !Array.isArray(call.arguments) ? call.arguments as Record<string, unknown> : {},
+        ...(call.result !== undefined ? { result: call.result } : {})
+      }))
+    } : {})
+  }));
   // Anthropic requires a conversation to start with a user turn. A 20-message window can
   // otherwise start at an assistant turn when older messages were truncated.
   if (history[0]?.role === "assistant") history.shift();
@@ -383,6 +396,7 @@ ipcMain.handle("sessions:list", () => { logMain("ipc.sessions.list"); return sto
 ipcMain.handle("sessions:create", () => { const session = store().create(); logMain("ipc.sessions.create", { sessionId: session.meta.id }); return session; });
 ipcMain.handle("sessions:delete", (_event, id: string) => { store().delete(id); logMain("ipc.sessions.delete", { sessionId: id }); return store().list(); });
 ipcMain.handle("sessions:get", (_event, id: string) => { logMain("ipc.sessions.get", { sessionId: id }); return store().get(id); });
+ipcMain.handle("sessions:runtime-events", (_event, id: string) => { logMain("ipc.sessions.runtime-events", { sessionId: id }); return store().getRuntimeEvents(id).map((item) => ({ sessionId: id, ...item })); });
 ipcMain.handle("workspace:preview-file", (_event, relativePath: string) => openWorkspaceFilePreview(relativePath));
 function officialProvider(baseUrl: string) {
   return { id: "sectl-official", name: "SecAgent 官方服务", preset: "custom", provider: "openai-responses" as const, apiKeyEnv: "SECTL_OFFICIAL_TOKEN", baseUrl: `${baseUrl}/v1`, endpoint: "/responses", maxTokens: 16384, models: [{ id: "deepseek-v4-flash", name: "DeepSeek V4 Flash" }] };
@@ -453,11 +467,12 @@ ipcMain.handle("official:balance", async () => {
   loadConfig(DEFAULT_WORKSPACE);
   const token = process.env.SECTL_OFFICIAL_TOKEN;
   const baseUrl = (process.env.SECTL_OFFICIAL_API_URL || "").replace(/\/$/, "");
-  if (!token || !baseUrl) return { points: null };
+  if (!token || !baseUrl) return { points: null, expired: false };
   const response = await fetch(`${baseUrl}/account`, { headers: { Authorization: `Bearer ${token}` } });
   const payload = await response.json().catch(() => ({})) as { points?: number; detail?: string };
+  if (response.status === 401) return { points: null, expired: true };
   if (!response.ok || typeof payload.points !== "number") throw new Error(payload.detail || "无法获取 Points 余额");
-  return { points: payload.points };
+  return { points: payload.points, expired: false };
 });
 ipcMain.handle("official:login", async (_event, email: string, password: string) => {
   loadConfig(DEFAULT_WORKSPACE);
@@ -664,7 +679,16 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
   let traceSequence = 0;
   const toolCalls: ToolCallRecord[] = [];
   const activities: AssistantActivity[] = [];
+  let runtime: SecAgentRuntime | undefined;
   const isWakeRequest = Boolean(wakeWindow && wakeWindow.webContents.id === _event.sender.id);
+  const shouldGenerateTitle = !before.messages.some((message) => message.role === "user");
+  const preRule = await pluginManager?.matchPreRule(text);
+  const titlePromise = shouldGenerateTitle && !preRule
+    ? generateSessionTitle(config, text, attachments, abortController.signal).catch((error) => {
+      logMain("session.title.failed", { sessionId: id, error: error instanceof Error ? error.message : String(error) });
+      return "";
+    })
+    : Promise.resolve("");
   if (isWakeRequest) wakeAbortController = abortController;
   const trace = (event: Omit<TraceEvent, "sequence" | "at"> | TraceEvent) => {
     // The main process owns the sequence so its own request/error events and runtime events share
@@ -710,9 +734,9 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
     const runtimeConfig = isWakeRequest
       ? { ...config, agent: { ...config.agent, systemPrompt: `${config.agent.systemPrompt}\n\n## 快速唤起输出协议\n${QUICK_WAKE_OUTPUT_PROMPT}` } }
       : config;
-    const runtime = new SecAgentRuntime(runtimeConfig, audit, skills, trace, pluginManager);
+    runtime = new SecAgentRuntime(runtimeConfig, audit, skills, trace, pluginManager);
     const previousReadSkillNames = before.messages.flatMap((message) => message.toolCalls || []).filter((call) => call.name === "secagent__read_skill" || call.name === "read_skill").map((call) => typeof (call.arguments as { name?: unknown })?.name === "string" ? (call.arguments as { name: string }).name : "");
-    const result = await runtime.run(historyInput(before, text), selectedReasoningEffort, conversationInput(before, text, attachments), abortController.signal, { previousAutoLoadedSkills: before.autoLoadedSkills, previousReadSkillNames });
+    const result = await runtime.run(historyInput(before, text), selectedReasoningEffort, conversationInput(before, text, attachments), abortController.signal, { previousAutoLoadedSkills: before.autoLoadedSkills, previousReadSkillNames, preRule });
     if (result.autoLoadedSkills?.length) {
       const current = sessionStore.get(id);
       current.autoLoadedSkills = [...new Set([...(current.autoLoadedSkills || []), ...result.autoLoadedSkills])];
@@ -720,9 +744,13 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
       sessionStore.setAutoLoadedSkills(id, current.autoLoadedSkills);
     }
     sessionStore.appendMessage(id, "assistant", result.message, toolCalls, activities);
+    const title = await titlePromise;
+    if (title) sessionStore.setTitle(id, title);
     trace({ stage: "assistant.response", data: { text: result.message } });
     return sessionStore.get(id);
   } catch (error) {
+    const title = await titlePromise;
+    if (title) sessionStore.setTitle(id, title);
     if (abortController.signal.aborted) {
       sessionStore.appendMessage(id, "assistant", "", toolCalls, activities, undefined, true);
       trace({ stage: "runtime.stopped", data: { toolCount: toolCalls.length } });
@@ -735,6 +763,7 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
   } finally {
     if (activeSessionRuns.get(id) === abortController) activeSessionRuns.delete(id);
     if (wakeAbortController === abortController) wakeAbortController = undefined;
+    await runtime?.close().catch(() => undefined);
     audit.close();
   }
 });

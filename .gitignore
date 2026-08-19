@@ -9,3 +9,6 @@ models/
 !models/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/*.onnx
 !models/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/tokens.txt
 __pycache__/
+.chrome-icon-profile/
+.tmp-icc-*/
+secagent-ce-icon-generated.png

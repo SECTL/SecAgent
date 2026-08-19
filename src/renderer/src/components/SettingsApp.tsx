@@ -31,6 +31,7 @@ export function SettingsApp() {
   const [officialPoints, setOfficialPoints] = useState<number | null>(null);
   const [officialPointsBusy, setOfficialPointsBusy] = useState(false);
   const [officialLoggedIn, setOfficialLoggedIn] = useState(false);
+  const [officialExpired, setOfficialExpired] = useState(false);
   const [officialBusy, setOfficialBusy] = useState(false);
   const settingsLoaded = useRef(false);
   const skipAutosave = useRef(true);
@@ -57,7 +58,15 @@ export function SettingsApp() {
   }, [bridge]);
   const refreshOfficialPoints = async () => {
     setOfficialPointsBusy(true);
-    try { setOfficialPoints((await bridge.officialBalance()).points); } catch { setOfficialPoints(null); } finally { setOfficialPointsBusy(false); }
+    try {
+      const result = await bridge.officialBalance();
+      setOfficialPoints(result.points);
+      setOfficialExpired(result.expired);
+      if (result.expired) {
+        setOfficialLoggedIn(false);
+        setError("登录已过期，请重新登录。");
+      }
+    } catch { setOfficialPoints(null); setOfficialExpired(false); } finally { setOfficialPointsBusy(false); }
   };
   useEffect(() => { void bridge.officialStatus().then((status) => { setOfficialLoggedIn(status.loggedIn); setOfficialEmail(status.email); if (status.loggedIn) void refreshOfficialPoints(); }).catch(() => undefined); }, [bridge]);
   useEffect(() => {
@@ -142,11 +151,11 @@ export function SettingsApp() {
   };
   const officialLogin = async () => {
     setError(""); setOfficialBusy(true);
-    try { const next = await bridge.officialOAuthLogin(); setSettings(next); setAvailableModels(await bridge.listModels()); setOfficialLoggedIn(true); setSaved(true); await refreshOfficialPoints(); }
+    try { const next = await bridge.officialOAuthLogin(); setSettings(next); setAvailableModels(await bridge.listModels()); setOfficialLoggedIn(true); setOfficialExpired(false); setSaved(true); await refreshOfficialPoints(); }
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setOfficialBusy(false); }
   };
-  const officialLogout = async () => { await bridge.officialLogout(); setOfficialLoggedIn(false); setOfficialPoints(null); setSettings((current) => current && { ...current, providers: current.providers.filter((provider) => provider.id !== "sectl-official") }); };
+  const officialLogout = async () => { await bridge.officialLogout(); setOfficialLoggedIn(false); setOfficialExpired(false); setOfficialPoints(null); setSettings((current) => current && { ...current, providers: current.providers.filter((provider) => provider.id !== "sectl-official") }); };
   const defaultModel = availableModels.find((model) => model.id === settings.defaultModelId) || availableModels.find((model) => model.id === "sectl-official") || availableModels[0];
   const defaultReasoningEfforts = reasoningEffortsForModel(defaultModel);
   const defaultReasoningEffort = defaultReasoningEfforts.includes(settings.defaultReasoningEffort || "high") ? (settings.defaultReasoningEffort || "high") : defaultReasoningEfforts.includes("high") ? "high" : defaultReasoningEfforts[0];

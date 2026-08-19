@@ -64,7 +64,8 @@ import type { LoadedSkill } from "./skills.js";
 
 type ExecuteTool = (key: string, args: Record<string, unknown>) => Promise<unknown>;
 export type AgentTool = Pick<RegisteredMcpTool, "key" | "description" | "inputSchema">;
-export interface ConversationMessage { role: "user" | "assistant" | "system"; content: string; attachments?: ChatAttachment[] }
+export interface ConversationToolCall { id: string; name: string; arguments: Record<string, unknown>; result?: unknown }
+export interface ConversationMessage { role: "user" | "assistant" | "system"; content: string; attachments?: ChatAttachment[]; toolCalls?: ConversationToolCall[] }
 type ModelTrace = (stage: string, data: unknown) => void;
 type RetryableModelError = Error & { retryable?: boolean };
 
@@ -92,6 +93,78 @@ function responsesContent(message: ConversationMessage): string | Array<Record<s
   ];
 }
 
+function toolArgumentsText(args: Record<string, unknown>): string {
+  try { return JSON.stringify(args); } catch { return "{}"; }
+}
+
+function historicalToolResult(call: ConversationToolCall): string {
+  if (call.result === undefined) return "工具未返回结果（上一轮执行被中断）";
+  return toolResultText(toolResultParts(call.result));
+}
+
+/**
+ * Session messages store a completed assistant turn as one record. Provider APIs,
+ * however, require the assistant tool-call message and its tool-result messages to
+ * be present as separate history items. Expand the persisted form before sending it.
+ */
+function openAIHistory(message: ConversationMessage): Array<Record<string, unknown>> {
+  if (message.role !== "assistant" || !message.toolCalls?.length) {
+    return [{ role: message.role, content: openAIContent(message) }];
+  }
+  const calls = message.toolCalls.map((call) => ({
+    id: call.id,
+    type: "function",
+    function: { name: call.name, arguments: toolArgumentsText(call.arguments) }
+  }));
+  return [
+    { role: "assistant", content: null, tool_calls: calls },
+    ...message.toolCalls.map((call) => ({ role: "tool", tool_call_id: call.id, content: historicalToolResult(call) })),
+    ...(message.content ? [{ role: "assistant", content: message.content }] : [])
+  ];
+}
+
+function responsesHistory(message: ConversationMessage): Array<Record<string, unknown>> {
+  if (message.role !== "assistant" || !message.toolCalls?.length) {
+    return [{ role: message.role, content: responsesContent(message) }];
+  }
+  return [
+    ...message.toolCalls.map((call) => ({ type: "function_call", call_id: call.id, name: call.name, arguments: toolArgumentsText(call.arguments) })),
+    ...message.toolCalls.map((call) => ({ type: "function_call_output", call_id: call.id, output: historicalToolResult(call) })),
+    ...(message.content ? [{ role: "assistant", content: message.content }] : [])
+  ];
+}
+
+function anthropicHistory(message: ConversationMessage): Array<Record<string, unknown>> {
+  if (message.role !== "assistant" || !message.toolCalls?.length) {
+    return [{ role: message.role, content: message.attachments?.length ? [
+      ...(message.content ? [{ type: "text", text: message.content }] : []),
+      ...(message.attachments || []).map((attachment) => { const image = dataUrlParts(attachment); return { type: "image", source: { type: "base64", media_type: image.mediaType, data: image.data } }; })
+    ] : message.content }];
+  }
+  return [
+    { role: "assistant", content: message.toolCalls.map((call) => ({ type: "tool_use", id: call.id, name: call.name, input: call.arguments })) },
+    { role: "user", content: message.toolCalls.map((call) => ({ type: "tool_result", tool_use_id: call.id, content: historicalToolResult(call) })) },
+    ...(message.content ? [{ role: "assistant", content: message.content }] : [])
+  ];
+}
+
+function googleHistory(message: ConversationMessage): Array<{ role: "user" | "model"; parts: Array<Record<string, unknown>> }> {
+  if (message.role !== "assistant" || !message.toolCalls?.length) {
+    return [{
+      role: message.role === "assistant" ? "model" : "user",
+      parts: [
+        ...(message.content ? [{ text: message.content }] : []),
+        ...(message.attachments || []).map((attachment) => { const image = dataUrlParts(attachment); return { inlineData: { mimeType: image.mediaType, data: image.data } }; })
+      ]
+    }];
+  }
+  return [
+    { role: "model", parts: message.toolCalls.map((call) => ({ functionCall: { name: call.name, args: call.arguments, id: call.id } })) },
+    { role: "user", parts: message.toolCalls.map((call) => ({ functionResponse: { name: call.name, id: call.id, response: { result: historicalToolResult(call) } } })) },
+    ...(message.content ? [{ role: "model" as const, parts: [{ text: message.content }] }] : [])
+  ];
+}
+
 function toGoogleSchema(input: unknown): Record<string, unknown> {
   const source = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
   const rawType = source.type;
@@ -113,14 +186,14 @@ function toGoogleSchema(input: unknown): Record<string, unknown> {
 
 export class ModelToolAgent {
   private agent: SecAgentConfig["agent"];
-  constructor(config: SecAgentConfig, _skills: LoadedSkill[], private trace?: ModelTrace, private getExtraPrompts?: () => Promise<PluginPromptContribution[]>) {
-    const skillCatalog = _skills.length
+  constructor(config: SecAgentConfig, _skills: LoadedSkill[], private trace?: ModelTrace, private getExtraPrompts?: () => Promise<PluginPromptContribution[]>, includeRuntimePrompts = true, private allowEmptyTools = false) {
+    const skillCatalog = includeRuntimePrompts && _skills.length
       ? `\n\n## 可用 Skills\n${_skills.map((skill) => `- ${skill.name}: ${skill.description}（入口文件：${skill.relativePath || skill.path}）`).join("\n")}`
       : "";
-    this.agent = { ...config.agent, systemPrompt: `${config.agent.systemPrompt}${skillCatalog}${WORKSPACE_FILE_OUTPUT_PROMPT}` };
+    this.agent = { ...config.agent, systemPrompt: includeRuntimePrompts ? `${config.agent.systemPrompt}${skillCatalog}${WORKSPACE_FILE_OUTPUT_PROMPT}` : config.agent.systemPrompt };
   }
   async run(instruction: string, tools: AgentTool[], execute: ExecuteTool, reasoningEffort: ReasoningEffort = "high", conversation?: ConversationMessage[], signal?: AbortSignal): Promise<string> {
-    if (!tools.length) throw new Error("没有已启用且可发现的 MCP 工具");
+    if (!tools.length && !this.allowEmptyTools) throw new Error("没有已启用且可发现的 MCP 工具");
     const key = process.env[this.agent.apiKeyEnv];
     if (!key) throw new Error(`未配置模型密钥环境变量 ${this.agent.apiKeyEnv}。请设置后重试；密钥不要写入 secagent.yaml。`);
     const systemPrompt = await this.resolveSystemPrompt();
@@ -239,7 +312,7 @@ export class ModelToolAgent {
   }
   private async runOpenAICompatible(instruction: string, tools: AgentTool[], key: string, execute: ExecuteTool, reasoningEffort: ReasoningEffort, systemPrompt: string, conversation?: ConversationMessage[], signal?: AbortSignal): Promise<string> {
     const history = conversation?.length ? conversation : [{ role: "user" as const, content: instruction }];
-    const messages: Array<Record<string, unknown>> = [{ role: "system", content: systemPrompt }, ...history.map((message) => ({ role: message.role, content: openAIContent(message) }))];
+    const messages: Array<Record<string, unknown>> = [{ role: "system", content: systemPrompt }, ...history.flatMap(openAIHistory)];
     const definitions = tools.map((tool) => ({ type: "function", function: { name: tool.key, description: tool.description || tool.key, parameters: tool.inputSchema || { type: "object", properties: {} } } }));
     let pendingToolError: string | undefined;
     let emptyResponseRetries = 0;
@@ -315,7 +388,7 @@ export class ModelToolAgent {
     type InputItem = Record<string, unknown>;
     type FunctionCall = { callId: string; itemId?: string; name: string; arguments: string };
     const history = conversation?.length ? conversation : [{ role: "user" as const, content: instruction }];
-    const input: InputItem[] = history.map((message) => ({ role: message.role, content: responsesContent(message) }));
+    const input: InputItem[] = history.flatMap(responsesHistory);
     const definitions = tools.map((tool) => ({ type: "function", name: tool.key, description: tool.description || tool.key, parameters: tool.inputSchema || { type: "object", properties: {} }, strict: false }));
     let pendingToolError: string | undefined;
     let emptyResponseRetries = 0;
@@ -448,13 +521,7 @@ export class ModelToolAgent {
     type Part = { text?: string; thought?: boolean; inlineData?: { mimeType: string; data: string }; functionCall?: { name?: string; args?: Record<string, unknown>; id?: string }; functionResponse?: { name?: string; response?: unknown; id?: string; parts?: Array<{ inlineData: { mimeType: string; data: string; displayName?: string } }> }; thoughtSignature?: string };
     const history = conversation?.length ? conversation : [{ role: "user" as const, content: instruction }];
     const dynamicSystem = history.filter((message) => message.role === "system").map((message) => message.content).join("\n\n");
-    const contents: Array<{ role: "user" | "model"; parts: Part[] }> = history.filter((message) => message.role !== "system").map((message) => ({
-      role: message.role === "assistant" ? "model" : "user",
-      parts: [
-        ...(message.content ? [{ text: message.content }] : []),
-        ...(message.attachments || []).map((attachment) => { const image = dataUrlParts(attachment); return { inlineData: { mimeType: image.mediaType, data: image.data } }; })
-      ]
-    }));
+    const contents: Array<{ role: "user" | "model"; parts: Part[] }> = history.filter((message) => message.role !== "system").flatMap(googleHistory) as Array<{ role: "user" | "model"; parts: Part[] }>;
     const definitions = tools.map((tool) => ({ name: tool.key, description: tool.description || tool.key, parameters: toGoogleSchema(tool.inputSchema || { type: "object", properties: {} }) }));
     let pendingToolError: string | undefined;
     for (let turn = 0; ; turn++) {
@@ -563,10 +630,7 @@ export class ModelToolAgent {
     // callers that do not have a persisted conversation.
     const dynamicSystem = (conversation || []).filter((message) => message.role === "system").map((message) => message.content).join("\n\n");
     const messages: Array<Record<string, unknown>> = conversation?.length
-      ? conversation.filter((message) => message.role !== "system").map((message) => ({ role: message.role, content: message.attachments?.length ? [
-        ...(message.content ? [{ type: "text", text: message.content }] : []),
-        ...(message.attachments || []).map((attachment) => { const image = dataUrlParts(attachment); return { type: "image", source: { type: "base64", media_type: image.mediaType, data: image.data } }; })
-      ] : message.content }))
+      ? conversation.filter((message) => message.role !== "system").flatMap(anthropicHistory)
       : [{ role: "user", content: instruction }];
     const definitions = tools.map((tool) => ({ name: tool.key, description: tool.description || tool.key, input_schema: tool.inputSchema || { type: "object", properties: {} } }));
     let pendingToolError: string | undefined;

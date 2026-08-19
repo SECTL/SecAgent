@@ -1,5 +1,11 @@
 # SecAgent 插件开发
 
+## Agent Plugins 兼容格式
+
+SecAgent 同时接受自有 `secagent-plugin.json` 格式和 [Agent Plugins 1.0.0](https://agent-plugins.org/) 格式。Agent Plugins 包使用根目录 `plugin.json`，可选的 `skills/<name>/SKILL.md` 会被自动发现；可选的 `mcp.json` 会被加载为 MCP 服务，其中支持 `stdio` 和 `streamable-http`，服务名会按 `<plugin-name>__<server-name>` 加前缀以避免冲突。
+
+Agent Plugins 不执行 JavaScript `activate(api)`，也不要求声明 SecAgent 私有权限。其 `plugin.json`、Skill 和 MCP 配置仍会进行本地校验；单个无效 Skill 或 MCP 服务不会阻止同一包的其他组件加载。stdio 服务的 `PLUGIN_ROOT` 和持久化 `PLUGIN_DATA` 变量由宿主提供。
+
 SecAgent 插件是可移植的 zip 包，包内包含 JavaScript、JSON、Skill 和静态资源。入口文件导出 `activate(api)`，工具 key 由宿主自动生成为 `<plugin-id>__<tool-name>`。
 
 ## 清单

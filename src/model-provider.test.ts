@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ModelToolAgent } from "./model-provider.js";
+import { ModelToolAgent, type ConversationMessage } from "./model-provider.js";
 
 function config() {
   return {
@@ -187,6 +187,38 @@ test("malformed Anthropic tool arguments are returned as a tool result", async (
     assert.equal(executeCount, 0);
     assert.match(secondRequest, /tool_result/);
     assert.match(secondRequest, /模型返回了无法解析的工具参数/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete process.env.TEST_MODEL_KEY;
+  }
+});
+
+test("persisted tool calls and results are restored to the next OpenAI request", async () => {
+  const originalFetch = globalThis.fetch;
+  process.env.TEST_MODEL_KEY = "test-key";
+  let requestBody: Record<string, unknown> | undefined;
+  globalThis.fetch = async (_url, init) => {
+    requestBody = JSON.parse(String(init?.body || "{}")) as Record<string, unknown>;
+    return response('data: {"choices":[{"delta":{"content":"continued"}}]}\n\ndata: [DONE]\n\n');
+  };
+  const conversation: ConversationMessage[] = [
+    { role: "user", content: "inspect it" },
+    {
+      role: "assistant",
+      content: "The inspection is complete.",
+      toolCalls: [{ id: "history-call-1", name: "demo", arguments: { path: "a.txt" }, result: { text: "file contents" } }]
+    },
+    { role: "user", content: "continue" }
+  ];
+  try {
+    const agent = new ModelToolAgent(config(), [], undefined);
+    await agent.run("continue", [{ key: "demo", description: "demo", inputSchema: { type: "object" } }], async () => ({}), "high", conversation);
+    const messages = requestBody?.messages as Array<Record<string, unknown>>;
+    assert.deepEqual(messages.slice(1).map((message) => message.role), ["user", "assistant", "tool", "assistant", "user"]);
+    assert.deepEqual(messages[2]?.tool_calls, [{ id: "history-call-1", type: "function", function: { name: "demo", arguments: '{"path":"a.txt"}' } }]);
+    assert.equal(messages[3]?.tool_call_id, "history-call-1");
+    assert.equal(messages[3]?.content, '{"text":"file contents"}');
+    assert.equal(messages[4]?.content, "The inspection is complete.");
   } finally {
     globalThis.fetch = originalFetch;
     delete process.env.TEST_MODEL_KEY;

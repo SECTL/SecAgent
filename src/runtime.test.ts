@@ -7,6 +7,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { LoadedSkill } from "./skills.js";
+import { AuditStore } from "./audit.js";
+import { PluginManager } from "./plugin-manager.js";
+import { SecAgentRuntime } from "./runtime.js";
+import AdmZip from "adm-zip";
 
 function skill(name: string): LoadedSkill {
   return { name, description: "test", path: `/tmp/${name}/SKILL.md`, content: "test" };
@@ -44,4 +48,37 @@ test("built-in math visualization skill auto-loads for math and diagram requests
   assert.ok(math?.autoLoadPattern);
   assert.equal(selectAutoLoadedSkills([math!], "请推导圆柱体体积公式并画一个三维示意图").length, 1);
   assert.equal(selectAutoLoadedSkills([math!], "帮我写一封普通邮件").length, 0);
+});
+
+test("a matching plugin pre-rule returns without sending a model request", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-runtime-pre-rule-"));
+  const archivePath = path.join(workspace, "pre-rule.zip");
+  const archive = new AdmZip() as unknown as { addFile(name: string, data: Buffer): void; writeZip(file: string): void };
+  archive.addFile("secagent-plugin.json", Buffer.from(JSON.stringify({ apiVersion: 1, id: "runtime-pre-rule", name: "Runtime pre-rule", version: "1.0.0", main: "main.mjs", permissions: ["agent.tools", "agent.pre_rules"] })));
+  archive.addFile("main.mjs", Buffer.from(`
+export function activate(api) {
+  api.registerTool({ name: "draw", description: "draw", hidden: true, inputSchema: { type: "object" } }, async () => ({ students: [{ name: "Alice" }] }));
+  api.registerPreRule("draw_command", (input) => input === "点名" ? { tool: "draw", arguments: {}, render: (result) => "抽到：" + result.students[0].name } : undefined);
+}
+`));
+  archive.writeZip(archivePath);
+  const manager = new PluginManager(workspace);
+  const audit = new AuditStore(workspace);
+  const traces: string[] = [];
+  const config = { workspace, agent: { provider: "openai-compatible", model: "unused", apiKeyEnv: "UNUSED", baseUrl: "http://127.0.0.1:1", endpoint: "/chat/completions", maxTokens: 100, systemPrompt: "unused" }, mcp: { servers: {} }, version: 1 } as SecAgentConfig;
+  let runtime: SecAgentRuntime | undefined;
+  try {
+    await manager.initialize();
+    await manager.install(archivePath);
+    runtime = new SecAgentRuntime(config, audit, [], (event) => traces.push(event.stage), manager);
+    const result = await runtime.run("点名", "high", [{ role: "user", content: "点名" }]);
+    assert.equal(result.message, "抽到：Alice");
+    assert.equal(traces.includes("secagent.pre-rule/match"), true);
+    assert.equal(traces.includes("model.agent.request"), false);
+  } finally {
+    await runtime?.close();
+    audit.close();
+    await manager.shutdown();
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
 });

@@ -4,6 +4,7 @@ type AssistantActivity = { kind: "thinking" | "summary" | "text"; content: strin
 interface ChatAttachment { id: string; name: string; mimeType: string; dataUrl: string; size: number }
 interface SessionMessage { id: string; role: "user" | "assistant"; content: string; createdAt: string; attachments?: ChatAttachment[]; toolCalls?: ToolCallRecord[]; activities?: AssistantActivity[]; stopped?: boolean }
 interface SessionData { meta: SessionMeta; messages: SessionMessage[] }
+interface SessionRuntimeEvent { sessionId: string; sequence: number; at: string; stage: string; data: unknown }
 type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 interface ModelOption { id: string; name: string; model: string; provider: string }
 interface ModelProfile { id: string; name?: string; enabled?: boolean; provider: "openai-compatible" | "openai-responses" | "anthropic" | "google"; model: string; apiKeyEnv: string; apiKey?: string; apiKeyConfigured?: boolean; baseUrl: string; endpoint?: string; anthropicVersion?: string; maxTokens?: number }
@@ -13,9 +14,9 @@ interface ProviderConfig { id: string; name: string; preset?: string; provider: 
 interface ProviderPreset { id: string; name: string; env: string[]; api: string; models: ProviderModel[] }
 interface SettingsPayload { providers: ProviderConfig[]; models: ModelProfile[]; tts: { voice: string; rate: string }; wake: { hotkey: string; modelId?: string; voiceEnabled?: boolean; voicePhrase?: string }; speech: { betterRecognition?: boolean }; mcp: { servers: Record<string, McpServerConfig> }; defaultModelId?: string; defaultReasoningEffort?: ReasoningEffort; customModelMode?: boolean }
 interface SkillSummary { name: string; description: string; path: string }
-interface PluginStatus { id: string; name: string; version: string; icon?: string; enabled: boolean; state: "inactive" | "starting" | "error" | "ready"; message?: string; description?: string; author?: string; repository?: string; permissions?: string[]; readme?: string; settingsPages: Array<{ id: string; title: string; description?: string }> }
+interface PluginStatus { id: string; format?: "secagent" | "agent"; name: string; version: string; icon?: string; enabled: boolean; state: "inactive" | "starting" | "error" | "ready"; message?: string; description?: string; author?: string; repository?: string; permissions?: string[]; readme?: string; settingsPages: Array<{ id: string; title: string; description?: string }> }
 interface MarketplaceVersion { version: string; minHostApiVersion: number; assetUrl: string; sha256: string; permissions: string[]; platforms: string[] }
-interface MarketplacePlugin { id: string; name: string; description: string; repository: string; icon?: string; readme?: string; versions: MarketplaceVersion[] }
+interface MarketplacePlugin { id: string; format?: "secagent" | "agent"; name: string; description: string; repository: string; icon?: string; readme?: string; versions: MarketplaceVersion[] }
 interface Window {
   secagent: {
     platform: NodeJS.Platform;
@@ -24,7 +25,7 @@ interface Window {
     listProviders(): Promise<ProviderPreset[]>;
     getSettings(): Promise<SettingsPayload>;
     officialStatus(): Promise<{ loggedIn: boolean; email: string }>;
-    officialBalance(): Promise<{ points: number | null }>;
+    officialBalance(): Promise<{ points: number | null; expired: boolean }>;
     officialOAuthLogin(): Promise<SettingsPayload>;
     officialLogout(): Promise<{ loggedIn: boolean }>;
     saveSettings(payload: SettingsPayload): Promise<SettingsPayload>;
@@ -41,6 +42,7 @@ interface Window {
     createSession(): Promise<SessionData>;
     deleteSession(id: string): Promise<SessionMeta[]>;
     getSession(id: string): Promise<SessionData>;
+    getRuntimeEvents(id: string): Promise<SessionRuntimeEvent[]>;
     previewWorkspaceFile(relativePath: string): Promise<{ ok: true }>;
     sendMessage(id: string, text: string, modelId?: string, reasoningEffort?: ReasoningEffort, attachments?: ChatAttachment[]): Promise<SessionData>;
     stopMessage(id: string): Promise<{ ok: true; stopped: boolean }>;
