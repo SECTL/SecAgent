@@ -25,13 +25,19 @@ interface PluginManifest {
 }
 interface InstalledPlugin { id: string; version: string; enabled: boolean }
 interface PluginStateFile { plugins: InstalledPlugin[] }
-interface ActivePlugin { manifest: PluginManifest; root: string; state: PluginStatus["state"]; message?: string; tools: Map<string, { definition: PluginToolDefinition; call: (args: Record<string, unknown>) => Promise<unknown> }>; skills: Map<string, { file: string; autoLoadPattern?: SkillAutoLoadPattern }>; prompts: Map<string, PluginPromptProvider>; settingsHandlers?: Map<string, (action: string, args: Record<string, unknown>) => Promise<unknown>>; dispose?: () => void | Promise<void> }
+interface ActivePlugin { manifest: PluginManifest; root: string; state: PluginStatus["state"]; message?: string; tools: Map<string, { definition: PluginToolDefinition; call: (args: Record<string, unknown>) => Promise<unknown> }>; skills: Map<string, { file: string; autoLoadPattern?: SkillAutoLoadPattern }>; prompts: Map<string, PluginPromptProvider>; rules: Map<string, { pattern: { source: string; flags: string }; handle: PluginRuleHandler }>; settingsHandlers?: Map<string, (action: string, args: Record<string, unknown>) => Promise<unknown>>; dispose?: () => void | Promise<void> }
 
 /** 插件注册的提示词：静态文本，或每次用户发消息时求值的提供器。 */
 export type PluginPromptProvider = string | (() => string | Promise<string>);
 
 /** 一次求值后来自某个插件的提示词片段，按插件注册顺序收集。 */
 export interface PluginPromptContribution { pluginId: string; name: string; text: string }
+
+/** 前置规则的处理结果：直接回答，或继续请求模型并附加一次性系统消息。 */
+export type PluginRuleDecision =
+  | { kind: "reply"; message: string }
+  | { kind: "llm"; systemMessage?: string };
+export type PluginRuleHandler = (input: string, match: RegExpExecArray) => PluginRuleDecision | Promise<PluginRuleDecision>;
 
 export interface SvgPreviewRequest {
   filePath: string;
@@ -47,6 +53,8 @@ export interface PluginHostApi {
   unregisterSkill(name: string): void;
   registerPrompt(name: string, provider: PluginPromptProvider): void;
   unregisterPrompt(name: string): void;
+  registerRule(name: string, pattern: string | RegExp, handler: PluginRuleHandler): void;
+  unregisterRule(name: string): void;
   registerSettingsHandler(pageId: string, handler: (action: string, args: Record<string, unknown>) => Promise<unknown>): void;
   unregisterSettingsHandler(pageId: string): void;
   getSectlSession(): Promise<{ accessToken: string; userId?: string; email?: string; name?: string } | null>;
@@ -201,6 +209,22 @@ export class PluginManager {
     }
     return contributions;
   }
+  /** 按插件和注册顺序执行第一个命中的前置规则。 */
+  async matchRule(input: string): Promise<{ pluginId: string; ruleName: string; decision: PluginRuleDecision } | undefined> {
+    for (const plugin of this.active.values()) {
+      for (const [name, rule] of plugin.rules) {
+        const regex = new RegExp(rule.pattern.source, rule.pattern.flags);
+        const match = regex.exec(input);
+        if (!match) continue;
+        const decision = await rule.handle(input, match);
+        if (!decision || (decision.kind !== "reply" && decision.kind !== "llm")) throw new Error(`插件规则 ${plugin.manifest.id}/${name} 返回了无效结果`);
+        if (decision.kind === "reply" && typeof decision.message !== "string") throw new Error(`插件规则 ${plugin.manifest.id}/${name} 的回答必须是字符串`);
+        if (decision.kind === "llm" && decision.systemMessage !== undefined && typeof decision.systemMessage !== "string") throw new Error(`插件规则 ${plugin.manifest.id}/${name} 的 systemMessage 必须是字符串`);
+        return { pluginId: plugin.manifest.id, ruleName: name, decision };
+      }
+    }
+    return undefined;
+  }
   async callTool(key: string, args: Record<string, unknown>): Promise<unknown> {
     for (const plugin of this.active.values()) {
       const tool = plugin.tools.get(key);
@@ -221,8 +245,8 @@ export class PluginManager {
     if (!installed || this.active.has(id)) return;
     const root = path.join(this.installedRoot, installed.id, installed.version);
     const manifest = this.readManifest(root);
-    if (!manifest) { this.active.set(id, { manifest: { apiVersion: API_VERSION, id, name: id, version: installed.version }, root, state: "error", message: "找不到或无法读取插件清单", tools: new Map(), skills: new Map(), prompts: new Map() }); this.changed(); return; }
-    const plugin: ActivePlugin = { manifest, root, state: "starting", tools: new Map(), skills: new Map(), prompts: new Map(), settingsHandlers: new Map() };
+    if (!manifest) { this.active.set(id, { manifest: { apiVersion: API_VERSION, id, name: id, version: installed.version }, root, state: "error", message: "找不到或无法读取插件清单", tools: new Map(), skills: new Map(), prompts: new Map(), rules: new Map() }); this.changed(); return; }
+    const plugin: ActivePlugin = { manifest, root, state: "starting", tools: new Map(), skills: new Map(), prompts: new Map(), rules: new Map(), settingsHandlers: new Map() };
     this.active.set(id, plugin); this.changed();
     try {
       if (!manifest.main) throw new Error("插件清单缺少 main 入口");
@@ -286,6 +310,14 @@ export class PluginManager {
         plugin.prompts.set(name, provider); this.changed();
       },
       unregisterPrompt: (name) => { plugin.prompts.delete(name); this.changed(); },
+      registerRule: (name, pattern, handler) => {
+        requirePermission("agent.rules");
+        if (!/^[a-z][a-z0-9_]*$/.test(name)) throw new Error("插件规则名称只能使用小写字母、数字和下划线");
+        if (typeof handler !== "function") throw new Error("插件规则处理器必须是函数");
+        const regex = pattern instanceof RegExp ? pattern : new RegExp(pattern);
+        plugin.rules.set(name, { pattern: { source: regex.source, flags: regex.flags }, handle: handler }); this.changed();
+      },
+      unregisterRule: (name) => { plugin.rules.delete(name); this.changed(); },
       registerSettingsHandler: (pageId, handler) => {
         requirePermission("agent.settings");
         if (!/^[a-z][a-z0-9_-]*$/.test(pageId)) throw new Error("插件设置页 ID 无效");

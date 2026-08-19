@@ -18,6 +18,7 @@ let voiceWakeKws: ReturnType<typeof createKws> | undefined;
 let voiceWakeStream: ReturnType<NonNullable<typeof voiceWakeKws>["createStream"]> | undefined;
 let voiceWakePhrase = "";
 let voiceWakeDetected: (() => void) | undefined;
+let remoteSocketSequence = 0;
 
 function projectPath(...parts: string[]): string {
   const candidates = [
@@ -123,14 +124,16 @@ export function startSpeech(window: BrowserWindow | undefined, options?: { bette
 
   const url = remoteAsrUrl();
   if (url && typeof WebSocket !== "undefined") {
-    console.info(`[speech] connecting to ${remoteAsrLogTarget(url)}`);
+    const connectionId = ++remoteSocketSequence;
+    const connectedAt = Date.now();
+    console.info(`[speech] connecting id=${connectionId} to ${remoteAsrLogTarget(url)}`);
     try {
       const socket = new WebSocket(url);
       remoteSocket = socket;
       mode = "remote";
       socket.binaryType = "arraybuffer";
       socket.onopen = () => {
-        console.info("[speech] ASR WebSocket opened");
+        console.info(`[speech] ASR WebSocket opened id=${connectionId} elapsed=${Date.now() - connectedAt}ms`);
         if (remoteSocket === socket && socket.readyState === WebSocket.OPEN) {
           for (const pcm of pendingRemoteAudio) socket.send(pcm);
           pendingRemoteAudio = [];
@@ -143,11 +146,28 @@ export function startSpeech(window: BrowserWindow | undefined, options?: { bette
         catch { send(speechWindow, { type: "log", message: String(event.data ?? "") }); }
       };
       socket.onerror = (event) => {
-        console.error("[speech] ASR WebSocket error", event);
+        const errorEvent = event as ErrorEvent;
+        const error = errorEvent.error as { message?: string; code?: string } | undefined;
+        console.error("[speech] ASR WebSocket error", {
+          id: connectionId,
+          elapsed: Date.now() - connectedAt,
+          readyState: socket.readyState,
+          readyStateName: ["CONNECTING", "OPEN", "CLOSING", "CLOSED"][socket.readyState] || "UNKNOWN",
+          message: errorEvent.message || error?.message || "",
+          errorCode: error?.code || "",
+          eventType: errorEvent.type
+        });
         if (mode === "remote") send(speechWindow, { type: "error", message: "云端语音识别连接失败" });
       };
       socket.onclose = (event) => {
-        console.warn(`[speech] ASR WebSocket closed (code=${event.code}, reason=${event.reason || ""})`);
+        console.warn("[speech] ASR WebSocket closed", {
+          id: connectionId,
+          code: event.code,
+          reason: event.reason || "",
+          wasClean: event.wasClean,
+          elapsed: Date.now() - connectedAt,
+          hadCurrentSocket: remoteSocket === socket
+        });
         const wasRemote = mode === "remote";
         if (remoteSocket === socket) { remoteSocket = undefined; mode = "idle"; }
         pendingRemoteAudio = [];

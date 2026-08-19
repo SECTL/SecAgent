@@ -6,6 +6,34 @@ import test from "node:test";
 import AdmZip from "adm-zip";
 import { PluginManager } from "./plugin-manager.js";
 
+test("plugin rules receive the original input and can return a direct reply", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-plugin-rule-"));
+  const archivePath = path.join(workspace, "rule-test.zip");
+  const archive = new AdmZip() as unknown as { addFile(name: string, data: Buffer): void; writeZip(file: string): void };
+  archive.addFile("secagent-plugin.json", Buffer.from(JSON.stringify({ apiVersion: 1, id: "rule-test", name: "Rule test", version: "1.0.0", main: "main.mjs", permissions: ["agent.rules"] })));
+  archive.addFile("main.mjs", Buffer.from(`
+export function activate(api) {
+  api.registerRule("score", /给(?<name>.+?)加(?<delta>\\d+)分/g, (input, match) => ({
+    kind: "reply", message: JSON.stringify({ input, name: match.groups.name, delta: match.groups.delta })
+  }));
+}
+`));
+  archive.writeZip(archivePath);
+  try {
+    const manager = new PluginManager(workspace);
+    await manager.initialize();
+    await manager.install(archivePath);
+    const first = await manager.matchRule("给张三加1分");
+    const second = await manager.matchRule("给李四加2分");
+    assert.equal(first?.decision.kind, "reply");
+    assert.deepEqual(JSON.parse((first?.decision as { kind: "reply"; message: string }).message), { input: "给张三加1分", name: "张三", delta: "1" });
+    assert.deepEqual(JSON.parse((second?.decision as { kind: "reply"; message: string }).message), { input: "给李四加2分", name: "李四", delta: "2" });
+    await manager.shutdown();
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("plugin-scoped config survives plugin manager restart", async () => {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-plugin-config-"));
   const archivePath = path.join(workspace, "config-test.zip");

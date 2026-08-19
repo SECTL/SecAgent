@@ -50,6 +50,23 @@ export class SecAgentRuntime {
   }
   async run(input: string, reasoningEffort: ReasoningEffort = "high", conversation?: ConversationMessage[], signal?: AbortSignal, state: { previousAutoLoadedSkills?: string[]; previousReadSkillNames?: string[] } = {}): Promise<RunResult> {
     signal?.throwIfAborted();
+    const rule = await this.plugins?.matchRule(input);
+    if (rule) {
+      this.emit("plugin.rule/match", { pluginId: rule.pluginId, ruleName: rule.ruleName, input, decision: rule.decision });
+      if (rule.decision.kind === "reply") {
+        this.emit("plugin.rule/reply", { pluginId: rule.pluginId, ruleName: rule.ruleName, message: rule.decision.message });
+        return { kind: "completed", message: rule.decision.message };
+      }
+      if (rule.decision.systemMessage?.trim()) {
+        const history = conversation?.slice() || [{ role: "user" as const, content: input }];
+        const current = [...history].reverse().find((message) => message.role === "user");
+        if (current) {
+          history.splice(history.lastIndexOf(current) + 1, 0, { role: "system", content: rule.decision.systemMessage });
+          conversation = history;
+        }
+      }
+      this.emit("plugin.rule/continue", { pluginId: rule.pluginId, ruleName: rule.ruleName, systemMessage: rule.decision.systemMessage || null });
+    }
     const mcpTools = await this.registry.discover();
     for (const error of this.registry.getDiscoveryErrors()) this.emit("mcp.tools/error", error);
     const pluginTools = this.plugins?.getTools() || [];

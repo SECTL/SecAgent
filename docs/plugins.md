@@ -15,7 +15,7 @@ SecAgent 插件是可移植的 zip 包，包内包含 JavaScript、JSON、Skill 
 }
 ```
 
-工具插件通常声明 `agent.tools`；提供 Skill 时声明 `agent.skills`；向 Agent 注入提示词时声明 `agent.prompts`；访问第三方 HTTP 服务时声明 `network.http`。
+工具插件通常声明 `agent.tools`；提供 Skill 时声明 `agent.skills`；向 Agent 注入提示词时声明 `agent.prompts`；注册前置规则时声明 `agent.rules`；访问第三方 HTTP 服务时声明 `network.http`。
 
 ## 入口 API
 
@@ -47,6 +47,19 @@ api.registerSkill("skills/my-app", "积分|查询学生");
 ```
 
 当正则匹配当前用户消息时，宿主会在该用户消息后追加一条 system 消息，内容包括 Skill 名称、入口路径和 `SKILL.md` 完整内容；一次消息可以命中多个 Skill。同一会话中同一个 Skill 只自动加载一次，模型已经通过 `secagent__read_skill` 读取过的 Skill 也不会再次自动加载。没有自动加载需求时省略第二个参数即可。
+
+## 前置规则
+
+插件可以注册前置正则规则。规则在用户消息进入模型前按插件激活顺序、注册顺序检查；第一个命中的规则负责决定本轮是否绕过模型。
+
+```js
+api.registerRule("add_score", /给(?<name>.+?)加(?<delta>\d+)分/, async (input, match) => {
+  await addScore(match.groups.name, Number(match.groups.delta));
+  return { kind: "reply", message: `已给${match.groups.name}加${match.groups.delta}分。` };
+});
+```
+
+处理器会收到原始用户句子和 `RegExpExecArray` 匹配结果（包括 `groups`）。返回 `{ kind: "reply", message }` 会直接回答、不经过 LLM；返回 `{ kind: "llm", systemMessage? }` 会继续请求 LLM，系统消息只对本轮生效。带 `g` 或 `y` 标志时宿主会为每次匹配创建新的正则实例，避免共享 `lastIndex`。
 
 ## 提示词注入
 
