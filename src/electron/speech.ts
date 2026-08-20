@@ -18,6 +18,11 @@ let voiceWakeKws: ReturnType<typeof createKws> | undefined;
 let voiceWakeStream: ReturnType<NonNullable<typeof voiceWakeKws>["createStream"]> | undefined;
 let voiceWakePhrase = "";
 let voiceWakeDetected: (() => void) | undefined;
+let voiceWakeStartedAt = 0;
+let voiceWakeAudioFrames = 0;
+let voiceWakeAwaitingFirstAudio = false;
+let voiceWakeLastHeartbeatAt = 0;
+let voiceWakeLastInactiveAudioLogAt = 0;
 let remoteSocketSequence = 0;
 
 function projectPath(...parts: string[]): string {
@@ -67,7 +72,10 @@ export function startVoiceWake(window: BrowserWindow | undefined, phrase: string
   void window;
   voiceWakePhrase = phrase.trim();
   voiceWakeDetected = onDetected;
-  if (voiceWakeKws) return { ok: true };
+  if (voiceWakeKws) {
+    console.info(`[voice-wake] local KWS already active phrase=${voiceWakePhrase}`);
+    return { ok: true };
+  }
   const model = projectPath("models", "sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20");
   voiceWakeKws = createKws({
     featConfig: { samplingRate: 16000, featureDim: 80 },
@@ -83,6 +91,10 @@ export function startVoiceWake(window: BrowserWindow | undefined, phrase: string
     keywords: `${keywordTokens(voiceWakePhrase)} @${voiceWakePhrase}`
   });
   voiceWakeStream = voiceWakeKws.createStream();
+  voiceWakeStartedAt = Date.now();
+  voiceWakeAudioFrames = 0;
+  voiceWakeAwaitingFirstAudio = true;
+  voiceWakeLastHeartbeatAt = voiceWakeStartedAt;
   console.info(`[voice-wake] local KWS ready phrase=${voiceWakePhrase}`);
   return { ok: true };
 }
@@ -90,12 +102,27 @@ export function startVoiceWake(window: BrowserWindow | undefined, phrase: string
 export function sendVoiceWakeAudio(samples: Float32Array): void {
   const kws = voiceWakeKws;
   const stream = voiceWakeStream;
-  if (!kws || !stream) return;
+  const now = Date.now();
+  if (!kws || !stream) {
+    if (now - voiceWakeLastInactiveAudioLogAt >= 15000) {
+      voiceWakeLastInactiveAudioLogAt = now;
+      console.info(`[voice-wake] audio ignored kws=${Boolean(kws)} stream=${Boolean(stream)}`);
+    }
+    return;
+  }
+  voiceWakeAudioFrames += 1;
+  if (voiceWakeAwaitingFirstAudio) {
+    voiceWakeAwaitingFirstAudio = false;
+    console.info(`[voice-wake] local KWS received first audio elapsed=${now - voiceWakeStartedAt}ms`);
+  } else if (now - voiceWakeLastHeartbeatAt >= 15000) {
+    voiceWakeLastHeartbeatAt = now;
+    console.info(`[voice-wake] local KWS audio heartbeat frames=${voiceWakeAudioFrames} elapsed=${now - voiceWakeStartedAt}ms`);
+  }
   stream.acceptWaveform(16000, samples);
   while (kws.isReady(stream)) kws.decode(stream);
   const result = kws.getResult(stream);
   if (result.keyword) {
-    console.info(`[voice-wake] local KWS detected keyword=${result.keyword}`);
+    console.info(`[voice-wake] local KWS detected keyword=${result.keyword} frames=${voiceWakeAudioFrames}`);
     // Reset before invoking the callback. The callback closes the hidden
     // window and releases the KWS instance immediately.
     kws.reset(stream);
@@ -105,10 +132,14 @@ export function sendVoiceWakeAudio(samples: Float32Array): void {
 }
 
 export function stopVoiceWake(): void {
+  if (voiceWakeKws || voiceWakeStream) console.info(`[voice-wake] local KWS stopping frames=${voiceWakeAudioFrames} activeFor=${voiceWakeStartedAt ? Date.now() - voiceWakeStartedAt : 0}ms`);
   voiceWakeDetected = undefined;
   voiceWakeStream = undefined;
   voiceWakeKws?.free();
   voiceWakeKws = undefined;
+  voiceWakeStartedAt = 0;
+  voiceWakeAudioFrames = 0;
+  voiceWakeAwaitingFirstAudio = false;
 }
 
 export function startSpeech(window: BrowserWindow | undefined, options?: { betterRecognition?: boolean }): { ok: true } {

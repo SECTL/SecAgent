@@ -51,6 +51,7 @@ interface Window {
     startVoiceWake(phrase: string): Promise<{ ok: true }>;
     sendVoiceWakeAudio(samples: Float32Array): void;
     stopVoiceWake(): Promise<{ ok: true }>;
+    logVoiceWake(event: unknown): void;
     sendSpeechAudio(samples: Float32Array): void;
     stopSpeech(): Promise<{ ok: true }>;
     synthesizeSpeech(text: string): Promise<string>;

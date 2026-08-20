@@ -193,7 +193,9 @@ async function startConfiguredVoiceWake(): Promise<void> {
   const phrase = settings.wake.voicePhrase || "小泽同学";
   voiceWakeWindow = new BrowserWindow({
     width: 1, height: 1, show: false, frame: false, skipTaskbar: true,
-    webPreferences: { preload: path.join(__dirname, "../preload/preload.cjs"), contextIsolation: true, nodeIntegration: false, autoplayPolicy: "no-user-gesture-required" }
+    // This window owns the continuous microphone graph. It must keep processing
+    // audio while the visible wake overlay is open in front of it.
+    webPreferences: { preload: path.join(__dirname, "../preload/preload.cjs"), contextIsolation: true, nodeIntegration: false, autoplayPolicy: "no-user-gesture-required", backgroundThrottling: false }
   });
   voiceWakeWindow.on("closed", () => { stopVoiceWake(); voiceWakeWindow = undefined; });
   const query = new URLSearchParams({ "voice-wake": "1", phrase }).toString();
@@ -662,6 +664,11 @@ ipcMain.handle("voice-wake:start", (event, phrase: string) => startVoiceWake(voi
   void openWakeWindow().catch((error) => logMain("wake.open.failed", { error: String(error), reason: "voice" }));
 }));
 ipcMain.handle("voice-wake:stop", () => { stopVoiceWake(); return { ok: true }; });
+ipcMain.on("voice-wake:log", (_event, payload: unknown) => {
+  const data = payload && typeof payload === "object" ? payload : { detail: String(payload) };
+  console.info("[voice-wake] renderer", data);
+  logMain("voice-wake.renderer", data);
+});
 ipcMain.handle("tts:synthesize", async (_event, text: string) => {
   if (typeof text !== "string" || !text.trim()) return "";
   const clean = text.slice(0, 1800);
