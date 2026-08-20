@@ -10,7 +10,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json && electron-vite build",
-    "package": "npm run build && electron-builder",
+    "package": "npm run build && electron-builder --publish never",
     "build:cli": "tsc -p tsconfig.json",
     "dev": "electron-vite dev",
     "dev:cli": "tsx src/index.ts",
