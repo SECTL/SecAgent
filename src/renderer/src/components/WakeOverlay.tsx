@@ -66,6 +66,7 @@ export function WakeOverlay() {
   const lastVoiceAtRef = useRef(0);
   const hasVoiceRef = useRef(false);
   const transcriptRef = useRef("");
+  const confirmedTranscriptRef = useRef("");
   const submittingRef = useRef(false);
   const finalWaiterRef = useRef<((text: string) => void) | null>(null);
   const submitTranscriptRef = useRef<() => Promise<void>>(() => Promise.resolve());
@@ -280,6 +281,7 @@ export function WakeOverlay() {
       setError("");
       hasVoiceRef.current = false;
       transcriptRef.current = "";
+      confirmedTranscriptRef.current = "";
       lastVoiceAtRef.current = 0;
       await bridge.startSpeech();
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
@@ -327,16 +329,30 @@ export function WakeOverlay() {
       if (data.type === "optimizing") setStatus("transcribing");
       if (data.type === "partial" || data.type === "final" || data.type === "enhanced") {
         const text = data.text || "";
-        transcriptRef.current = text;
-        setTranscript(text);
-        if (text.trim()) {
+        let mergedText: string;
+        if (data.type === "enhanced") {
+          // The enhanced result is an utterance-wide replacement, while stream
+          // results are emitted segment by segment.
+          confirmedTranscriptRef.current = text;
+          mergedText = text;
+        } else if (data.type === "final") {
+          confirmedTranscriptRef.current += text;
+          mergedText = confirmedTranscriptRef.current;
+        } else {
+          mergedText = confirmedTranscriptRef.current + text;
+        }
+        transcriptRef.current = mergedText;
+        setTranscript(mergedText);
+        if (mergedText.trim()) {
           if (listenTimeoutRef.current !== undefined) window.clearTimeout(listenTimeoutRef.current);
           listenTimeoutRef.current = undefined;
           hasVoiceRef.current = true;
           lastVoiceAtRef.current = Date.now();
           setStatus("transcribing");
         }
-        if (data.type === "final" || data.type === "enhanced") finalWaiterRef.current?.(text);
+        // A final event may cover only the last stream segment. The timeout
+        // keeps accepting later final/enhanced events before submitting.
+        if (data.type === "enhanced") finalWaiterRef.current?.(mergedText);
       }
       if (data.type === "error") { setStatus("error"); setError(data.message || "语音识别失败"); }
     });
