@@ -80,7 +80,6 @@ export function WakeOverlay() {
   const listenAfterTtsRef = useRef(false);
   const statusRef = useRef(status);
   const finalTtsFlushedRef = useRef(false);
-  const wakeInteractiveRef = useRef(false);
   statusRef.current = status;
 
   const logTts = (event: Record<string, unknown>) => {
@@ -375,20 +374,8 @@ export function WakeOverlay() {
   }, []);
 
   useEffect(() => {
-    const updatePointerMode = (interactive: boolean) => {
-      if (wakeInteractiveRef.current === interactive) return;
-      wakeInteractiveRef.current = interactive;
-      bridge.setWakeInteractive(interactive);
-    };
-    const onMouseMove = (event: MouseEvent) => {
-      const target = event.target;
-      updatePointerMode(target instanceof Element && Boolean(target.closest(".wake-stack")));
-    };
-    document.addEventListener("mousemove", onMouseMove);
-    return () => {
-      document.removeEventListener("mousemove", onMouseMove);
-      updatePointerMode(false);
-    };
+    bridge.setWakeInteractive(true);
+    return () => bridge.setWakeInteractive(false);
   }, [bridge]);
 
   useEffect(() => {
@@ -415,6 +402,7 @@ export function WakeOverlay() {
       <rect className="wake-edge-svg-near" x="7" y="7" width="calc(100% - 14px)" height="calc(100% - 14px)" rx="28" fill="none" stroke="url(#wake-edge-gradient)" strokeWidth="12" filter="url(#wake-edge-blur-near)" />
       <rect className="wake-edge-svg-crisp" x="7" y="7" width="calc(100% - 14px)" height="calc(100% - 14px)" rx="28" fill="none" stroke="url(#wake-edge-gradient)" strokeWidth="7" />
     </svg>
+    <div className="wake-dismiss-area" aria-hidden="true" onMouseDown={() => void bridge.closeWake()} />
     <div className={`wake-stack ${agentStarted ? "agent-started" : ""}`}>
       <div className={`wake-user-bubble ${agentStarted ? "submitted" : ""}`}>
         <span className={!transcript ? "wake-listening" : "wake-transcript"}>{transcript || (status === "error" ? "语音识别失败" : "聆听中...")}</span>
