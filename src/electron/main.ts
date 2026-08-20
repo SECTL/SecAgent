@@ -73,6 +73,12 @@ function logMain(stage: string, data: unknown = {}): void {
   fs.appendFileSync(path.join(logDir, "electron-main.jsonl"), JSON.stringify({ at: new Date().toISOString(), stage, data }) + "\n", "utf8");
 }
 
+async function ensureMacDockVisible(): Promise<void> {
+  if (process.platform !== "darwin") return;
+  app.setActivationPolicy("regular");
+  await app.dock?.show();
+}
+
 function windowChromeOptions(): Electron.BrowserWindowConstructorOptions {
   if (process.platform === "darwin") {
     return { titleBarStyle: "hidden", trafficLightPosition: { x: 16, y: 21 } };
@@ -208,6 +214,7 @@ async function openWakeWindow(): Promise<void> {
     closeWakeWindow();
     return;
   }
+  await ensureMacDockVisible();
   const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
   const workArea = display.workArea;
   // Every wake invocation gets an isolated, unlisted session. It remains
@@ -237,7 +244,6 @@ async function openWakeWindow(): Promise<void> {
     focusable: true,
     show: false,
     alwaysOnTop: true,
-    ...(process.platform === "darwin" ? { type: "panel" } : {}),
     webPreferences: { preload: path.join(__dirname, "../preload/preload.cjs"), contextIsolation: true, nodeIntegration: false, autoplayPolicy: "no-user-gesture-required" }
   });
   if (process.platform === "darwin") {
@@ -830,10 +836,9 @@ app.whenReady().then(async () => {
   installFileRendererAssetFallback();
   createApplicationMenu();
   if (process.platform === "darwin") {
-    // The wake overlay is a skip-taskbar panel, but SecAgent itself must remain
-    // a regular Dock application while that panel is visible over full-screen Spaces.
-    app.setActivationPolicy("regular");
-    await app.dock?.show();
+    // The wake overlay skips the Dock, but SecAgent itself remains a regular
+    // application while the overlay is visible over full-screen Spaces.
+    await ensureMacDockVisible();
     app.dock?.setIcon(appIconPath());
   }
   logMain("app.ready");
