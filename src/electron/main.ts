@@ -294,6 +294,7 @@ function createWindow(): void {
     minWidth: 820,
     minHeight: 560,
     title: "SecAgent",
+    skipTaskbar: false,
     ...windowChromeOptions(),
     icon: appIconPath(),
     webPreferences: { preload: path.join(__dirname, "../preload/preload.cjs"), contextIsolation: true, nodeIntegration: false }
@@ -828,7 +829,13 @@ app.whenReady().then(async () => {
   });
   installFileRendererAssetFallback();
   createApplicationMenu();
-  if (process.platform === "darwin") app.dock?.setIcon(appIconPath());
+  if (process.platform === "darwin") {
+    // The wake overlay is a skip-taskbar panel, but SecAgent itself must remain
+    // a regular Dock application while that panel is visible over full-screen Spaces.
+    app.setActivationPolicy("regular");
+    await app.dock?.show();
+    app.dock?.setIcon(appIconPath());
+  }
   logMain("app.ready");
   createWindow();
   try {
