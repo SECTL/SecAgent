@@ -95,9 +95,22 @@ function windowChromeOptions(): Electron.BrowserWindowConstructorOptions {
 
 function configureWindowChrome(window: BrowserWindow): void {
   if (process.platform !== "win32") return;
-  // Keep the application menu alive for CmdOrCtrl+, and Ctrl+Shift+I while hiding its UI.
+  // Keep the application menu alive for its fallback shortcuts while hiding its UI.
   window.setAutoHideMenuBar(true);
   window.setMenuBarVisibility(false);
+}
+
+function isOpenSettingsShortcut(input: Electron.Input): boolean {
+  const primaryModifier = process.platform === "darwin" ? input.meta : input.control;
+  return input.type === "keyDown" && primaryModifier && !input.alt && input.code === "Comma";
+}
+
+function installWindowShortcuts(window: BrowserWindow): void {
+  window.webContents.on("before-input-event", (event, input) => {
+    if (!isOpenSettingsShortcut(input)) return;
+    event.preventDefault();
+    openSettings();
+  });
 }
 
 function rendererPath(): string { return path.join(__dirname, "../renderer/index.html"); }
@@ -306,6 +319,7 @@ function createWindow(): void {
     webPreferences: { preload: path.join(__dirname, "../preload/preload.cjs"), contextIsolation: true, nodeIntegration: false }
   });
   configureWindowChrome(windowRef);
+  installWindowShortcuts(windowRef);
   logMain("window.created");
   if (process.env.ELECTRON_RENDERER_URL) windowRef.loadURL(process.env.ELECTRON_RENDERER_URL);
   else windowRef.loadFile(path.join(__dirname, "../renderer/index.html"));
@@ -480,6 +494,7 @@ ipcMain.handle("providers:list", async () => {
   }
 });
 ipcMain.handle("settings:get", () => readSettings(DEFAULT_WORKSPACE));
+ipcMain.handle("settings:open", () => { openSettings(); return { ok: true }; });
 ipcMain.handle("settings:skills", () => {
   const { config } = loadConfig(DEFAULT_WORKSPACE);
   return loadEnabledSkills(config).map((skill) => ({ name: skill.name, description: skill.description, path: skill.path }));

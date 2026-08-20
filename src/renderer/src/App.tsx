@@ -461,7 +461,7 @@ export function App() {
 
   return <main className="app-shell">
     <header className={`topbar ${bridge.platform === "darwin" ? "macos" : ""}`}>
-      <div className="brand"><span>SecAgent</span></div>
+      <button className="brand" type="button" aria-label="打开设置" onDoubleClick={() => { void bridge.openSettings(); }}><span>SecAgent</span></button>
       <div className={`session-menu ${bridge.platform === "win32" ? "windows" : ""}`}>
         <div className={`session-options ${sessionMenuDismissed ? "dismissed" : ""}`} onMouseEnter={() => setSessionMenuDismissed(false)}>
           <button className="session-trigger" aria-label="选择历史会话"><img className="session-chevron" src="/session-chevron.svg" alt="" /> <span>{session?.meta.title || "问候"}</span></button>

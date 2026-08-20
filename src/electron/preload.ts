@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld("secagent", {
   listModels: () => ipcRenderer.invoke("models:list"),
   listProviders: () => ipcRenderer.invoke("providers:list"),
   getSettings: () => ipcRenderer.invoke("settings:get"),
+  openSettings: () => ipcRenderer.invoke("settings:open"),
   officialStatus: () => ipcRenderer.invoke("official:status"),
   officialBalance: () => ipcRenderer.invoke("official:balance"),
   officialOAuthLogin: () => ipcRenderer.invoke("official:oauth-login"),
