@@ -317,3 +317,30 @@ html.wake-mode, html.wake-mode body, body.wake-mode { min-width: 0; overflow: hi
 .preset-combobox-empty { padding: 9px; color: #999; font-size: 12px; }
 .form-grid input:disabled, .form-grid select:disabled, .provider-model-row input:disabled, .preset-combobox > input:disabled { background: #f5f5f5; color: #999; cursor: not-allowed; }
 .provider-model-editor .secondary-button:disabled, .text-button:disabled { cursor: not-allowed; opacity: .55; }
+
+.composer-quote { flex: 0 0 100%; display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; min-width: 0; padding: 8px 10px; border: 1px solid #d7e8fb; border-radius: 10px; background: #f4f8ff; }
+.composer-quote strong { display: block; margin-bottom: 3px; color: #1d5f9e; font-size: 11px; letter-spacing: .04em; }
+.composer-quote p { margin: 0; color: #334; font-size: 13px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+.composer-quote button { flex: 0 0 auto; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: #667; font-size: 16px; line-height: 20px; cursor: pointer; }
+.composer-quote button:hover { background: #e4eef9; }
+.message-quote { margin: 0 0 .45em; padding: 6px 10px; border: 0; border-left: 3px solid #8ab4e0; background: #f5f8fc; color: #445; font-size: 13px; white-space: pre-wrap; }
+.oobe-shell .oobe-header { max-width: 760px; margin: 18px auto 22px; }
+.oobe-step-label { margin: 0 0 6px; color: #2389ec; font-size: 12px; font-weight: 650; letter-spacing: .08em; }
+.oobe-choice-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; max-width: 760px; margin: 0 auto 18px; }
+.oobe-choice { display: grid; gap: 8px; padding: 18px 16px; border: 1px solid #e0e0e0; border-radius: 14px; background: #fff; text-align: left; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,.03); }
+.oobe-choice:hover { border-color: #b7d6f5; }
+.oobe-choice.selected { border-color: #2389ec; background: #f3f8ff; box-shadow: 0 8px 24px rgba(35,137,236,.1); }
+.oobe-choice strong { font-size: 16px; }
+.oobe-choice span { color: #666; font-size: 13px; line-height: 1.5; }
+.oobe-panel { max-width: 760px; margin: 0 auto 18px; }
+.oobe-model-add { display: flex; gap: 8px; align-items: center; }
+.oobe-model-add input { width: 180px; padding: 7px 9px; border: 1px solid #d8d8d8; border-radius: 7px; }
+.oobe-plugin-list { max-width: 760px; margin: 0 auto 22px; }
+.oobe-plugin-list h2 { margin: 0 0 10px; font-size: 15px; }
+.oobe-plugin-card { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.oobe-plugin-card > div { display: grid; gap: 4px; min-width: 0; }
+.oobe-plugin-card span { color: #777; font-size: 12px; }
+.oobe-plugin-state { color: #176b39; font-size: 13px; white-space: nowrap; }
+.oobe-actions { display: flex; justify-content: flex-end; gap: 8px; max-width: 760px; margin: 8px auto 0; }
+.primary-button:disabled { opacity: .55; cursor: not-allowed; }
+@media (max-width: 720px) { .oobe-choice-grid { grid-template-columns: 1fr; } }
