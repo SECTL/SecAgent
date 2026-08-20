@@ -135,10 +135,13 @@ export function startSpeech(window: BrowserWindow | undefined, options?: { bette
       socket.onopen = () => {
         console.info(`[speech] ASR WebSocket opened id=${connectionId} elapsed=${Date.now() - connectedAt}ms`);
         if (remoteSocket === socket && socket.readyState === WebSocket.OPEN) {
+          // The relay must receive the start control message before binary
+          // audio. Sending the buffered audio first makes the relay discard
+          // everything spoken while the WebSocket was connecting.
+          try { socket.send(JSON.stringify({ type: "start", better_recognition: enhancedRecognition })); } catch { /* Socket may close during startup. */ }
           for (const pcm of pendingRemoteAudio) socket.send(pcm);
           pendingRemoteAudio = [];
         }
-        try { socket.send(JSON.stringify({ type: "start", better_recognition: enhancedRecognition })); } catch { /* Socket may close during startup. */ }
         send(speechWindow, { type: "ready" });
       };
       socket.onmessage = (event) => {

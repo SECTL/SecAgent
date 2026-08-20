@@ -59,6 +59,7 @@ interface Window {
     closeWake(): Promise<{ ok: true }>;
     setWakeInteractive(interactive: boolean): void;
     onSpeechEvent(listener: (event: unknown) => void): () => void;
+    onVoiceWakeResume(listener: () => void): () => void;
     onSettingsChanged(listener: (settings: SettingsPayload) => void): () => void;
     onPluginsChanged(listener: (plugins: PluginStatus[]) => void): () => void;
   };

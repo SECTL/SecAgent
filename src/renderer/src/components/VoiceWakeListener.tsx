@@ -9,6 +9,9 @@ export function VoiceWakeListener() {
     let processor: ScriptProcessorNode | undefined;
     let stopped = false;
     const phrase = new URLSearchParams(window.location.search).get("phrase") || "小泽同学";
+    const removeResume = window.secagent.onVoiceWakeResume(() => {
+      void window.secagent.startVoiceWake(phrase).catch((error) => console.error("[voice-wake] resume failed", error));
+    });
     void (async () => {
       try {
         await window.secagent.startVoiceWake(phrase);
@@ -33,6 +36,7 @@ export function VoiceWakeListener() {
       stream?.getTracks().forEach((track) => track.stop());
       void context?.close();
       void window.secagent.stopVoiceWake();
+      removeResume();
     };
   }, []);
   return null;

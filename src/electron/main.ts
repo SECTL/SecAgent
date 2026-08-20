@@ -171,12 +171,19 @@ function closeWakeWindow(): void {
   stopSpeech();
   if (wakeWindow && !wakeWindow.isDestroyed()) wakeWindow.close();
   wakeWindow = undefined;
+  resumeVoiceWake();
 }
 
 function closeVoiceWakeWindow(): void {
   stopVoiceWake();
   if (voiceWakeWindow && !voiceWakeWindow.isDestroyed()) voiceWakeWindow.close();
   voiceWakeWindow = undefined;
+}
+
+function resumeVoiceWake(): void {
+  const settings = readSettings(DEFAULT_WORKSPACE);
+  if (!settings.wake.voiceEnabled || !voiceWakeWindow || voiceWakeWindow.isDestroyed()) return;
+  voiceWakeWindow.webContents.send("voice-wake:resume");
 }
 
 async function startConfiguredVoiceWake(): Promise<void> {
@@ -228,9 +235,20 @@ async function openWakeWindow(): Promise<void> {
     focusable: true,
     show: false,
     alwaysOnTop: true,
+    ...(process.platform === "darwin" ? { type: "panel" } : {}),
     webPreferences: { preload: path.join(__dirname, "../preload/preload.cjs"), contextIsolation: true, nodeIntegration: false, autoplayPolicy: "no-user-gesture-required" }
   });
-  wakeWindow.setAlwaysOnTop(true, "floating");
+  if (process.platform === "darwin") {
+    // Keep the overlay in the current macOS Space, including a separate
+    // full-screen app Space. Without visibleOnFullScreen, focusing this
+    // window makes macOS switch back to SecAgent's normal window Space.
+    // The floating level is still below another app's full-screen window, so
+    // use the screen-saver level for this transient overlay.
+    wakeWindow.setAlwaysOnTop(true, "screen-saver", 1);
+    wakeWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  } else {
+    wakeWindow.setAlwaysOnTop(true, "floating");
+  }
   // The overlay should not block the application below. Mouse-move events are
   // still forwarded to the renderer so it can temporarily enable interaction
   // when the pointer is over the visible response card.
@@ -240,8 +258,10 @@ async function openWakeWindow(): Promise<void> {
   });
   const showWakeWindow = () => {
     if (!wakeWindow || wakeWindow.isDestroyed()) return;
-    if (!wakeWindow.isVisible()) wakeWindow.show();
-    wakeWindow.focus();
+    // Do not activate the Electron app here. On macOS, activating an app from
+    // a different full-screen Space switches to that app's normal Space even
+    // when the window is visible on all workspaces.
+    wakeWindow.showInactive();
   };
   wakeWindow.once("ready-to-show", showWakeWindow);
   wakeWindow.on("closed", () => {
@@ -636,7 +656,9 @@ ipcMain.on("wake:interactive", (_event, interactive: boolean) => { if (wakeWindo
 ipcMain.handle("speech:start", (event) => startSpeech(wakeWindow?.webContents.id === event.sender.id ? wakeWindow : windowRef, { betterRecognition: readSettings(DEFAULT_WORKSPACE).speech.betterRecognition === true }));
 ipcMain.handle("speech:stop", () => { stopSpeech(); return { ok: true }; });
 ipcMain.handle("voice-wake:start", (event, phrase: string) => startVoiceWake(voiceWakeWindow?.webContents.id === event.sender.id ? voiceWakeWindow : undefined, phrase, () => {
-  closeVoiceWakeWindow();
+  // Keep the hidden microphone window alive so the listener can be resumed
+  // after the one-shot wake overlay closes.
+  stopVoiceWake();
   void openWakeWindow().catch((error) => logMain("wake.open.failed", { error: String(error), reason: "voice" }));
 }));
 ipcMain.handle("voice-wake:stop", () => { stopVoiceWake(); return { ok: true }; });

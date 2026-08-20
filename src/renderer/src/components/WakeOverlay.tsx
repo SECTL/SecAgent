@@ -40,6 +40,11 @@ function markdownToSpeech(value: string): string {
     .trim();
 }
 
+function ttsOnlyText(value: string): string | undefined {
+  const match = value.match(/^\s*<tts\b[^>]*>([\s\S]*?)<\/tts>\s*$/i);
+  return match ? markdownToSpeech(match[1]) : undefined;
+}
+
 export function WakeOverlay() {
   const bridge = window.secagent;
   const params = useMemo(() => new URLSearchParams(window.location.search), []);
@@ -246,7 +251,7 @@ export function WakeOverlay() {
       const answer = result.messages.filter((message) => message.role === "assistant").at(-1)?.content || "";
       processWakeAnswer(answer, true);
       const visibleAnswer = answer.replace(/^\s*<tts\b[^>]*>[\s\S]*?<\/tts>\s*/i, "").trimStart();
-      setFinalAnswerText(visibleAnswer || answer);
+      setFinalAnswerText(visibleAnswer || ttsOnlyText(answer) || answer);
       setStatus("completed");
       if (answer && !finalTtsFlushedRef.current) {
         if (!answer.startsWith(ttsScheduledTextRef.current)) {

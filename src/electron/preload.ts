@@ -44,6 +44,11 @@ contextBridge.exposeInMainWorld("secagent", {
     ipcRenderer.on("speech:event", wrapped);
     return () => ipcRenderer.removeListener("speech:event", wrapped);
   },
+  onVoiceWakeResume: (listener: () => void) => {
+    const wrapped = () => listener();
+    ipcRenderer.on("voice-wake:resume", wrapped);
+    return () => ipcRenderer.removeListener("voice-wake:resume", wrapped);
+  },
   onRuntimeEvent: (listener: (event: unknown) => void) => {
     const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
     ipcRenderer.on("sessions:runtime-event", wrapped);
