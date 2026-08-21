@@ -12,10 +12,11 @@ const ONBOARDING_MARKER = ".oobe-complete";
 const LEGACY_AGENT_MODEL_FIELDS = ["provider", "model", "apiKeyEnv", "baseUrl", "endpoint", "anthropicVersion", "maxTokens"] as const;
 const WORKSPACE_RUNTIME_ENV_KEYS = new Set(["SECTL_OFFICIAL_TOKEN", "SECTL_OFFICIAL_EMAIL", "SECTL_OFFICIAL_SECTL_TOKEN", "SECTL_OFFICIAL_USER_ID"]);
 /** The packaged app ships public service defaults; development uses the project .env. */
-const BUNDLED_ENV_FILE = process.resourcesPath ? path.join(process.resourcesPath, ".env") : undefined;
-export const PROJECT_ENV_FILE = BUNDLED_ENV_FILE && fs.existsSync(BUNDLED_ENV_FILE)
-  ? BUNDLED_ENV_FILE
-  : path.resolve(process.cwd(), ".env");
+const BUNDLED_ENV_FILES = process.resourcesPath
+  ? [path.join(process.resourcesPath, "official.env"), path.join(process.resourcesPath, ".env")]
+  : [];
+export const PROJECT_ENV_FILE = BUNDLED_ENV_FILES.find((file) => fs.existsSync(file))
+  ?? path.resolve(process.cwd(), ".env");
 
 if (fs.existsSync(PROJECT_ENV_FILE)) loadEnvFile(PROJECT_ENV_FILE, "project");
 export const DEFAULT_SYSTEM_PROMPT = `你是 SecAgent，一个教育场景操作助手。
