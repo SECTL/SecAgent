@@ -27,6 +27,7 @@ let remoteSocketSequence = 0;
 
 function projectPath(...parts: string[]): string {
   const candidates = [
+    path.join(process.resourcesPath, ...parts),
     path.join(process.cwd(), ...parts),
     path.join(app.getAppPath(), ...parts),
     path.join(__dirname, "../../", ...parts)
