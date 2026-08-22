@@ -17,6 +17,7 @@ import { listGoogleModels } from "../google-models.js";
 import { synthesizeSpeech } from "./tts.js";
 import { PluginManager, type SvgPreviewRequest } from "../plugin-manager.js";
 import { MarketplaceClient, type MarketplacePlugin, type MarketplaceVersion } from "../marketplace.js";
+import { detectCompanionApps } from "../companion-apps.js";
 import { SecAgentHttpServer } from "../secagent-http.js";
 import { Models } from "@opencode-ai/models";
 import { DEFAULT_WAKE_HOTKEY, normalizeWakeHotkey } from "../wake-hotkey.js";
@@ -631,6 +632,20 @@ ipcMain.handle("plugins:install", async () => {
 });
 ipcMain.handle("marketplace:list", () => marketplace.list());
 ipcMain.handle("marketplace:install", async (_event, version: MarketplaceVersion) => { if (!pluginManager) throw new Error("插件管理器尚未启动"); await marketplace.install(pluginManager, version); return pluginManager.list(); });
+ipcMain.handle("apps:detect", () => detectCompanionApps());
+ipcMain.handle("shell:open-external", async (_event, url: string) => {
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { throw new Error("无效的链接"); }
+  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]", "::1"].includes(parsed.hostname))) throw new Error("只允许打开 http(s) 链接");
+  await shell.openExternal(parsed.toString());
+  return { ok: true };
+});
+ipcMain.handle("oobe:complete", (event) => {
+  markOnboardingComplete(DEFAULT_WORKSPACE);
+  const senderWindow = BrowserWindow.fromWebContents(event.sender);
+  if (senderWindow && !senderWindow.isDestroyed() && senderWindow === settingsWindow) senderWindow.close();
+  return { ok: true };
+});
 ipcMain.handle("settings:save", (_event, payload: SettingsPayload) => {
   const customModelMode = Boolean(payload?.customModelMode);
   let providers = Array.isArray(payload?.providers) ? payload.providers : [];
@@ -646,21 +661,25 @@ ipcMain.handle("settings:save", (_event, payload: SettingsPayload) => {
   const nextWakeHotkey = normalizeWakeHotkey(payload.wake?.hotkey || DEFAULT_WAKE_HOTKEY);
   const previousWakeHotkey = activeWakeShortcut;
   const wakeShortcutChanged = previousWakeHotkey !== nextWakeHotkey;
+  let registeredNewShortcut = false;
   if (wakeShortcutChanged) {
-    if (!globalShortcut.register(nextWakeHotkey, () => { void openWakeWindow().catch((error) => logMain("wake.open.failed", { error: String(error) })); })) throw new Error(`快捷键 ${nextWakeHotkey} 已被其它应用占用`);
+    registeredNewShortcut = globalShortcut.register(nextWakeHotkey, () => { void openWakeWindow().catch((error) => logMain("wake.open.failed", { error: String(error) })); });
+    if (!registeredNewShortcut) {
+      if (previousWakeHotkey) throw new Error(`快捷键 ${nextWakeHotkey} 已被其它应用占用`);
+      logMain("wake.hotkey.occupied", { hotkey: nextWakeHotkey });
+    }
   }
   let saved: SettingsPayload;
   try {
     saved = saveSettings(DEFAULT_WORKSPACE, { ...payload, providers, wake: { hotkey: nextWakeHotkey, ...(payload.wake?.modelId ? { modelId: payload.wake.modelId } : {}), voiceEnabled: payload.wake?.voiceEnabled === true, voicePhrase: payload.wake?.voicePhrase } });
   } catch (error) {
-    if (wakeShortcutChanged) globalShortcut.unregister(nextWakeHotkey);
+    if (registeredNewShortcut) globalShortcut.unregister(nextWakeHotkey);
     throw error;
   }
-  if (wakeShortcutChanged) {
+  if (registeredNewShortcut) {
     if (previousWakeHotkey) globalShortcut.unregister(previousWakeHotkey);
     activeWakeShortcut = nextWakeHotkey;
   }
-  markOnboardingComplete(DEFAULT_WORKSPACE);
   sendToAppWindows("settings:changed", saved);
   closeVoiceWakeWindow();
   if (saved.wake.voiceEnabled) void startConfiguredVoiceWake().catch((error) => logMain("voice-wake.start.failed", { error: String(error) }));
