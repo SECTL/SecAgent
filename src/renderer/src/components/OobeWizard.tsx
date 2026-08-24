@@ -1,9 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ArrowRight } from "lucide-react";
 import { PresetCombobox } from "./PresetCombobox.js";
 import { emptyProvider } from "../utils.js";
 import { COMPANION_PLUGIN_IDS } from "../../../companion-catalog.js";
 
 type SourcePath = "official" | "custom";
+type OobeStep = "source" | "config" | "plugins";
+type OobePageDirection = "forward" | "back";
+
+const OOBE_STEP_ORDER: OobeStep[] = ["source", "config", "plugins"];
 
 function compareMarketVersions(left: string, right: string): number {
   const parse = (value: string) => value.replace(/^v/i, "").split(/[.+-]/).map((part) => Number(part) || 0);
@@ -28,7 +33,12 @@ function isConnectorPlugin(plugin: MarketplacePlugin): boolean {
 
 export function OobeWizard() {
   const bridge = window.secagent;
-  const [step, setStep] = useState<"source" | "plugins">("source");
+  const [step, setStep] = useState<OobeStep>("source");
+  const [pageTransition, setPageTransition] = useState<"idle" | "exit" | "enter">("idle");
+  const [pageDirection, setPageDirection] = useState<OobePageDirection>("forward");
+  const transitionTimer = useRef<number | undefined>(undefined);
+  const [introPhase, setIntroPhase] = useState<"intro" | "transition" | "complete">("intro");
+  const introTimer = useRef<number | undefined>(undefined);
   const [source, setSource] = useState<SourcePath | null>(null);
   const [settings, setSettings] = useState<SettingsPayload | null>(null);
   const [presets, setPresets] = useState<ProviderPreset[]>([]);
@@ -44,6 +54,36 @@ export function OobeWizard() {
   const [installingId, setInstallingId] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => () => {
+    if (transitionTimer.current !== undefined) window.clearTimeout(transitionTimer.current);
+    if (introTimer.current !== undefined) window.clearTimeout(introTimer.current);
+  }, []);
+
+  const beginIntro = () => {
+    if (introPhase !== "intro") return;
+    setIntroPhase("transition");
+    introTimer.current = window.setTimeout(() => {
+      setIntroPhase("complete");
+      introTimer.current = undefined;
+    }, 560);
+  };
+
+  const goToStep = (nextStep: OobeStep) => {
+    if (nextStep === step || pageTransition !== "idle") return;
+    const currentIndex = OOBE_STEP_ORDER.indexOf(step);
+    const nextIndex = OOBE_STEP_ORDER.indexOf(nextStep);
+    setPageDirection(nextIndex > currentIndex ? "forward" : "back");
+    setPageTransition("exit");
+    transitionTimer.current = window.setTimeout(() => {
+      setStep(nextStep);
+      setPageTransition("enter");
+      transitionTimer.current = window.setTimeout(() => {
+        setPageTransition("idle");
+        transitionTimer.current = undefined;
+      }, 240);
+    }, 160);
+  };
 
   useEffect(() => {
     void bridge.getSettings().then(setSettings).catch((reason) => setError(String(reason)));
@@ -132,7 +172,7 @@ export function OobeWizard() {
           : [...settings.providers.filter((item) => item.id !== "sectl-official"), provider, ...settings.providers.filter((item) => item.id === "sectl-official")];
         await persist({ ...settings, customModelMode: true, providers });
       }
-      setStep("plugins");
+      goToStep("plugins");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -173,30 +213,41 @@ export function OobeWizard() {
 
   if (!settings) return <main className="settings-shell oobe-shell has-window-title"><p>正在读取配置…</p></main>;
 
-  return <main className={`settings-shell oobe-shell has-window-title ${bridge.platform === "darwin" ? "macos-settings" : ""} ${bridge.platform === "win32" ? "windows-settings" : ""}`}>
-    <div className="settings-window-title">欢迎使用 SecAgent</div>
+  return <main className={`settings-shell oobe-shell has-window-title ${introPhase === "intro" ? "oobe-intro-active" : ""} ${bridge.platform === "darwin" ? "macos-settings" : ""} ${bridge.platform === "win32" ? "windows-settings" : ""}`}>
+    <div className={`settings-window-title oobe-window-title ${introPhase === "intro" ? "oobe-window-title-intro" : introPhase === "transition" ? "oobe-window-title-transition" : "oobe-window-title-ready"}`}>欢迎使用 SecAgent</div>
+    {introPhase !== "complete" && <section className={`oobe-splash ${introPhase === "transition" ? "oobe-splash-exit" : ""}`} aria-label="SecAgent 欢迎页">
+      <img className="oobe-splash-icon" src="/icon.svg" alt="SecAgent" />
+      <button className="oobe-splash-start" type="button" aria-label="开始配置 SecAgent" onClick={beginIntro}><ArrowRight aria-hidden="true" size={30} strokeWidth={1.8} /></button>
+    </section>}
+    <div className={`oobe-content ${introPhase === "intro" ? "oobe-content-hidden" : introPhase === "transition" ? "oobe-content-intro-enter" : "oobe-content-ready"}`}>
+    <div className={`oobe-page ${pageTransition === "exit" ? "oobe-page-exit" : pageTransition === "enter" ? "oobe-page-enter" : ""} oobe-page-${pageDirection}`}>
     <header className="oobe-header">
       <p className="eyebrow">WELCOME TO SECAGENT</p>
-      <p className="oobe-step-label">第 {step === "source" ? "1" : "2"} / 2 步</p>
-      <h1>{step === "source" ? "先解决模型从哪来" : "安装课堂联动插件"}</h1>
+      <p className="oobe-step-label">第 {step === "source" ? "1" : step === "config" ? "2" : "3"} / 3 步</p>
+      <h1>{step === "source" ? "选择模型服务" : step === "config" ? "配置模型服务" : "安装课堂联动插件"}</h1>
       <p>{step === "source"
-        ? "可以用 SECTL 账号使用官方模型服务，也可以接入自己的模型提供商。选官方服务时不会开启自定义模型模式。"
-        : "先看本机已经装了哪些适配应用，再安装对应的联动插件。这一步可以跳过，之后随时在设置里补装。"}</p>
+        ? "先选择使用 SECTL 官方模型服务，还是接入自己的模型提供商。"
+        : step === "config"
+          ? "完成模型服务的登录或接口配置，之后即可开始使用 SecAgent。"
+          : "先看看本机已经装了哪些适配应用，再安装对应的联动插件。这一步也可以跳过。"}</p>
     </header>
     {error && <div className="settings-error">{error}</div>}
 
     {step === "source" && <>
       <div className="oobe-choice-grid">
-        <button type="button" className={`oobe-choice ${source === "official" ? "selected" : ""}`} onClick={() => setSource("official")}>
-          <strong>登录官方服务</strong>
-          <span>使用 SECTL 账号使用官方模型，不必自己准备 API Key。默认关闭自定义模型模式。</span>
+        <button type="button" className="oobe-choice" onClick={() => { setSource("official"); goToStep("config"); }}>
+          <span className="oobe-choice-copy"><strong>登录官方服务</strong><span>使用 SECTL 账号使用官方模型，不必自己准备 API Key。默认关闭自定义模型模式。</span></span>
+          <span className="oobe-choice-arrow" aria-hidden="true"><ArrowRight size={22} strokeWidth={2} /></span>
         </button>
-        <button type="button" className={`oobe-choice ${source === "custom" ? "selected" : ""}`} onClick={() => setSource("custom")}>
-          <strong>设置自定义模型提供商</strong>
-          <span>接入 OpenAI 兼容、Anthropic、Gemini 等自备供应商，并开启自定义模型模式。</span>
+        <button type="button" className="oobe-choice" onClick={() => { setSource("custom"); goToStep("config"); }}>
+          <span className="oobe-choice-copy"><strong>设置自定义模型提供商</strong><span>接入 OpenAI 兼容、Anthropic、Gemini 等自备供应商，并开启自定义模型模式。</span></span>
+          <span className="oobe-choice-arrow" aria-hidden="true"><ArrowRight size={22} strokeWidth={2} /></span>
         </button>
       </div>
 
+    </>}
+
+    {step === "config" && <>
       {source === "official" && <article className="settings-card oobe-panel">
         <p>{officialLoggedIn ? `已登录 ${officialEmail || "SECTL 账号"}。继续后将使用官方模型服务。` : "将打开浏览器登录 SECTL。登录完成后会自动返回，并使用官方模型服务。"}</p>
         {!officialLoggedIn && <button className="primary-button" type="button" disabled={officialBusy} onClick={() => void loginOfficial()}>{officialBusy ? "等待浏览器授权…" : "打开浏览器登录 SECTL"}</button>}
@@ -235,6 +286,7 @@ export function OobeWizard() {
       </article>}
 
       <div className="oobe-actions">
+        <button className="secondary-button" type="button" onClick={() => { setSource(null); goToStep("source"); }}>上一步</button>
         <button className="primary-button" type="button" disabled={!source || busy || (source === "official" && !officialLoggedIn)} onClick={() => void continueFromSource()}>{busy ? "保存中…" : "下一步"}</button>
       </div>
     </>}
@@ -272,10 +324,12 @@ export function OobeWizard() {
         })}
       </section>}
       <div className="oobe-actions">
-        <button className="secondary-button" type="button" onClick={() => setStep("source")}>上一步</button>
+        <button className="secondary-button" type="button" onClick={() => goToStep("config")}>上一步</button>
         <button className="secondary-button" type="button" disabled={busy} onClick={() => void finish()}>暂时跳过</button>
         <button className="primary-button" type="button" disabled={busy} onClick={() => void finish()}>{busy ? "完成中…" : "完成并开始使用"}</button>
       </div>
     </>}
+    </div>
+    </div>
   </main>;
 }

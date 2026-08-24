@@ -1,5 +1,21 @@
 # SecAgent CLI
 
+## Workspace selection
+
+The default workspace is `~/SecAgentWorkspace`. Set `SECTL_WORKSPACE` before starting
+the CLI or desktop app to use another directory. An explicit `--workspace` argument
+overrides the environment variable for CLI commands.
+
+```powershell
+$env:SECTL_WORKSPACE = "D:\Temp\SecAgentTest"
+npm run build:cli
+node dist/index.js init
+node dist/index.js sessions list
+```
+
+To use the setting for the desktop development app, keep the environment variable in
+the same PowerShell session and run `npm run build` followed by `npm run start`.
+
 ## CLI 调试 Agent
 
 CLI 的每次 `run` 都会持久化为一个会话，并默认实时打印模型思考片段、工具调用、工具返回结果和最终回答。模型请求失败时会保存错误消息并返回非零退出码。

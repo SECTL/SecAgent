@@ -26,6 +26,7 @@ import { normalizeReasoningEffort } from "../reasoning.js";
 
 let windowRef: BrowserWindow | undefined;
 let settingsWindow: BrowserWindow | undefined;
+let onboardingCompletionRequested = false;
 let wakeWindow: BrowserWindow | undefined;
 let voiceWakeWindow: BrowserWindow | undefined;
 let pluginManager: PluginManager | undefined;
@@ -308,13 +309,14 @@ function registerWakeShortcut(shortcut: string): void {
   activeWakeShortcut = normalized;
 }
 
-function createWindow(): void {
+function createWindow(visible = true): void {
   windowRef = new BrowserWindow({
     width: 1120,
     height: 760,
     minWidth: 820,
     minHeight: 560,
     title: "SecAgent",
+    show: visible,
     skipTaskbar: false,
     ...windowChromeOptions(),
     icon: appIconPath(),
@@ -356,6 +358,7 @@ async function openPluginSvgPreview(request: SvgPreviewRequest): Promise<boolean
 
 function openSettings(oobeOrMenuItem: boolean | Electron.MenuItem = false, _window?: Electron.BaseWindow, _event?: Electron.KeyboardEvent): void {
   const oobe = typeof oobeOrMenuItem === "boolean" ? oobeOrMenuItem : false;
+  if (oobe) onboardingCompletionRequested = false;
   if (settingsWindow && !settingsWindow.isDestroyed()) {
     settingsWindow.show();
     settingsWindow.focus();
@@ -379,7 +382,14 @@ function openSettings(oobeOrMenuItem: boolean | Electron.MenuItem = false, _wind
   const query = oobe ? "?settings=1&oobe=1" : "?settings=1";
   if (process.env.ELECTRON_RENDERER_URL) settingsWindow.loadURL(`${process.env.ELECTRON_RENDERER_URL}${query}`);
   else settingsWindow.loadFile(path.join(__dirname, "../renderer/index.html"), { query: oobe ? { settings: "1", oobe: "1" } : { settings: "1" } });
-  settingsWindow.on("closed", () => { settingsWindow = undefined; });
+  settingsWindow.on("closed", () => {
+    settingsWindow = undefined;
+    if (oobe) {
+      if (!onboardingCompletionRequested) app.quit();
+      return;
+    }
+    if (windowRef && !windowRef.isDestroyed() && !windowRef.isVisible()) windowRef.show();
+  });
 }
 
 function createApplicationMenu(): void {
@@ -642,9 +652,11 @@ ipcMain.handle("shell:open-external", async (_event, url: string) => {
   return { ok: true };
 });
 ipcMain.handle("oobe:complete", (event) => {
+  onboardingCompletionRequested = true;
   markOnboardingComplete(DEFAULT_WORKSPACE);
   const senderWindow = BrowserWindow.fromWebContents(event.sender);
   if (senderWindow && !senderWindow.isDestroyed() && senderWindow === settingsWindow) senderWindow.close();
+  if (windowRef && !windowRef.isDestroyed()) { windowRef.show(); windowRef.focus(); }
   return { ok: true };
 });
 ipcMain.handle("settings:save", (_event, payload: SettingsPayload) => {
@@ -878,7 +890,7 @@ app.whenReady().then(async () => {
     app.dock?.setIcon(appIconPath());
   }
   logMain("app.ready");
-  createWindow();
+  createWindow(!needsOnboarding);
   try {
     const initialSettings = readSettings(DEFAULT_WORKSPACE);
     registerWakeShortcut(initialSettings.wake.hotkey || DEFAULT_WAKE_HOTKEY);
