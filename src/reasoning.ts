@@ -57,6 +57,10 @@ export function reasoningEffortsForTarget(target?: ReasoningTarget): ReasoningEf
   const family = reasoningFamily(target);
   const model = (target.model || "").toLowerCase();
   if (isFreeDeepSeekAlias(target)) return ["high"];
+  // The lyh gpt-5.6-luna endpoint accepts Responses reasoning efforts starting
+  // at minimal. Sending `none` currently produces a successful but empty
+  // message, so expose its real minimum instead of advertising no-thinking.
+  if (model === "gpt-5.6-luna") return [...ALL_RESPONSES_EFFORTS.slice(1)];
   if (family === "deepseek") return ["none", "high", "max"];
   if (family === "doubao") return ["none", "low", "medium", "high"];
   if (family === "qwen") return ["none", "low", "medium", "high"];

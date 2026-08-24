@@ -41,6 +41,8 @@ test("Step exposes only documented effort levels", () => {
 
 test("Responses and native providers use their own field shapes", () => {
   assert.deepEqual(reasoningFieldsForResponses({ provider: "openai-responses", model: "gpt-5.2" }, "medium"), { reasoning: { effort: "medium", summary: "auto" } });
+  assert.deepEqual(reasoningEffortsForTarget({ provider: "openai-responses", model: "gpt-5.6-luna" }), ["minimal", "low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(reasoningFieldsForResponses({ provider: "openai-responses", model: "gpt-5.6-luna" }, "none"), { reasoning: { effort: "minimal", summary: "auto" } });
   assert.deepEqual(googleThinkingConfig({ provider: "google", model: "gemini-3.7-flash" }, "none"), { thinkingLevel: "low" });
   assert.deepEqual(anthropicThinkingConfig({ provider: "anthropic", model: "claude-sonnet-4-6", maxTokens: 16384 }, "none"), { thinking: { type: "disabled" } });
 });
