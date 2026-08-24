@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { PluginSettingsPanel } from "./PluginSettingsPanel.js";
 import { SecScoreSettingsPage } from "./SecScoreSettingsPage.js";
 import { PresetCombobox } from "./PresetCombobox.js";
+import { OobeWizard } from "./OobeWizard.js";
 import { reasoningEffortLabels, ttsRates, ttsVoices } from "../constants.js";
 import { emptyMcp, emptyProvider, reasoningEffortsForModel } from "../utils.js";
 import { DEFAULT_WAKE_HOTKEY, displayWakeHotkey, wakeHotkeyFromKeyboardEvent } from "../../../wake-hotkey.js";
@@ -26,7 +27,6 @@ export function SettingsApp() {
   const [marketPlugins, setMarketPlugins] = useState<MarketplacePlugin[]>([]);
   const [marketError, setMarketError] = useState("");
   const [error, setError] = useState("");
-  const [saved, setSaved] = useState(false);
   const [officialEmail, setOfficialEmail] = useState("");
   const [officialPoints, setOfficialPoints] = useState<number | null>(null);
   const [officialPointsBusy, setOfficialPointsBusy] = useState(false);
@@ -108,6 +108,7 @@ export function SettingsApp() {
     setProviderModalOpen(true);
     setSettings((current) => current && { ...current, models: current.models.filter((model) => model.id !== draft.id) });
   }, [settings, providerModalOpen]);
+  if (isOobe) return <OobeWizard />;
   if (!settings) return <main className="settings-shell"><p>正在读取配置…</p></main>;
   const updateProvider = (patch: Partial<ProviderConfig>) => setEditingProvider((current) => current && { ...current, ...patch });
   const presetLocked = !!editingProvider?.preset && editingProvider.preset !== "custom";
@@ -136,22 +137,9 @@ export function SettingsApp() {
     if (!name || (name !== oldName && settings.mcp.servers[name])) return;
     setSettings((current) => current && { ...current, mcp: { servers: Object.fromEntries(Object.entries(current.mcp.servers).map(([key, server]) => [key === oldName ? name : key, server])) } });
   };
-  const save = async () => {
-    setError(""); setSaved(false);
-    try { const result = await bridge.saveSettings(settings); setSettings(result); setSaved(true); setTimeout(() => setSaved(false), 2200); }
-    catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-      try {
-        const persisted = await bridge.getSettings();
-        if (persisted.wake.hotkey !== settings.wake.hotkey) {
-          setSettings((current) => current && current.wake.hotkey === settings.wake.hotkey ? { ...current, wake: persisted.wake } : current);
-        }
-      } catch { /* Keep the original save error visible. */ }
-    }
-  };
   const officialLogin = async () => {
     setError(""); setOfficialBusy(true);
-    try { const next = await bridge.officialOAuthLogin(); setSettings(next); setAvailableModels(await bridge.listModels()); setOfficialLoggedIn(true); setOfficialExpired(false); setSaved(true); await refreshOfficialPoints(); }
+    try { const next = await bridge.officialOAuthLogin(); setSettings(next); setAvailableModels(await bridge.listModels()); setOfficialLoggedIn(true); setOfficialExpired(false); await refreshOfficialPoints(); }
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setOfficialBusy(false); }
   };
@@ -162,15 +150,11 @@ export function SettingsApp() {
   return <main className={`settings-shell has-window-title ${isOobe ? "oobe-shell" : ""} ${bridge.platform === "darwin" ? "macos-settings" : ""} ${bridge.platform === "win32" ? "windows-settings" : ""}`}>
     <div className="settings-window-title">SecAgent设置</div>
     {!isOobe && <nav className="settings-nav" aria-label="Settings navigation"><button type="button" className={activePage === "settings-wake" ? "active" : ""} aria-current={activePage === "settings-wake" ? "page" : undefined} onClick={() => { setActivePage("settings-wake"); window.history.replaceState(null, "", "#settings-wake"); }}>随时唤醒</button><button type="button" className={activePage === "settings-tts" ? "active" : ""} aria-current={activePage === "settings-tts" ? "page" : undefined} onClick={() => { setActivePage("settings-tts"); window.history.replaceState(null, "", "#settings-tts"); }}>朗读</button><button type="button" className={activePage === "settings-speech" ? "active" : ""} aria-current={activePage === "settings-speech" ? "page" : undefined} onClick={() => { setActivePage("settings-speech"); window.history.replaceState(null, "", "#settings-speech"); }}>语音识别</button><button type="button" className={activePage === "settings-models" ? "active" : ""} aria-current={activePage === "settings-models" ? "page" : undefined} onClick={() => { setActivePage("settings-models"); window.history.replaceState(null, "", "#settings-models"); }}>模型</button><button type="button" className={activePage === "settings-mcp" ? "active" : ""} aria-current={activePage === "settings-mcp" ? "page" : undefined} onClick={() => { setActivePage("settings-mcp"); window.history.replaceState(null, "", "#settings-mcp"); }}>MCP 服务</button><button type="button" className={activePage === "settings-plugins" ? "active" : ""} aria-current={activePage === "settings-plugins" ? "page" : undefined} onClick={() => { setActivePage("settings-plugins"); window.history.replaceState(null, "", "#settings-plugins"); }}>插件</button>{plugins.flatMap((plugin) => plugin.settingsPages.map((page) => { const pageId = `plugin-${plugin.id}-${page.id}`; return <button type="button" className={activePage === pageId ? "active" : ""} aria-current={activePage === pageId ? "page" : undefined} key={pageId} onClick={() => { setActivePage(pageId); window.history.replaceState(null, "", `#${pageId}`); }}>{page.title}</button>; }))}</nav>}
-    {isOobe && <>
-      <header className="oobe-header"><p className="eyebrow">WELCOME TO SECAGENT</p><h1>先配置一个大模型</h1><p>完成模型配置后就可以开始使用。其他设置暂时不用处理，之后随时可以回来修改。</p><button className="primary-button" onClick={() => void save()}>保存并开始使用</button></header>
-      <div className="oobe-intro"><strong>只需要完成这一项</strong><span>选择模型协议，填写模型名称和 API Key。MCP、语音及其他高级设置不会影响首次使用。</span></div>
-    </>}
-    {error && <div className="settings-error">{error}</div>}{isOobe && saved && <div className="settings-success">设置已保存，下一次请求立即生效。</div>}
+    {error && <div className="settings-error">{error}</div>}
     <section id="settings-wake" className={`settings-section ${isOobe || activePage === "settings-wake" ? "settings-section-active" : ""}`}><div className="section-title"><div><h2>随时唤醒</h2><p>按下全局快捷键后，在当前显示器工作区唤起语音 Agent。窗口不会覆盖任务栏。</p></div></div>
       <article className="settings-card"><WakeHotkeyField value={settings.wake.hotkey} platform={bridge.platform} onChange={(hotkey) => setSettings((current) => current && { ...current, wake: { ...current.wake, hotkey } })} /><div className="form-grid wake-model-setting"><label>随时唤起使用的模型<select value={settings.wake.modelId || settings.defaultModelId || availableModels[0]?.id || ""} onChange={(event) => setSettings((current) => current && { ...current, wake: { ...current.wake, modelId: event.target.value } })}>{availableModels.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label></div><label className="toggle-row"><span className="toggle-copy"><strong>语音唤醒</strong><small>开启后持续使用麦克风，识别到唤醒词后等同于按下上面的快捷键。</small></span><input type="checkbox" checked={settings.wake.voiceEnabled === true} onChange={(event) => setSettings((current) => current && { ...current, wake: { ...current.wake, voiceEnabled: event.target.checked } })} /></label><label>唤醒词<input value={settings.wake.voicePhrase || "小泽同学"} onChange={(event) => setSettings((current) => current && { ...current, wake: { ...current.wake, voicePhrase: event.target.value } })} placeholder="小泽同学" /></label><p className="settings-help">Windows 默认 Ctrl Alt A；macOS 默认 Ctrl Option A。语音唤醒始终使用随安装包提供的本地模型，无需网络。</p></article>
     </section>
-    <section id="settings-tts" className={`settings-section ${isOobe || activePage === "settings-tts" ? "settings-section-active" : ""}`}><div className="section-title"><div><h2>朗读</h2><p>右键消息气泡选择“朗读”。语音由 Microsoft Edge 在线生成，不需要 API Key。</p></div></div>
+    <section id="settings-tts" className={`settings-section ${isOobe || activePage === "settings-tts" ? "settings-section-active" : ""}`}><div className="section-title"><div><h2>朗读</h2><p>右键助手消息气泡选择“朗读”。语音由 Microsoft Edge 在线生成，不需要 API Key。</p></div></div>
       <article className="settings-card"><div className="form-grid"><label>语音音色<select value={settings.tts.voice} onChange={(event) => setSettings((current) => current && { ...current, tts: { ...current.tts, voice: event.target.value } })}>{ttsVoices.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>语速<select value={settings.tts.rate} onChange={(event) => setSettings((current) => current && { ...current, tts: { ...current.tts, rate: event.target.value } })}>{ttsRates.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div></article>
     </section>
     <section id="settings-models" className={`settings-section ${isOobe || activePage === "settings-models" ? "settings-section-active" : ""}`}><div className="section-title"><div><h2>模型提供商</h2><p>每个提供商可以包含多个模型；预设信息在启动时从 models.dev 更新。</p></div></div>
