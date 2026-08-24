@@ -1,6 +1,7 @@
 import type { PluginPromptContribution } from "./plugin-manager.js";
 import type { ChatAttachment, ReasoningEffort, SecAgentConfig } from "./types.js";
 import { toolResultParts, toolResultText } from "./tool-content.js";
+import { anthropicThinkingConfig, googleThinkingConfig, reasoningFieldsForChat, reasoningFieldsForResponses } from "./reasoning.js";
 
 const WORKSPACE_FILE_OUTPUT_PROMPT = `
 
@@ -31,34 +32,6 @@ const R3F_RENDERING_PROMPT = `
 </R3F>
 `;
 
-function isDeepSeekV4Model(modelName: string): boolean {
-  return /^(?:deepseek-v4-flash|deepseek-v4-pro)(?:[-_].*)?$/i.test(modelName.trim());
-}
-
-function deepSeekReasoningEffort(effort: ReasoningEffort): "none" | "low" | "high" | "max" {
-  if (effort === "none") return "none";
-  if (effort === "low") return "low";
-  if (effort === "max") return "max";
-  return "high";
-}
-
-function isDoubaoModel(modelName: string): boolean {
-  return /^(?:doubao|seed)[-_.]/i.test(modelName.trim());
-}
-
-/**
- * Volcengine Ark (Doubao) only accepts reasoning effort low/medium/high and
- * disables thinking via a top-level thinking.type=disabled field (it rejects
- * "none" and unknown reasoning sub-fields). Returns request fields to spread
- * into the Responses body; out-of-range efforts are clamped to supported levels.
- */
-function doubaoReasoningFields(effort: ReasoningEffort): Record<string, unknown> {
-  if (effort === "none") return { thinking: { type: "disabled" } };
-  const level = effort === "minimal" || effort === "low" ? "low"
-    : effort === "medium" ? "medium"
-    : "high"; // high / xhigh / max
-  return { reasoning: { effort: level, summary: "auto" } };
-}
 import type { RegisteredMcpTool } from "./mcp-adapter.js";
 import type { LoadedSkill } from "./skills.js";
 
@@ -321,7 +294,11 @@ export class ModelToolAgent {
       const toolCalls = new Map<number, { id?: string; function: { name?: string; arguments: string } }>();
       signal?.throwIfAborted();
       await this.streamRequest(`${this.agent.baseUrl}${this.agent.endpoint || "/chat/completions"}`, { "Content-Type": "application/json", Authorization: `Bearer ${key}` }, {
-        model: this.agent.model, messages, tools: definitions, max_tokens: this.agent.maxTokens, reasoning_effort: reasoningEffort
+        model: this.agent.model,
+        messages,
+        tools: definitions,
+        max_tokens: this.agent.maxTokens,
+        ...reasoningFieldsForChat(this.agent, reasoningEffort)
       }, (chunk) => {
         const delta = (chunk.choices as Array<{ delta?: { content?: string; tool_calls?: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }> } }> | undefined)?.[0]?.delta;
         if (!delta) return;
@@ -405,11 +382,7 @@ export class ModelToolAgent {
         input,
         tools: definitions,
         max_output_tokens: this.agent.maxTokens,
-        ...(isDeepSeekV4Model(this.agent.model)
-          ? { reasoning: { effort: deepSeekReasoningEffort(reasoningEffort), summary: "auto" } }
-          : isDoubaoModel(this.agent.model)
-            ? doubaoReasoningFields(reasoningEffort)
-            : { reasoning: { effort: reasoningEffort, summary: "auto" } })
+        ...reasoningFieldsForResponses(this.agent, reasoningEffort)
       }, (event) => {
         const type = typeof event.type === "string" ? event.type : "";
         if (type === "response.output_text.delta" && typeof event.delta === "string") {
@@ -531,7 +504,7 @@ export class ModelToolAgent {
         systemInstruction: { parts: [{ text: dynamicSystem ? `${systemPrompt}\n\n${dynamicSystem}` : systemPrompt }] },
         contents,
         tools: [{ functionDeclarations: definitions }],
-        generationConfig: { maxOutputTokens: this.agent.maxTokens, thinkingConfig: this.googleThinkingConfig(reasoningEffort) }
+        generationConfig: { maxOutputTokens: this.agent.maxTokens, thinkingConfig: googleThinkingConfig(this.agent, reasoningEffort) }
       };
       signal?.throwIfAborted();
       await this.streamGoogleRequest(`${this.agent.baseUrl}${this.agent.endpoint || `/models/${encodeURIComponent(this.agent.model || "gemini-2.5-flash")}:streamGenerateContent`}`, key, body, (chunk) => {
@@ -587,12 +560,6 @@ export class ModelToolAgent {
     throw new Error("工具调用循环意外结束");
   }
 
-  private googleThinkingConfig(effort: ReasoningEffort): Record<string, unknown> {
-    const model = this.agent.model.toLowerCase();
-    if (model.includes("gemini-3")) return { thinkingLevel: effort === "none" ? "minimal" : effort === "max" || effort === "xhigh" ? "high" : effort };
-    const budget = effort === "none" ? 0 : effort === "minimal" ? 512 : effort === "low" ? 1024 : effort === "medium" ? 4096 : effort === "max" || effort === "xhigh" ? 16384 : 8192;
-    return { thinkingBudget: budget, includeThoughts: true };
-  }
   private async streamGoogleRequest(url: string, key: string, body: unknown, onChunk: (chunk: Record<string, unknown>) => void, completeBody: () => unknown, signal?: AbortSignal): Promise<void> {
     const requestUrl = `${url}${url.includes("?") ? "&" : "?"}alt=sse`;
     this.trace?.("model.request", { url, body });
@@ -645,7 +612,7 @@ export class ModelToolAgent {
         system: dynamicSystem ? `${systemPrompt}\n\n${dynamicSystem}` : systemPrompt,
         messages,
         tools: definitions,
-        ...this.anthropicThinkingConfig(reasoningEffort)
+        ...anthropicThinkingConfig(this.agent, reasoningEffort)
       }, (event) => {
         const type = event.type;
         const index = typeof event.index === "number" ? event.index : 0;
@@ -720,12 +687,4 @@ export class ModelToolAgent {
     catch { return { _error: "模型返回了无法解析的工具参数" }; }
   }
 
-  private anthropicThinkingConfig(effort: ReasoningEffort): Record<string, unknown> {
-    if (effort === "none") return {};
-    const model = this.agent.model.toLowerCase();
-    const adaptive = /claude-(?:opus|sonnet|haiku)-(?:4-6|4-7|4-8|5)/.test(model);
-    if (adaptive) return { thinking: { type: "adaptive" }, output_config: { effort: effort === "max" || effort === "xhigh" ? "high" : effort === "minimal" ? "low" : effort } };
-    const budget = effort === "minimal" ? 512 : effort === "low" ? 1024 : effort === "medium" ? 4096 : effort === "max" || effort === "xhigh" ? 16384 : 8192;
-    return { thinking: { type: "enabled", budget_tokens: Math.min(budget, Math.max(1024, this.agent.maxTokens - 1)) } };
-  }
 }

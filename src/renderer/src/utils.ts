@@ -1,3 +1,5 @@
+import { reasoningEffortsForTarget } from "../../reasoning.js";
+
 export function isDeepSeekV4Model(modelName?: string): boolean {
   return /^(?:deepseek-v4-flash|deepseek-v4-pro)(?:[-_].*)?$/i.test((modelName || "").trim());
 }
@@ -7,13 +9,7 @@ export function isDoubaoModel(modelName?: string): boolean {
 }
 
 export function reasoningEffortsForModel(model?: ModelOption): ReasoningEffort[] {
-  // The official FreeDeepseek web aliases select their own mode server-side;
-  // expose one fixed client option instead of misleading generic effort levels.
-  if (/^(?:deepseek-default|deepseek-reasoner|deepseek-v4-pro)$/i.test((model?.model || "").trim())) return ["high"];
-  if (isDeepSeekV4Model(model?.model)) return ["none", "low", "high", "max"];
-  // Volcengine Ark (Doubao) only supports none/low/medium/high.
-  if (isDoubaoModel(model?.model)) return ["none", "low", "medium", "high"];
-  return ["none", "minimal", "low", "medium", "high", "xhigh"];
+  return reasoningEffortsForTarget(model ? { model: model.model, provider: model.provider } : undefined);
 }
 
 export function isOfficialModel(model: ModelOption): boolean {

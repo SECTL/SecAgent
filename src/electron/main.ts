@@ -22,6 +22,7 @@ import { SecAgentHttpServer } from "../secagent-http.js";
 import { Models } from "@opencode-ai/models";
 import { DEFAULT_WAKE_HOTKEY, normalizeWakeHotkey } from "../wake-hotkey.js";
 import { generateSessionTitle } from "../session-title.js";
+import { normalizeReasoningEffort } from "../reasoning.js";
 
 let windowRef: BrowserWindow | undefined;
 let settingsWindow: BrowserWindow | undefined;
@@ -742,7 +743,8 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
   sessionStore.appendMessage(id, "user", text, undefined, undefined, attachments);
   const { workspace, config } = loadConfig(DEFAULT_WORKSPACE);
   useConfiguredModel(config, modelId);
-  const selectedReasoningEffort: ReasoningEffort = ["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(reasoningEffort) ? reasoningEffort : "high";
+  const requestedReasoningEffort: ReasoningEffort = ["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(reasoningEffort) ? reasoningEffort : "high";
+  const selectedReasoningEffort = normalizeReasoningEffort(config.agent, requestedReasoningEffort);
   const audit = new AuditStore(workspace);
   const abortController = new AbortController();
   activeSessionRuns.set(id, abortController);
