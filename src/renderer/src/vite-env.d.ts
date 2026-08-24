@@ -17,6 +17,7 @@ interface SkillSummary { name: string; description: string; path: string }
 interface PluginStatus { id: string; format?: "secagent" | "agent"; name: string; version: string; icon?: string; enabled: boolean; state: "inactive" | "starting" | "error" | "ready"; message?: string; description?: string; author?: string; repository?: string; permissions?: string[]; readme?: string; settingsPages: Array<{ id: string; title: string; description?: string }> }
 interface MarketplaceVersion { version: string; minHostApiVersion: number; assetUrl: string; sha256: string; permissions: string[]; platforms: string[] }
 interface MarketplacePlugin { id: string; format?: "secagent" | "agent"; name: string; description: string; repository: string; icon?: string; readme?: string; versions: MarketplaceVersion[] }
+interface DetectedCompanionApp { pluginId: string; appName: string; description: string; detected: boolean; evidence?: string }
 interface Window {
   secagent: {
     platform: NodeJS.Platform;
@@ -40,6 +41,9 @@ interface Window {
     installPlugin(): Promise<PluginStatus[]>;
     listMarketplace(): Promise<MarketplacePlugin[]>;
     installMarketplaceVersion(version: MarketplaceVersion): Promise<PluginStatus[]>;
+    detectInstalledApps(): Promise<DetectedCompanionApp[]>;
+    openExternal(url: string): Promise<{ ok: true }>;
+    completeOnboarding(): Promise<{ ok: true }>;
     createSession(): Promise<SessionData>;
     deleteSession(id: string): Promise<SessionMeta[]>;
     getSession(id: string): Promise<SessionData>;
