@@ -90,7 +90,7 @@ export function App() {
     bridge.setWakeContext({ sessionId: session?.meta.id, modelId: selectedModelId || undefined, reasoningEffort: customModelMode ? reasoningEffort : defaultEffort });
   }, [bridge, session?.meta.id, selectedModelId, reasoningEffort, defaultEffort, customModelMode]);
   useEffect(() => {
-    if (!reasoningEfforts.includes(reasoningEffort)) setReasoningEffort("high");
+    if (!reasoningEfforts.includes(reasoningEffort)) setReasoningEffort(reasoningEfforts[0] || "high");
   }, [reasoningEffort, reasoningEfforts]);
   const initializing = useRef(false);
   const formRef = useRef<HTMLFormElement>(null);

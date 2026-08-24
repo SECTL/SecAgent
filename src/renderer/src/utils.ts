@@ -9,6 +9,11 @@ export function isDoubaoModel(modelName?: string): boolean {
 }
 
 export function reasoningEffortsForModel(model?: ModelOption): ReasoningEffort[] {
+  if (isOfficialTierModel(model)) {
+    if (model?.model === "virtual-fast") return ["none"];
+    if (model?.model === "virtual-standard") return ["low"];
+    return ["high"];
+  }
   return reasoningEffortsForTarget(model ? { model: model.model, provider: model.provider } : undefined);
 }
 
