@@ -31,10 +31,83 @@ jobs:
 
       - run: npm ci
       - run: npm test
-      - run: npm run package
+      - name: Package Windows application directory
+        if: matrix.name == 'windows'
+        run: npm run package:windows
 
-      - uses: actions/upload-artifact@v4
+      - name: Package Linux or macOS application
+        if: matrix.name != 'windows'
+        run: npm run package
+
+      - name: Prepare Windows artifact names
+        if: matrix.name == 'windows'
+        id: windows-meta
+        shell: pwsh
+        run: |
+          $package = Get-Content package.json -Raw | ConvertFrom-Json
+          $timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss")
+          $sha = "${{ github.sha }}".Substring(0, 12)
+          $green = "SecAgent-green-$timestamp-$sha.zip"
+          $installer = "SecAgent-installer-$timestamp-$sha.zip"
+          $setup = "SecAgent-Setup-$timestamp-$sha"
+
+          "appVersion=$($package.version)" >> $env:GITHUB_OUTPUT
+          "timestamp=$timestamp" >> $env:GITHUB_OUTPUT
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+          "green=$green" >> $env:GITHUB_OUTPUT
+          "installer=$installer" >> $env:GITHUB_OUTPUT
+          "setup=$setup" >> $env:GITHUB_OUTPUT
+
+      - name: Create Windows green ZIP
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: |
+          $destination = Join-Path "release" "${{ steps.windows-meta.outputs.green }}"
+          Compress-Archive -Path "release\win-unpacked\*" -DestinationPath $destination -CompressionLevel Optimal
+
+      - name: Build Inno Setup installer
+        if: matrix.name == 'windows'
+        uses: Minionguyjpro/Inno-Setup-Action@v1.2.9
+        with:
+          path: installer/SecAgent.iss
+          install_latest: true
+          options: >-
+            /DAppVersion=${{ steps.windows-meta.outputs.appVersion }}
+            /DSourceDir=${{ github.workspace }}\release\win-unpacked
+            /DOutputDir=${{ github.workspace }}\release\inno
+            /DOutputBaseFilename=${{ steps.windows-meta.outputs.setup }}
+
+      - name: Create Windows installer ZIP
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: |
+          $setup = Join-Path "release\inno" "${{ steps.windows-meta.outputs.setup }}.exe"
+          if (-not (Test-Path -LiteralPath $setup)) {
+            throw "Inno Setup output was not found: $setup"
+          }
+          $destination = Join-Path "release" "${{ steps.windows-meta.outputs.installer }}"
+          Compress-Archive -Path $setup -DestinationPath $destination -CompressionLevel Optimal
+
+      - name: Upload Linux or macOS artifact
+        if: matrix.name != 'windows'
+        uses: actions/upload-artifact@v4
         with:
           name: secagent-${{ matrix.name }}
           path: release/
+          if-no-files-found: error
+
+      - name: Upload Windows green artifact
+        if: matrix.name == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: secagent-windows-green-${{ steps.windows-meta.outputs.timestamp }}-${{ steps.windows-meta.outputs.sha }}
+          path: release/${{ steps.windows-meta.outputs.green }}
+          if-no-files-found: error
+
+      - name: Upload Windows installer artifact
+        if: matrix.name == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: secagent-windows-installer-${{ steps.windows-meta.outputs.timestamp }}-${{ steps.windows-meta.outputs.sha }}
+          path: release/${{ steps.windows-meta.outputs.installer }}
           if-no-files-found: error

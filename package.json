@@ -11,6 +11,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && electron-vite build",
     "package": "npm run build && electron-builder --publish never",
+    "package:windows": "npm run build && electron-builder --win dir --publish never",
     "build:cli": "tsc -p tsconfig.json",
     "dev": "electron-vite dev",
     "dev:cli": "tsx src/index.ts",
@@ -82,7 +83,7 @@
     ],
     "win": {
       "target": [
-        "nsis"
+        "dir"
       ]
     },
     "linux": {
