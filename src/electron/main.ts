@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, screen, session, shell } from "electron";
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, screen, session, shell, Tray } from "electron";
 import { createServer } from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -29,6 +29,8 @@ import { normalizeReasoningEffort } from "../reasoning.js";
 
 let windowRef: BrowserWindow | undefined;
 let settingsWindow: BrowserWindow | undefined;
+let tray: Tray | undefined;
+let isQuitting = false;
 let onboardingCompletionRequested = false;
 let wakeWindow: BrowserWindow | undefined;
 let voiceWakeWindow: BrowserWindow | undefined;
@@ -330,6 +332,14 @@ function createWindow(visible = true): void {
   });
   configureWindowChrome(windowRef);
   installWindowShortcuts(windowRef);
+  windowRef.on("close", (event) => {
+    if (isQuitting) return;
+    event.preventDefault();
+    windowRef?.hide();
+  });
+  windowRef.on("closed", () => {
+    windowRef = undefined;
+  });
   logMain("window.created");
   if (process.env.ELECTRON_RENDERER_URL) windowRef.loadURL(process.env.ELECTRON_RENDERER_URL);
   else windowRef.loadFile(path.join(__dirname, "../renderer/index.html"));
@@ -376,7 +386,7 @@ function openSettings(oobeOrMenuItem: boolean | Electron.MenuItem = false, _wind
     minWidth: 720,
     minHeight: 560,
     title: "SecAgent设置",
-    parent: windowRef,
+    parent: windowRef && !windowRef.isDestroyed() && windowRef.isVisible() ? windowRef : undefined,
     modal: false,
     ...windowChromeOptions(),
     icon: appIconPath(),
@@ -396,6 +406,41 @@ function openSettings(oobeOrMenuItem: boolean | Electron.MenuItem = false, _wind
     }
     if (windowRef && !windowRef.isDestroyed() && !windowRef.isVisible()) windowRef.show();
   });
+}
+
+function showMainWindow(): void {
+  if (!windowRef || windowRef.isDestroyed()) {
+    createWindow();
+  }
+  if (!windowRef || windowRef.isDestroyed()) return;
+  if (windowRef.isMinimized()) windowRef.restore();
+  windowRef.show();
+  windowRef.focus();
+  void ensureMacDockVisible();
+}
+
+function restartApplication(): void {
+  isQuitting = true;
+  app.relaunch();
+  app.exit(0);
+}
+
+function createTray(): void {
+  if (tray && !tray.isDestroyed()) return;
+  tray = new Tray(appIconPath());
+  tray.setToolTip("SecAgent");
+  const trayMenu = Menu.buildFromTemplate([
+    { label: "打开主窗口", click: showMainWindow },
+    { label: "打开设置", click: () => openSettings() },
+    { type: "separator" },
+    { label: "重启应用", click: restartApplication },
+    { label: "退出应用", click: () => { isQuitting = true; app.quit(); } }
+  ]);
+  const showTrayMenu = () => tray?.popUpContextMenu(trayMenu);
+  // Explicitly handle both buttons. On Windows this also covers the usual
+  // touch interaction, which is delivered as a tray click event.
+  tray.on("click", showTrayMenu);
+  tray.on("right-click", showTrayMenu);
 }
 
 function createApplicationMenu(): void {
@@ -939,6 +984,7 @@ app.whenReady().then(async () => {
   });
   installFileRendererAssetFallback();
   createApplicationMenu();
+  createTray();
   if (process.platform === "darwin") {
     // The wake overlay skips the Dock, but SecAgent itself remains a regular
     // application while the overlay is visible over full-screen Spaces.
@@ -956,5 +1002,5 @@ app.whenReady().then(async () => {
   if (needsOnboarding) openSettings(true);
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
-app.on("before-quit", () => { closeWakeWindow(); closeVoiceWakeWindow(); globalShortcut.unregisterAll(); if (marketplaceUpdateTimer) clearInterval(marketplaceUpdateTimer); void secAgentHttpServer?.stop(); void pluginManager?.shutdown(); });
-app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
+app.on("before-quit", () => { isQuitting = true; closeWakeWindow(); closeVoiceWakeWindow(); globalShortcut.unregisterAll(); if (marketplaceUpdateTimer) clearInterval(marketplaceUpdateTimer); void secAgentHttpServer?.stop(); void pluginManager?.shutdown(); });
+app.on("window-all-closed", () => { /* Keep the process alive so the tray can reopen the main window. */ });
