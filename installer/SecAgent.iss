@@ -36,7 +36,7 @@ DisableProgramGroupPage=yes
 Uninstallable=yes
 
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
 
 [Tasks]
 Name: "startmenu"; Description: "创建开始菜单快捷方式"; GroupDescription: "快捷方式："
