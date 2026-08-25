@@ -81,10 +81,12 @@ jobs:
         if: matrix.name == 'windows'
         shell: pwsh
         run: |
-          $setup = Join-Path "release\inno" "${{ steps.windows-meta.outputs.setup }}.exe"
-          if (-not (Test-Path -LiteralPath $setup)) {
-            throw "Inno Setup output was not found: $setup"
+          $innoOutput = Get-ChildItem -LiteralPath "release\inno" -Filter "*.exe" -File
+          if ($innoOutput.Count -ne 1) {
+            throw "Expected exactly one Inno Setup output EXE, found $($innoOutput.Count)"
           }
+          $setup = Join-Path "release\inno" "${{ steps.windows-meta.outputs.setup }}.exe"
+          Copy-Item -LiteralPath $innoOutput[0].FullName -Destination $setup -Force
           $destination = Join-Path "release" "${{ steps.windows-meta.outputs.installer }}"
           Compress-Archive -Path $setup -DestinationPath $destination -CompressionLevel Optimal
 
