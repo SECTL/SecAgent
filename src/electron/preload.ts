@@ -31,6 +31,14 @@ contextBridge.exposeInMainWorld("secagent", {
     ipcRenderer.on("classisland:progress", wrapped);
     return () => ipcRenderer.removeListener("classisland:progress", wrapped);
   },
+  detectSecRandomInstallations: () => ipcRenderer.invoke("secrandom:detect"),
+  pickSecRandomExecutable: () => ipcRenderer.invoke("secrandom:pick"),
+  installSecRandomCompanion: (targetIds: string[]) => ipcRenderer.invoke("secrandom:install", targetIds),
+  onSecRandomProgress: (listener: (progress: unknown) => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
+    ipcRenderer.on("secrandom:progress", wrapped);
+    return () => ipcRenderer.removeListener("secrandom:progress", wrapped);
+  },
   getOobeProgress: () => ipcRenderer.invoke("oobe:progress:get"),
   saveOobeProgress: (progress: unknown) => ipcRenderer.invoke("oobe:progress:save", progress),
   openExternal: (url: string) => ipcRenderer.invoke("shell:open-external", url),

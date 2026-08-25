@@ -385,6 +385,7 @@ html.wake-mode, html.wake-mode body, body.wake-mode { min-width: 0; overflow: hi
 .oobe-plugin-copy { display: grid; gap: 4px; min-width: 0; }
 .oobe-plugin-copy > span { color: #777; font-size: 12px; }
 .oobe-plugin-card-classisland { flex-wrap: wrap; }
+.oobe-plugin-card-secrandom { flex-wrap: wrap; }
 .oobe-plugin-side-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-left: auto; }
 .oobe-classisland-targets { flex: 1 0 100%; display: grid; gap: 8px; padding-top: 4px; }
 .oobe-classisland-target-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }

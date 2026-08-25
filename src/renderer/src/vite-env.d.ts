@@ -22,6 +22,9 @@ interface ClassIslandInstallCandidate { id: string; executablePath: string; root
 interface ClassIslandInstallResult { targetId: string; ok: boolean; action: "installed" | "already-installed" | "skipped" | "failed"; message: string; version?: string }
 type ClassIslandInstallPhase = "downloading" | "verifying" | "installing" | "restarting";
 interface ClassIslandInstallProgress { phase: "downloading" | "verifying" | "installing" | "restarting"; targetIds: string[]; message?: string }
+interface SecRandomInstallCandidate { id: string; executablePath: string; rootPath: string; dataRoot: string; pluginPackagesPath: string; version?: string; installedPluginVersion?: string; packageType?: string; isRunning: boolean; pid?: number; launchArgs: string[]; source: string; compatible: boolean; reason?: string }
+interface SecRandomInstallResult { targetId: string; ok: boolean; action: "installed" | "already-installed" | "skipped" | "failed"; message: string; version?: string }
+interface SecRandomInstallProgress { phase: "downloading" | "verifying" | "installing" | "restarting"; targetIds: string[]; message?: string }
 interface OobeProgress { step: "source" | "config" | "plugins"; source?: "official" | "custom"; provider?: Omit<ProviderConfig, "apiKey"> }
 interface Window {
   secagent: {
@@ -51,6 +54,10 @@ interface Window {
     pickClassIslandExecutable(): Promise<ClassIslandInstallCandidate | undefined>;
     installClassIslandCompanion(targetIds: string[]): Promise<ClassIslandInstallResult[]>;
     onClassIslandProgress(listener: (progress: ClassIslandInstallProgress) => void): () => void;
+    detectSecRandomInstallations(): Promise<SecRandomInstallCandidate[]>;
+    pickSecRandomExecutable(): Promise<SecRandomInstallCandidate | undefined>;
+    installSecRandomCompanion(targetIds: string[]): Promise<SecRandomInstallResult[]>;
+    onSecRandomProgress(listener: (progress: SecRandomInstallProgress) => void): () => void;
     getOobeProgress(): Promise<OobeProgress | undefined>;
     saveOobeProgress(progress: OobeProgress): Promise<OobeProgress | undefined>;
     openExternal(url: string): Promise<{ ok: true }>;
