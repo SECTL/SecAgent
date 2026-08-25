@@ -25,3 +25,15 @@ test("detects ClassIsland from LocalAppData", () => {
   });
   assert.equal(detected.find((app) => app.pluginId === "classisland-connector")?.detected, true);
 });
+
+test("detects the SecScore Windows executable in its Tauri install layout", () => {
+  const home = "C:\\Users\\teacher";
+  const local = "C:\\Users\\teacher\\AppData\\Local";
+  const executable = path.join(local, "Programs", "SecScore", "SecScore.exe");
+  const detected = detectCompanionApps({
+    home,
+    env: { LOCALAPPDATA: local },
+    exists: (candidate) => candidate === executable
+  });
+  assert.equal(detected.find((app) => app.pluginId === "secscore-connector")?.detected, true);
+});

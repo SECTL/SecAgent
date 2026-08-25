@@ -55,6 +55,10 @@ export function OobeWizard() {
   const [secRandomSelectedIds, setSecRandomSelectedIds] = useState<string[]>([]);
   const [secRandomResults, setSecRandomResults] = useState<Record<string, SecRandomInstallResult>>({});
   const [secRandomPhase, setSecRandomPhase] = useState<SecRandomInstallProgress["phase"] | "idle">("idle");
+  const [iccceTargets, setIccceTargets] = useState<IccceInstallCandidate[]>([]);
+  const [iccceSelectedIds, setIccceSelectedIds] = useState<string[]>([]);
+  const [iccceResults, setIccceResults] = useState<Record<string, IccceInstallResult>>({});
+  const [icccePhase, setIcccePhase] = useState<IccceInstallProgress["phase"] | "idle">("idle");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [progressReady, setProgressReady] = useState(false);
@@ -119,6 +123,18 @@ export function OobeWizard() {
         return compatible.length === 1 ? [compatible[0].id] : [];
       });
     }).catch(() => undefined);
+    void bridge.detectIccceInstallations().then((targets) => {
+      if (disposed) return;
+      setIccceTargets(targets);
+      setIccceSelectedIds((current) => {
+        const validCurrent = current.filter((id) => targets.some((target) => target.id === id && target.compatible));
+        if (validCurrent.length) return validCurrent;
+        const running = targets.filter((target) => target.compatible && target.isRunning).map((target) => target.id);
+        if (running.length) return running;
+        const compatible = targets.filter((target) => target.compatible);
+        return compatible.length === 1 ? [compatible[0].id] : [];
+      });
+    }).catch(() => undefined);
     void Promise.all([
       bridge.getSettings(),
       bridge.listProviders(),
@@ -172,6 +188,10 @@ export function OobeWizard() {
 
   useEffect(() => bridge.onSecRandomProgress((progress) => {
     if (progress?.phase) setSecRandomPhase(progress.phase);
+  }), [bridge]);
+
+  useEffect(() => bridge.onIccceProgress((progress) => {
+    if (progress?.phase) setIcccePhase(progress.phase);
   }), [bridge]);
 
   useEffect(() => {
@@ -323,6 +343,19 @@ export function OobeWizard() {
     }
   };
 
+  const pickIccceExecutable = async () => {
+    setError("");
+    try {
+      const candidate = await bridge.pickIccceExecutable();
+      if (!candidate) return;
+      setIccceTargets((current) => current.some((item) => item.id === candidate.id) ? current.map((item) => item.id === candidate.id ? candidate : item) : [...current, candidate]);
+      if (candidate.compatible) setIccceSelectedIds((current) => current.includes(candidate.id) ? current : [...current, candidate.id]);
+      if (!candidate.compatible) setError(candidate.reason || "选择的 ICC-CE 版本不兼容");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
   const installClassIslandPlugin = async (market: MarketplacePlugin | undefined) => {
     const selectedTargets = classIslandTargets.filter((target) => classIslandSelectedIds.includes(target.id));
     if (!selectedTargets.length) {
@@ -397,7 +430,44 @@ export function OobeWizard() {
     }
   };
 
-  const recommended = useMemo(() => apps.filter((app) => app.detected || app.pluginId === "classisland-connector" || app.pluginId === "secrandom"), [apps]);
+  const installIcccePlugin = async (market: MarketplacePlugin | undefined) => {
+    const selectedTargets = iccceTargets.filter((target) => iccceSelectedIds.includes(target.id));
+    if (!selectedTargets.length) {
+      setError("请先选择一个或多个 ICC-CE 安装目标");
+      return;
+    }
+    if (selectedTargets.some((target) => !target.compatible)) {
+      setError("所选 ICC-CE 安装目标不兼容");
+      return;
+    }
+    const connectorInstalled = plugins.some((plugin) => plugin.id === "iccce-connector");
+    const connectorVersion = market ? latestCompatibleVersion(market, bridge.platform) : undefined;
+    if (!connectorInstalled && !connectorVersion) {
+      setError("市场暂无兼容的 ICC-CE 连接器");
+      return;
+    }
+    setInstallingId("iccce-connector");
+    setIcccePhase("downloading");
+    setError("");
+    try {
+      if (!connectorInstalled && connectorVersion) setPlugins(await bridge.installMarketplaceVersion(connectorVersion));
+      const results = await bridge.installIccceCompanion(selectedTargets.map((target) => target.id));
+      setIccceResults((current) => ({ ...current, ...Object.fromEntries(results.map((result) => [result.targetId, result])) }));
+      setIccceTargets((current) => current.map((target) => {
+        const result = results.find((item) => item.targetId === target.id);
+        return result?.ok && result.version ? { ...target, installedPluginVersion: result.version } : target;
+      }));
+      const failures = results.filter((result) => !result.ok);
+      if (failures.length) setError(failures.map((result) => result.message).join("；"));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setInstallingId("");
+      setIcccePhase("idle");
+    }
+  };
+
+  const recommended = useMemo(() => apps.filter((app) => app.detected || app.pluginId === "classisland-connector" || app.pluginId === "secrandom" || app.pluginId === "iccce-connector"), [apps]);
 
   if (!settings || !progressReady) return <main className="settings-shell oobe-shell has-window-title"><p>正在读取配置…</p></main>;
 
@@ -493,6 +563,7 @@ export function OobeWizard() {
           const installing = installingId === app.pluginId;
           const isClassIsland = app.pluginId === "classisland-connector";
           const isSecRandom = app.pluginId === "secrandom";
+          const isIccce = app.pluginId === "iccce-connector";
           const selectedClassIslandTargets = classIslandTargets.filter((target) => classIslandSelectedIds.includes(target.id));
           const classIslandCompanionInstalled = selectedClassIslandTargets.length > 0 && selectedClassIslandTargets.every((target) => Boolean(target.installedPluginVersion));
           const classIslandCanInstall = selectedClassIslandTargets.length > 0 && selectedClassIslandTargets.every((target) => target.compatible) && !classIslandCompanionInstalled && (Boolean(installed) || Boolean(version));
@@ -501,7 +572,11 @@ export function OobeWizard() {
           const secRandomCompanionInstalled = selectedSecRandomTargets.length > 0 && selectedSecRandomTargets.every((target) => Boolean(target.installedPluginVersion));
           const secRandomCanInstall = selectedSecRandomTargets.length > 0 && selectedSecRandomTargets.every((target) => target.compatible) && !secRandomCompanionInstalled && (Boolean(installed) || Boolean(version));
           const secRandomPhaseLabel = secRandomPhase === "downloading" ? "下载中…" : secRandomPhase === "verifying" ? "校验中…" : secRandomPhase === "installing" ? "安装中…" : secRandomPhase === "restarting" ? "重启中…" : secRandomCompanionInstalled ? "SecRandom 插件已安装" : installed ? "安装 SecRandom 插件" : version ? "安装并配置" : "市场暂无连接器";
-          return <article className={`settings-card oobe-plugin-card${isClassIsland ? " oobe-plugin-card-classisland" : isSecRandom ? " oobe-plugin-card-secrandom" : ""}${installing ? " is-installing" : ""}`} aria-busy={installing} style={{ animationDelay: `${index * 70}ms` }} key={app.pluginId}>
+          const selectedIccceTargets = iccceTargets.filter((target) => iccceSelectedIds.includes(target.id));
+          const iccceCompanionInstalled = selectedIccceTargets.length > 0 && selectedIccceTargets.every((target) => Boolean(target.installedPluginVersion));
+          const iccceCanInstall = selectedIccceTargets.length > 0 && selectedIccceTargets.every((target) => target.compatible) && !iccceCompanionInstalled && (Boolean(installed) || Boolean(version));
+          const icccePhaseLabel = icccePhase === "downloading" ? "下载中…" : icccePhase === "verifying" ? "校验中…" : icccePhase === "installing" ? "安装中…" : icccePhase === "restarting" ? "重启中…" : iccceCompanionInstalled ? "ICC-CE 插件已安装" : installed ? "安装 ICC-CE 插件" : version ? "安装并配置" : "市场暂无连接器";
+          return <article className={`settings-card oobe-plugin-card${isClassIsland ? " oobe-plugin-card-classisland" : isSecRandom ? " oobe-plugin-card-secrandom" : isIccce ? " oobe-plugin-card-iccce" : ""}${installing ? " is-installing" : ""}`} aria-busy={installing} style={{ animationDelay: `${index * 70}ms` }} key={app.pluginId}>
             <div className="oobe-plugin-main">
               <span className={`oobe-plugin-icon${installed?.icon ? " has-plugin-icon" : ""}`} aria-hidden="true">
                 <img className="oobe-plugin-icon-app" src={app.icon} alt="" />
@@ -509,7 +584,7 @@ export function OobeWizard() {
               </span>
               <div className="oobe-plugin-copy">
                 <strong>{app.appName}</strong>
-                <span>{isClassIsland ? (classIslandTargets.length ? app.description : "未自动找到安装目录，可手动选择") : isSecRandom ? (secRandomTargets.length ? app.description : "未自动找到安装目录，可手动选择") : `${app.description} · 已在本机找到`}</span>
+                <span>{isClassIsland ? (classIslandTargets.length ? app.description : "未自动找到安装目录，可手动选择") : isSecRandom ? (secRandomTargets.length ? app.description : "未自动找到安装目录，可手动选择") : isIccce ? (iccceTargets.length ? app.description : "未自动找到安装目录，可手动选择") : `${app.description} · 已在本机找到`}</span>
               </div>
             </div>
             {isClassIsland ? <div className="oobe-plugin-side-actions">
@@ -518,6 +593,9 @@ export function OobeWizard() {
             </div> : isSecRandom ? <div className="oobe-plugin-side-actions">
               {installed && <span className="oobe-plugin-state" aria-label="SecAgent 连接器已安装" title="SecAgent 连接器已安装"><Check aria-hidden="true" size={20} strokeWidth={2.4} /></span>}
               <button className="primary-button" type="button" disabled={installing || !secRandomCanInstall} onClick={() => void installSecRandomPlugin(market)}>{installing ? secRandomPhaseLabel : secRandomCompanionInstalled ? "SecRandom 插件已安装" : installed ? "安装 SecRandom 插件" : version ? "安装并配置" : "市场暂无连接器"}</button>
+            </div> : isIccce ? <div className="oobe-plugin-side-actions">
+              {installed && <span className="oobe-plugin-state" aria-label="SecAgent 连接器已安装" title="SecAgent 连接器已安装"><Check aria-hidden="true" size={20} strokeWidth={2.4} /></span>}
+              <button className="primary-button" type="button" disabled={installing || !iccceCanInstall} onClick={() => void installIcccePlugin(market)}>{installing ? icccePhaseLabel : iccceCompanionInstalled ? "ICC-CE 插件已安装" : installed ? "安装 ICC-CE 插件" : version ? "安装并配置" : "市场暂无连接器"}</button>
             </div> : installed ? <span className="oobe-plugin-state" aria-label="已安装" title="已安装"><Check aria-hidden="true" size={20} strokeWidth={2.4} /></span> : market && version ? <button className="primary-button" type="button" disabled={installing} onClick={() => void installPlugin(market)}>{installing ? "安装中…" : `安装联动插件`}</button> : <span className="oobe-plugin-state">市场暂无该联动插件</span>}
             {isClassIsland && <div className="oobe-classisland-targets">
               <div className="oobe-classisland-target-heading"><strong>选择 ClassIsland 安装目标</strong><button className="secondary-button" type="button" disabled={installing} onClick={() => void pickClassIslandExecutable()}>选择 ClassIsland.exe</button></div>
@@ -538,6 +616,17 @@ export function OobeWizard() {
                 return <label className={`oobe-classisland-target${target.compatible ? "" : " is-incompatible"}`} key={target.id}>
                   <input type="checkbox" checked={secRandomSelectedIds.includes(target.id)} disabled={!target.compatible || installing} onChange={() => setSecRandomSelectedIds((current) => current.includes(target.id) ? current.filter((id) => id !== target.id) : [...current, target.id])} />
                   <span><strong>SecRandom {target.version ? `v${target.version}` : "版本未知"}{target.isRunning ? " · 正在运行" : ""}</strong><small>{target.executablePath}{target.installedPluginVersion ? ` · 已安装 SecAgent 插件 v${target.installedPluginVersion}` : ""}</small>{!target.compatible && <em>{target.reason}</em>}{result && <em className={result.ok ? "is-success" : "is-error"}>{result.message}</em>}</span>
+                </label>;
+              })}
+            </div>}
+            {isIccce && <div className="oobe-classisland-targets">
+              <div className="oobe-classisland-target-heading"><strong>选择 ICC-CE 安装目标</strong><button className="secondary-button" type="button" disabled={installing} onClick={() => void pickIccceExecutable()}>选择 ICC-CE 可执行文件</button></div>
+              {!iccceTargets.length && <p className="empty-list">未找到 ICC-CE，可选择其可执行文件。</p>}
+              {iccceTargets.map((target) => {
+                const result = iccceResults[target.id];
+                return <label className={`oobe-classisland-target${target.compatible ? "" : " is-incompatible"}`} key={target.id}>
+                  <input type="checkbox" checked={iccceSelectedIds.includes(target.id)} disabled={!target.compatible || installing} onChange={() => setIccceSelectedIds((current) => current.includes(target.id) ? current.filter((id) => id !== target.id) : [...current, target.id])} />
+                  <span><strong>ICC-CE {target.version ? `v${target.version}` : "版本未知"}{target.isRunning ? " · 正在运行" : ""}</strong><small>{target.executablePath}{target.installedPluginVersion ? ` · 已安装 SecAgent 插件 v${target.installedPluginVersion}` : ""}</small>{!target.compatible && <em>{target.reason}</em>}{result && <em className={result.ok ? "is-success" : "is-error"}>{result.message}</em>}</span>
                 </label>;
               })}
             </div>}

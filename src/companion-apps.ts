@@ -53,6 +53,16 @@ function candidatePaths(pluginId: string, home: string, env: NodeJS.ProcessEnv):
     "/Applications"
   ];
   const paths = names.flatMap((name) => roots.map((root) => path.join(root, name)));
+  if (pluginId === "secscore-connector") {
+    // SecScore is a Tauri desktop app. Cover both the usual install directory
+    // and portable/single-executable layouts used by its Windows bundles.
+    paths.push(...roots.flatMap((root) => [
+      path.join(root, "SecScore", "SecScore.exe"),
+      path.join(root, "SecScore", "secscore.exe"),
+      path.join(root, "SecScore.exe"),
+      path.join(root, "secscore.exe")
+    ]));
+  }
   if (pluginId === "class-widgets") {
     paths.push(path.join(home, ".class-widgets"), path.join(roaming, "Class Widgets"), path.join(local, "ClassWidgets"));
   }

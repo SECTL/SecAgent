@@ -20,6 +20,7 @@ import { MarketplaceClient, type MarketplacePlugin, type MarketplaceVersion } fr
 import { detectCompanionApps } from "../companion-apps.js";
 import { ClassIslandInstaller } from "../classisland.js";
 import { SecRandomInstaller } from "../secrandom.js";
+import { IccceInstaller } from "../iccce.js";
 import { SecAgentHttpServer } from "../secagent-http.js";
 import { Models } from "@opencode-ai/models";
 import { DEFAULT_WAKE_HOTKEY, normalizeWakeHotkey } from "../wake-hotkey.js";
@@ -39,6 +40,7 @@ let wakeAbortController: AbortController | undefined;
 const marketplace = new MarketplaceClient();
 const classIslandInstaller = new ClassIslandInstaller();
 const secRandomInstaller = new SecRandomInstaller();
+const iccceInstaller = new IccceInstaller();
 const activeSessionRuns = new Map<string, AbortController>();
 const MARKETPLACE_UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 let marketplaceUpdateTimer: NodeJS.Timeout | undefined;
@@ -676,6 +678,21 @@ ipcMain.handle("secrandom:install", async (event, targetIds: unknown) => {
   if (!Array.isArray(targetIds) || targetIds.some((item) => typeof item !== "string")) throw new Error("SecRandom 安装目标无效");
   return secRandomInstaller.install(targetIds, (progress) => {
     if (!event.sender.isDestroyed()) event.sender.send("secrandom:progress", progress);
+  });
+});
+ipcMain.handle("iccce:detect", () => iccceInstaller.detect());
+ipcMain.handle("iccce:pick", async () => {
+  const result = await dialog.showOpenDialog(settingsWindow || windowRef!, {
+    properties: ["openFile"],
+    filters: process.platform === "win32" ? [{ name: "ICC-CE", extensions: ["exe"] }] : undefined
+  });
+  if (result.canceled || !result.filePaths[0]) return undefined;
+  return iccceInstaller.inspect(result.filePaths[0]);
+});
+ipcMain.handle("iccce:install", async (event, targetIds: unknown) => {
+  if (!Array.isArray(targetIds) || targetIds.some((item) => typeof item !== "string")) throw new Error("ICC-CE 安装目标无效");
+  return iccceInstaller.install(targetIds, (progress) => {
+    if (!event.sender.isDestroyed()) event.sender.send("iccce:progress", progress);
   });
 });
 ipcMain.handle("oobe:progress:get", () => readOobeProgress(DEFAULT_WORKSPACE));

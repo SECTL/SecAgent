@@ -25,6 +25,9 @@ interface ClassIslandInstallProgress { phase: "downloading" | "verifying" | "ins
 interface SecRandomInstallCandidate { id: string; executablePath: string; rootPath: string; dataRoot: string; pluginPackagesPath: string; version?: string; installedPluginVersion?: string; packageType?: string; isRunning: boolean; pid?: number; launchArgs: string[]; source: string; compatible: boolean; reason?: string }
 interface SecRandomInstallResult { targetId: string; ok: boolean; action: "installed" | "already-installed" | "skipped" | "failed"; message: string; version?: string }
 interface SecRandomInstallProgress { phase: "downloading" | "verifying" | "installing" | "restarting"; targetIds: string[]; message?: string }
+interface IccceInstallCandidate { id: string; executablePath: string; rootPath: string; pluginPackagesPath: string; pluginsPath: string; version?: string; installedPluginVersion?: string; packageType?: string; isRunning: boolean; pid?: number; launchArgs: string[]; source: string; compatible: boolean; reason?: string }
+interface IccceInstallResult { targetId: string; ok: boolean; action: "installed" | "already-installed" | "skipped" | "failed"; message: string; version?: string }
+interface IccceInstallProgress { phase: "downloading" | "verifying" | "installing" | "restarting"; targetIds: string[]; message?: string }
 interface OobeProgress { step: "source" | "config" | "plugins"; source?: "official" | "custom"; provider?: Omit<ProviderConfig, "apiKey"> }
 interface Window {
   secagent: {
@@ -58,6 +61,10 @@ interface Window {
     pickSecRandomExecutable(): Promise<SecRandomInstallCandidate | undefined>;
     installSecRandomCompanion(targetIds: string[]): Promise<SecRandomInstallResult[]>;
     onSecRandomProgress(listener: (progress: SecRandomInstallProgress) => void): () => void;
+    detectIccceInstallations(): Promise<IccceInstallCandidate[]>;
+    pickIccceExecutable(): Promise<IccceInstallCandidate | undefined>;
+    installIccceCompanion(targetIds: string[]): Promise<IccceInstallResult[]>;
+    onIccceProgress(listener: (progress: IccceInstallProgress) => void): () => void;
     getOobeProgress(): Promise<OobeProgress | undefined>;
     saveOobeProgress(progress: OobeProgress): Promise<OobeProgress | undefined>;
     openExternal(url: string): Promise<{ ok: true }>;

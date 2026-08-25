@@ -39,6 +39,14 @@ contextBridge.exposeInMainWorld("secagent", {
     ipcRenderer.on("secrandom:progress", wrapped);
     return () => ipcRenderer.removeListener("secrandom:progress", wrapped);
   },
+  detectIccceInstallations: () => ipcRenderer.invoke("iccce:detect"),
+  pickIccceExecutable: () => ipcRenderer.invoke("iccce:pick"),
+  installIccceCompanion: (targetIds: string[]) => ipcRenderer.invoke("iccce:install", targetIds),
+  onIccceProgress: (listener: (progress: unknown) => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
+    ipcRenderer.on("iccce:progress", wrapped);
+    return () => ipcRenderer.removeListener("iccce:progress", wrapped);
+  },
   getOobeProgress: () => ipcRenderer.invoke("oobe:progress:get"),
   saveOobeProgress: (progress: unknown) => ipcRenderer.invoke("oobe:progress:save", progress),
   openExternal: (url: string) => ipcRenderer.invoke("shell:open-external", url),
