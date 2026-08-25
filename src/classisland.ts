@@ -76,10 +76,13 @@ export interface ClassIslandDiscoveryOptions {
 export interface ClassIslandInstallerOptions extends ClassIslandDiscoveryOptions {
   fetcher?: Fetcher;
   requestGracefulClose?: (pid: number) => Promise<void>;
+  forceTerminateProcess?: (pid: number) => Promise<void>;
   isProcessRunning?: (pid: number) => Promise<boolean>;
   restartProcess?: (executablePath: string, args: string[]) => Promise<void>;
   waitForExitTimeoutMs?: number;
   waitForExitPollMs?: number;
+  waitForPluginTimeoutMs?: number;
+  waitForPluginPollMs?: number;
   now?: () => number;
 }
 
@@ -379,6 +382,21 @@ function installedPluginVersion(dataRoot: string, platform: SupportedPlatform, e
   try { return CLASSISLAND_PLUGIN_VERSION_PATTERN.exec(readFile(manifestPath))?.[1]?.trim(); } catch { return undefined; }
 }
 
+async function waitForInstalledPlugin(
+  readVersion: () => string | undefined,
+  expectedVersion: string,
+  timeoutMs = 15_000,
+  pollMs = 250
+): Promise<string | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const current = readVersion();
+    if (current && compareClassIslandVersions(current, expectedVersion) >= 0) return current;
+    if (Date.now() >= deadline) return undefined;
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+}
+
 async function defaultVersionOf(executablePath: string, platform: SupportedPlatform, commandRunner: CommandRunner): Promise<string | undefined> {
   if (platform === "win32") {
     const script = `$item = Get-Item -LiteralPath ${quotePowerShell(executablePath)}; $item.VersionInfo.ProductVersion`;
@@ -534,6 +552,15 @@ async function defaultRequestGracefulClose(pid: number, platform: SupportedPlatf
   process.kill(pid, "SIGTERM");
 }
 
+async function defaultForceTerminate(pid: number, platform: SupportedPlatform, commandRunner: CommandRunner): Promise<void> {
+  if (platform === "win32") {
+    const script = `Stop-Process -Id ${pid} -Force -ErrorAction Stop`;
+    await commandRunner("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script]);
+    return;
+  }
+  process.kill(pid, "SIGKILL");
+}
+
 async function defaultIsProcessRunning(pid: number): Promise<boolean> {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
@@ -603,6 +630,9 @@ export class ClassIslandInstaller {
     const restart = this.options.restartProcess || defaultRestartProcess;
     const isRunning = this.options.isProcessRunning || defaultIsProcessRunning;
     const requestClose = this.options.requestGracefulClose || ((pid: number) => defaultRequestGracefulClose(pid, this.platform, this.commandRunner));
+    const forceTerminate = this.options.forceTerminateProcess || ((pid: number) => defaultForceTerminate(pid, this.platform, this.commandRunner));
+    const exists = this.options.exists || defaultExists;
+    const readFile = this.options.readFile || defaultReadFile;
     for (const group of groups.values()) {
       const alreadyInstalled = group.every((candidate) => candidate.installedPluginVersion && compareClassIslandVersions(candidate.installedPluginVersion, packageData.version) >= 0);
       if (alreadyInstalled) {
@@ -613,15 +643,24 @@ export class ClassIslandInstaller {
       const closed: ClassIslandInstallCandidate[] = [];
       let closeFailed = false;
       for (const candidate of running) {
+        let exited = false;
         try {
           await requestClose(candidate.pid!);
-          if (!(await waitForProcessExit(candidate.pid!, isRunning, this.options.waitForExitTimeoutMs, this.options.waitForExitPollMs))) { closeFailed = true; break; }
-          closed.push(candidate);
-        } catch { closeFailed = true; break; }
+          exited = await waitForProcessExit(candidate.pid!, isRunning, this.options.waitForExitTimeoutMs, this.options.waitForExitPollMs);
+        } catch { /* Fall through to the force-terminate path. */ }
+        if (!exited) {
+          report("restarting", `ClassIsland 未能优雅退出，正在强制结束进程 ${candidate.pid}`);
+          try {
+            await forceTerminate(candidate.pid!);
+            exited = await waitForProcessExit(candidate.pid!, isRunning, this.options.waitForExitTimeoutMs, this.options.waitForExitPollMs);
+          } catch { /* The process may be protected or already gone. */ }
+        }
+        if (!exited) { closeFailed = true; break; }
+        closed.push(candidate);
       }
       if (closeFailed) {
         for (const candidate of closed) await restart(candidate.executablePath, candidate.launchArgs).catch(() => undefined);
-        for (const candidate of group) results.push({ targetId: candidate.id, ok: false, action: "failed", message: "ClassIsland 未能正常退出，未安装插件；请关闭后重试" });
+        for (const candidate of group) results.push({ targetId: candidate.id, ok: false, action: "failed", message: "ClassIsland 无法退出，强制结束也失败，未安装插件；请手动关闭后重试" });
         continue;
       }
       const packagePath = api.join(group[0].pluginPackagesPath, CLASSISLAND_PLUGIN_ASSET_NAME);
@@ -633,7 +672,26 @@ export class ClassIslandInstaller {
         report("restarting", restarting ? "正在重新启动 ClassIsland" : "正在启动 ClassIsland");
         let launchFailed = false;
         try { await restart(launchCandidate.executablePath, launchCandidate.launchArgs); } catch { launchFailed = true; }
-        for (const candidate of group) results.push({ targetId: candidate.id, ok: !launchFailed, action: launchFailed ? "failed" : "installed", message: launchFailed ? `插件已写入，但 ClassIsland 自动${restarting ? "重启" : "启动"}失败，请手动启动` : restarting ? `已安装 ClassIsland 插件 v${packageData.version}，ClassIsland 已自动重启` : `已安装 ClassIsland 插件 v${packageData.version}，ClassIsland 已自动启动`, version: packageData.version });
+        const verifiedVersion = launchFailed ? undefined : await waitForInstalledPlugin(
+          () => installedPluginVersion(group[0].dataRoot, this.platform, exists, readFile),
+          packageData.version,
+          this.options.waitForPluginTimeoutMs,
+          this.options.waitForPluginPollMs
+        );
+        const verified = Boolean(verifiedVersion);
+        for (const candidate of group) {
+          results.push({
+            targetId: candidate.id,
+            ok: !launchFailed && verified,
+            action: !launchFailed && verified ? "installed" : "failed",
+            message: launchFailed
+              ? `插件包已写入，但 ClassIsland 自动${restarting ? "重启" : "启动"}失败，请手动启动`
+              : verified
+                ? restarting ? `已安装 ClassIsland 插件 v${verifiedVersion}，ClassIsland 已自动重启` : `已安装 ClassIsland 插件 v${verifiedVersion}，ClassIsland 已自动启动`
+                : "插件包已写入并启动，但等待 ClassIsland 解包后未检测到插件，请稍后重试",
+            ...(verifiedVersion ? { version: verifiedVersion } : {})
+          });
+        }
       } catch (error) {
         for (const candidate of closed) await restart(candidate.executablePath, candidate.launchArgs).catch(() => undefined);
         for (const candidate of group) results.push({ targetId: candidate.id, ok: false, action: "failed", message: `写入 ClassIsland 插件失败：${error instanceof Error ? error.message : String(error)}` });

@@ -12,6 +12,12 @@ import {
 } from "./iccce.js";
 import { DEFAULT_MARKETPLACE_PROXY_URL } from "./marketplace.js";
 
+function writeIccceManifest(root: string, version = "0.3.2"): void {
+  const manifestPath = path.win32.join(root, "Plugins", "inkcanvas.iccce.secagent", "manifest.json");
+  fs.mkdirSync(path.win32.dirname(manifestPath), { recursive: true });
+  fs.writeFileSync(manifestPath, JSON.stringify({ Id: "inkcanvas.iccce.secagent", Version: version }));
+}
+
 test("resolves ICC-CE PluginPackages and detects the installed side plugin", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-iccce-"));
   try {
@@ -78,7 +84,7 @@ test("downloads ICC-CE icpx through ghproxy, verifies it, and restarts the selec
       exists: (candidate) => fs.existsSync(candidate),
       requestGracefulClose: async () => undefined,
       isProcessRunning: async () => false,
-      restartProcess: async (executablePath, args) => { launches.push({ executablePath, args }); }
+      restartProcess: async (executablePath, args) => { launches.push({ executablePath, args }); writeIccceManifest(root); }
     });
     const [target] = await installer.detect();
     const [result] = await installer.install([target.id]);

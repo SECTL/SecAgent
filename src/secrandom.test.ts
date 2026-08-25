@@ -13,6 +13,12 @@ import {
 } from "./secrandom.js";
 import { DEFAULT_MARKETPLACE_PROXY_URL } from "./marketplace.js";
 
+function writeSecRandomManifest(root: string, version = "1.0.1"): void {
+  const manifestPath = path.win32.join(root, "data", "plugins", "secrandom.secagent", "manifest.yml");
+  fs.mkdirSync(path.win32.dirname(manifestPath), { recursive: true });
+  fs.writeFileSync(manifestPath, `id: secrandom.secagent\nversion: ${version}\n`);
+}
+
 test("resolves portable and installed SecRandom data directories", () => {
   const home = "C:\\Users\\teacher";
   const env = { LOCALAPPDATA: "C:\\Users\\teacher\\AppData\\Local" };
@@ -87,7 +93,7 @@ test("downloads through ghproxy, verifies SRPX, stages it, and restarts SecRando
       exists: (candidate) => fs.existsSync(candidate),
       requestGracefulClose: async () => undefined,
       isProcessRunning: async () => false,
-      restartProcess: async (executablePath, args) => { launches.push({ executablePath, args }); }
+      restartProcess: async (executablePath, args) => { launches.push({ executablePath, args }); writeSecRandomManifest(root); }
     });
     const [target] = await installer.detect();
     const [result] = await installer.install([target.id]);
@@ -102,4 +108,3 @@ test("downloads through ghproxy, verifies SRPX, stages it, and restarts SecRando
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
-
