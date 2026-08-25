@@ -373,15 +373,32 @@ html.wake-mode, html.wake-mode body, body.wake-mode { min-width: 0; overflow: hi
 .oobe-model-add input { width: 180px; padding: 7px 9px; border: 1px solid #d8d8d8; border-radius: 7px; }
 .oobe-plugin-list { max-width: 760px; margin: 0 auto 22px; }
 .oobe-plugin-list h2 { margin: 0 0 10px; font-size: 15px; }
-.oobe-plugin-card { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-.oobe-plugin-card > div { display: grid; gap: 4px; min-width: 0; }
-.oobe-plugin-card span { color: #777; font-size: 12px; }
+.oobe-plugin-card { display: flex; align-items: center; justify-content: space-between; gap: 16px; position: relative; overflow: hidden; border-radius: 0; box-shadow: none; }
+.oobe-plugin-card::before { content: ""; position: absolute; z-index: 0; top: 0; bottom: 0; left: -38%; width: 38%; pointer-events: none; background: linear-gradient(90deg, transparent, rgba(35,137,236,.16), rgba(35,137,236,.28)); }
+.oobe-plugin-card.is-installing::before { animation: oobe-plugin-install-progress 1.15s ease-in-out infinite; }
+.oobe-plugin-card > * { position: relative; z-index: 1; }
+.oobe-plugin-card:first-of-type { border-radius: 12px 12px 0 0; }
+.oobe-plugin-card:last-of-type { border-radius: 0 0 12px 12px; }
+.oobe-plugin-card:only-of-type { border-radius: 12px; }
+.oobe-plugin-card + .oobe-plugin-card { border-top: 0; }
+.oobe-plugin-main { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.oobe-plugin-copy { display: grid; gap: 4px; min-width: 0; }
+.oobe-plugin-copy > span { color: #777; font-size: 12px; }
+.oobe-plugin-icon { display: block; position: relative; flex: 0 0 42px; width: 42px; height: 42px; overflow: hidden; border-radius: 10px; background: #f3f6fa; perspective: 600px; }
+.oobe-plugin-icon > img { position: absolute; inset: 4px; width: calc(100% - 8px); height: calc(100% - 8px); object-fit: contain; backface-visibility: hidden; }
+.oobe-plugin-icon-app { opacity: 1; transform: rotateY(0) scale(1); }
+.oobe-plugin-icon-plugin { opacity: 0; transform: rotateY(-90deg) scale(.78); }
+.oobe-plugin-icon.has-plugin-icon .oobe-plugin-icon-app { animation: oobe-plugin-icon-app-out 500ms cubic-bezier(.2, .8, .2, 1) both; }
+.oobe-plugin-icon.has-plugin-icon .oobe-plugin-icon-plugin { animation: oobe-plugin-icon-plugin-in 500ms 90ms cubic-bezier(.2, .8, .2, 1) both; }
+@keyframes oobe-plugin-icon-app-out { from { opacity: 1; transform: rotateY(0) scale(1); } to { opacity: 0; transform: rotateY(90deg) scale(.78); } }
+@keyframes oobe-plugin-icon-plugin-in { from { opacity: 0; transform: rotateY(-90deg) scale(.78); } to { opacity: 1; transform: rotateY(0) scale(1); } }
 .oobe-page-plugins .oobe-header > p:last-of-type { display: none; }
 .oobe-progress { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; max-width: 760px; margin: 0 auto 12px; }
 .oobe-progress-segment { display: block; height: 4px; border-radius: 999px; background: #e4e8ed; transition: background 240ms ease, transform 240ms ease; }
 .oobe-progress-segment.is-active { background: #2389ec; transform: scaleY(1.15); }
 .oobe-plugins-reveal .oobe-plugin-card { animation: oobe-plugin-card-rise 480ms cubic-bezier(.2, .8, .2, 1) both; }
 @keyframes oobe-plugin-card-rise { from { opacity: 0; transform: translateY(22px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes oobe-plugin-install-progress { from { left: -38%; } to { left: 100%; } }
 .oobe-plugin-state { color: #176b39; font-size: 13px; white-space: nowrap; }
 .oobe-actions { display: flex; justify-content: flex-end; gap: 8px; max-width: 760px; margin: 8px auto 0; }
 .primary-button:disabled { opacity: .55; cursor: not-allowed; }

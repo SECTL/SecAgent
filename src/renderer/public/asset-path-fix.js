@@ -1,5 +1,5 @@
 (() => {
-  const assets = new Set(["/icon.svg", "/icon.png", "/session-chevron.svg", "/image-icon.svg", "/mic-icon.svg"]);
+  const assets = new Set(["/icon.svg", "/icon.png", "/session-chevron.svg", "/image-icon.svg", "/mic-icon.svg", "/classisland-icon.png", "/cw-icon.png", "/secrandom-logo.png", "/SecScore.png", "/iccce-logo.png"]);
   const normalize = (value) => typeof value === "string" && assets.has(value) ? `.${value}` : value;
   const setAttribute = Element.prototype.setAttribute;
   Element.prototype.setAttribute = function (name, value) {

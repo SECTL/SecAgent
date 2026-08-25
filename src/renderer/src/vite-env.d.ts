@@ -17,7 +17,7 @@ interface SkillSummary { name: string; description: string; path: string }
 interface PluginStatus { id: string; format?: "secagent" | "agent"; name: string; version: string; icon?: string; enabled: boolean; state: "inactive" | "starting" | "error" | "ready"; message?: string; description?: string; author?: string; repository?: string; permissions?: string[]; readme?: string; settingsPages: Array<{ id: string; title: string; description?: string }> }
 interface MarketplaceVersion { version: string; minHostApiVersion: number; assetUrl: string; sha256: string; permissions: string[]; platforms: string[] }
 interface MarketplacePlugin { id: string; format?: "secagent" | "agent"; name: string; description: string; repository: string; icon?: string; readme?: string; versions: MarketplaceVersion[] }
-interface DetectedCompanionApp { pluginId: string; appName: string; description: string; detected: boolean; evidence?: string }
+interface DetectedCompanionApp { pluginId: string; appName: string; description: string; icon: string; detected: boolean; evidence?: string }
 interface OobeProgress { step: "source" | "config" | "plugins"; source?: "official" | "custom"; provider?: Omit<ProviderConfig, "apiKey"> }
 interface Window {
   secagent: {

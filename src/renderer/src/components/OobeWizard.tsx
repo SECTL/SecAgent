@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowRight } from "lucide-react";
+import { ArrowRight, Check } from "lucide-react";
 import { PresetCombobox } from "./PresetCombobox.js";
 import { emptyProvider } from "../utils.js";
 
@@ -350,12 +350,19 @@ export function OobeWizard() {
           const market = marketPlugins.find((plugin) => plugin.id === app.pluginId);
           const installed = plugins.find((plugin) => plugin.id === app.pluginId);
           const version = latestCompatibleVersion(market, bridge.platform);
-          return <article className="settings-card oobe-plugin-card" style={{ animationDelay: `${index * 70}ms` }} key={app.pluginId}>
-            <div>
-              <strong>{app.appName}</strong>
-              <span>{app.description} · 已在本机找到</span>
+          const installing = installingId === app.pluginId;
+          return <article className={`settings-card oobe-plugin-card${installing ? " is-installing" : ""}`} aria-busy={installing} style={{ animationDelay: `${index * 70}ms` }} key={app.pluginId}>
+            <div className="oobe-plugin-main">
+              <span className={`oobe-plugin-icon${installed?.icon ? " has-plugin-icon" : ""}`} aria-hidden="true">
+                <img className="oobe-plugin-icon-app" src={app.icon} alt="" />
+                {installed?.icon && <img className="oobe-plugin-icon-plugin" key={installed.icon} src={installed.icon} alt="" />}
+              </span>
+              <div className="oobe-plugin-copy">
+                <strong>{app.appName}</strong>
+                <span>{app.description} · 已在本机找到</span>
+              </div>
             </div>
-            {installed ? <span className="oobe-plugin-state">已安装</span> : market && version ? <button className="primary-button" type="button" disabled={installingId === app.pluginId} onClick={() => void installPlugin(market)}>{installingId === app.pluginId ? "安装中…" : `安装联动插件`}</button> : <span className="oobe-plugin-state">市场暂无该联动插件</span>}
+            {installed ? <span className="oobe-plugin-state" aria-label="已安装" title="已安装"><Check aria-hidden="true" size={20} strokeWidth={2.4} /></span> : market && version ? <button className="primary-button" type="button" disabled={installingId === app.pluginId} onClick={() => void installPlugin(market)}>{installingId === app.pluginId ? "安装中…" : `安装联动插件`}</button> : <span className="oobe-plugin-state">市场暂无该联动插件</span>}
           </article>;
         })}
       </section>
