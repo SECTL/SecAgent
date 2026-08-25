@@ -384,7 +384,24 @@ html.wake-mode, html.wake-mode body, body.wake-mode { min-width: 0; overflow: hi
 .oobe-plugin-main { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .oobe-plugin-copy { display: grid; gap: 4px; min-width: 0; }
 .oobe-plugin-copy > span { color: #777; font-size: 12px; }
+.oobe-plugin-card-classisland { flex-wrap: wrap; }
+.oobe-plugin-side-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-left: auto; }
+.oobe-classisland-targets { flex: 1 0 100%; display: grid; gap: 8px; padding-top: 4px; }
+.oobe-classisland-target-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.oobe-classisland-target-heading strong { font-size: 13px; }
+.oobe-classisland-target-heading .secondary-button { padding: 6px 9px; font-size: 12px; }
+.oobe-classisland-target { display: flex; align-items: flex-start; gap: 9px; padding: 9px 10px; border: 1px solid #e2e6eb; border-radius: 9px; background: #fafbfd; cursor: pointer; }
+.oobe-classisland-target:has(input:checked) { border-color: #8fc2f4; background: #f2f8ff; }
+.oobe-classisland-target.is-incompatible { cursor: not-allowed; opacity: .68; }
+.oobe-classisland-target input { margin-top: 3px; accent-color: #2389ec; }
+.oobe-classisland-target > span { display: grid; gap: 3px; min-width: 0; }
+.oobe-classisland-target > span strong { font-size: 13px; }
+.oobe-classisland-target > span small { overflow: hidden; color: #777; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.oobe-classisland-target > span em { color: #9a5b00; font-size: 11px; font-style: normal; }
+.oobe-classisland-target > span em.is-success { color: #176b39; }
+.oobe-classisland-target > span em.is-error { color: #a12a2a; }
 .oobe-plugin-icon { display: block; position: relative; flex: 0 0 42px; width: 42px; height: 42px; overflow: hidden; border-radius: 10px; background: #f3f6fa; perspective: 600px; }
+.oobe-plugin-icon.has-plugin-icon { transform: scale(1.14); }
 .oobe-plugin-icon > img { position: absolute; inset: 4px; width: calc(100% - 8px); height: calc(100% - 8px); object-fit: contain; backface-visibility: hidden; }
 .oobe-plugin-icon-app { opacity: 1; transform: rotateY(0) scale(1); }
 .oobe-plugin-icon-plugin { opacity: 0; transform: rotateY(-90deg) scale(.78); }
@@ -402,4 +419,5 @@ html.wake-mode, html.wake-mode body, body.wake-mode { min-width: 0; overflow: hi
 .oobe-plugin-state { color: #176b39; font-size: 13px; white-space: nowrap; }
 .oobe-actions { display: flex; justify-content: flex-end; gap: 8px; max-width: 760px; margin: 8px auto 0; }
 .primary-button:disabled { opacity: .55; cursor: not-allowed; }
-@media (prefers-reduced-motion: reduce) { .oobe-page, .oobe-page-exit.oobe-page-forward, .oobe-page-exit.oobe-page-back, .oobe-page-enter.oobe-page-forward, .oobe-page-enter.oobe-page-back { animation: none; } .oobe-choice, .oobe-choice-arrow { transition-duration: 0ms; } }
+@media (max-width: 640px) { .oobe-plugin-side-actions { flex-basis: 100%; justify-content: flex-start; margin-left: 54px; } .oobe-classisland-target-heading { align-items: flex-start; flex-direction: column; } }
+@media (prefers-reduced-motion: reduce) { .oobe-page, .oobe-page-exit.oobe-page-forward, .oobe-page-exit.oobe-page-back, .oobe-page-enter.oobe-page-forward, .oobe-page-enter.oobe-page-back, .oobe-plugin-card::before, .oobe-plugin-icon.has-plugin-icon .oobe-plugin-icon-app, .oobe-plugin-icon.has-plugin-icon .oobe-plugin-icon-plugin { animation: none; } .oobe-choice, .oobe-choice-arrow { transition-duration: 0ms; } }

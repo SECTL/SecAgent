@@ -18,6 +18,10 @@ interface PluginStatus { id: string; format?: "secagent" | "agent"; name: string
 interface MarketplaceVersion { version: string; minHostApiVersion: number; assetUrl: string; sha256: string; permissions: string[]; platforms: string[] }
 interface MarketplacePlugin { id: string; format?: "secagent" | "agent"; name: string; description: string; repository: string; icon?: string; readme?: string; versions: MarketplaceVersion[] }
 interface DetectedCompanionApp { pluginId: string; appName: string; description: string; icon: string; detected: boolean; evidence?: string }
+interface ClassIslandInstallCandidate { id: string; executablePath: string; rootPath: string; dataRoot: string; pluginPackagesPath: string; version?: string; installedPluginVersion?: string; packageType?: string; isRunning: boolean; pid?: number; launchArgs: string[]; source: string; compatible: boolean; reason?: string }
+interface ClassIslandInstallResult { targetId: string; ok: boolean; action: "installed" | "already-installed" | "skipped" | "failed"; message: string; version?: string }
+type ClassIslandInstallPhase = "downloading" | "verifying" | "installing" | "restarting";
+interface ClassIslandInstallProgress { phase: "downloading" | "verifying" | "installing" | "restarting"; targetIds: string[]; message?: string }
 interface OobeProgress { step: "source" | "config" | "plugins"; source?: "official" | "custom"; provider?: Omit<ProviderConfig, "apiKey"> }
 interface Window {
   secagent: {
@@ -43,6 +47,10 @@ interface Window {
     listMarketplace(): Promise<MarketplacePlugin[]>;
     installMarketplaceVersion(version: MarketplaceVersion): Promise<PluginStatus[]>;
     detectInstalledApps(): Promise<DetectedCompanionApp[]>;
+    detectClassIslandInstallations(): Promise<ClassIslandInstallCandidate[]>;
+    pickClassIslandExecutable(): Promise<ClassIslandInstallCandidate | undefined>;
+    installClassIslandCompanion(targetIds: string[]): Promise<ClassIslandInstallResult[]>;
+    onClassIslandProgress(listener: (progress: ClassIslandInstallProgress) => void): () => void;
     getOobeProgress(): Promise<OobeProgress | undefined>;
     saveOobeProgress(progress: OobeProgress): Promise<OobeProgress | undefined>;
     openExternal(url: string): Promise<{ ok: true }>;

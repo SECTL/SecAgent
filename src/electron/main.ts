@@ -18,6 +18,7 @@ import { synthesizeSpeech } from "./tts.js";
 import { PluginManager, type SvgPreviewRequest } from "../plugin-manager.js";
 import { MarketplaceClient, type MarketplacePlugin, type MarketplaceVersion } from "../marketplace.js";
 import { detectCompanionApps } from "../companion-apps.js";
+import { ClassIslandInstaller } from "../classisland.js";
 import { SecAgentHttpServer } from "../secagent-http.js";
 import { Models } from "@opencode-ai/models";
 import { DEFAULT_WAKE_HOTKEY, normalizeWakeHotkey } from "../wake-hotkey.js";
@@ -35,6 +36,7 @@ let activeWakeShortcut: string | undefined;
 let activeWakeContext: { sessionId?: string; modelId?: string; reasoningEffort?: ReasoningEffort } = {};
 let wakeAbortController: AbortController | undefined;
 const marketplace = new MarketplaceClient();
+const classIslandInstaller = new ClassIslandInstaller();
 const activeSessionRuns = new Map<string, AbortController>();
 const MARKETPLACE_UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 let marketplaceUpdateTimer: NodeJS.Timeout | undefined;
@@ -644,6 +646,21 @@ ipcMain.handle("plugins:install", async () => {
 ipcMain.handle("marketplace:list", () => marketplace.list());
 ipcMain.handle("marketplace:install", async (_event, version: MarketplaceVersion) => { if (!pluginManager) throw new Error("插件管理器尚未启动"); await marketplace.install(pluginManager, version); return pluginManager.list(); });
 ipcMain.handle("apps:detect", () => detectCompanionApps());
+ipcMain.handle("classisland:detect", () => classIslandInstaller.detect());
+ipcMain.handle("classisland:pick", async () => {
+  const result = await dialog.showOpenDialog(settingsWindow || windowRef!, {
+    properties: ["openFile"],
+    filters: process.platform === "win32" ? [{ name: "ClassIsland", extensions: ["exe"] }] : undefined
+  });
+  if (result.canceled || !result.filePaths[0]) return undefined;
+  return classIslandInstaller.inspect(result.filePaths[0]);
+});
+ipcMain.handle("classisland:install", async (event, targetIds: unknown) => {
+  if (!Array.isArray(targetIds) || targetIds.some((item) => typeof item !== "string")) throw new Error("ClassIsland 安装目标无效");
+  return classIslandInstaller.install(targetIds, (progress) => {
+    if (!event.sender.isDestroyed()) event.sender.send("classisland:progress", progress);
+  });
+});
 ipcMain.handle("oobe:progress:get", () => readOobeProgress(DEFAULT_WORKSPACE));
 ipcMain.handle("oobe:progress:save", (_event, progress: OobeProgress) => {
   saveOobeProgress(DEFAULT_WORKSPACE, progress);

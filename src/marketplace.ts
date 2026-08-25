@@ -71,7 +71,7 @@ export class MarketplaceClient {
 
 /** Returns proxy-first URLs for GitHub resources and direct-only URLs otherwise. */
 export function marketplaceRequestUrls(directUrl: string): string[] {
-  if (!/^https:\/\/(?:github\.com|raw\.githubusercontent\.com)\//i.test(directUrl)) return [directUrl];
+  if (!/^https:\/\/(?:api\.github\.com|github\.com|raw\.githubusercontent\.com)\//i.test(directUrl)) return [directUrl];
   return [`${DEFAULT_MARKETPLACE_PROXY_URL}/${directUrl}`, directUrl];
 }
 

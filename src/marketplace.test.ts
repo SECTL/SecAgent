@@ -14,6 +14,11 @@ test("marketplace uses the proxy before the direct GitHub URL", () => {
     `${DEFAULT_MARKETPLACE_PROXY_URL}/${DEFAULT_MARKETPLACE_INDEX_URL}`,
     DEFAULT_MARKETPLACE_INDEX_URL
   ]);
+  const githubApiUrl = "https://api.github.com/repos/SECTL/ClassIsland-SecAgent-Plugin/releases/latest";
+  assert.deepEqual(marketplaceRequestUrls(githubApiUrl), [
+    `${DEFAULT_MARKETPLACE_PROXY_URL}/${githubApiUrl}`,
+    githubApiUrl
+  ]);
   assert.deepEqual(marketplaceRequestUrls("https://example.com/index.json"), ["https://example.com/index.json"]);
 });
 

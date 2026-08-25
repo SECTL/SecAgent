@@ -47,6 +47,10 @@ export function OobeWizard() {
   const [marketPlugins, setMarketPlugins] = useState<MarketplacePlugin[]>([]);
   const [marketError, setMarketError] = useState("");
   const [installingId, setInstallingId] = useState("");
+  const [classIslandTargets, setClassIslandTargets] = useState<ClassIslandInstallCandidate[]>([]);
+  const [classIslandSelectedIds, setClassIslandSelectedIds] = useState<string[]>([]);
+  const [classIslandResults, setClassIslandResults] = useState<Record<string, ClassIslandInstallResult>>({});
+  const [classIslandPhase, setClassIslandPhase] = useState<ClassIslandInstallPhase | "idle">("idle");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [progressReady, setProgressReady] = useState(false);
@@ -86,6 +90,18 @@ export function OobeWizard() {
     let disposed = false;
     void bridge.detectInstalledApps().then((detectedApps) => {
       if (!disposed) setApps(detectedApps);
+    }).catch(() => undefined);
+    void bridge.detectClassIslandInstallations().then((targets) => {
+      if (disposed) return;
+      setClassIslandTargets(targets);
+      setClassIslandSelectedIds((current) => {
+        const validCurrent = current.filter((id) => targets.some((target) => target.id === id && target.compatible));
+        if (validCurrent.length) return validCurrent;
+        const running = targets.filter((target) => target.compatible && target.isRunning).map((target) => target.id);
+        if (running.length) return running;
+        const compatible = targets.filter((target) => target.compatible);
+        return compatible.length === 1 ? [compatible[0].id] : [];
+      });
     }).catch(() => undefined);
     void Promise.all([
       bridge.getSettings(),
@@ -133,6 +149,10 @@ export function OobeWizard() {
     }).catch((reason) => { if (!disposed) setError(String(reason)); });
     return () => { disposed = true; };
   }, [bridge, step]);
+
+  useEffect(() => bridge.onClassIslandProgress((progress) => {
+    if (progress?.phase) setClassIslandPhase(progress.phase);
+  }), [bridge]);
 
   useEffect(() => {
     setPluginsReveal(false);
@@ -257,7 +277,57 @@ export function OobeWizard() {
     }
   };
 
-  const recommended = useMemo(() => apps.filter((app) => app.detected), [apps]);
+  const pickClassIslandExecutable = async () => {
+    setError("");
+    try {
+      const candidate = await bridge.pickClassIslandExecutable();
+      if (!candidate) return;
+      setClassIslandTargets((current) => current.some((item) => item.id === candidate.id) ? current.map((item) => item.id === candidate.id ? candidate : item) : [...current, candidate]);
+      if (candidate.compatible) setClassIslandSelectedIds((current) => current.includes(candidate.id) ? current : [...current, candidate.id]);
+      if (!candidate.compatible) setError(candidate.reason || "选择的 ClassIsland 版本不兼容");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  const installClassIslandPlugin = async (market: MarketplacePlugin | undefined) => {
+    const selectedTargets = classIslandTargets.filter((target) => classIslandSelectedIds.includes(target.id));
+    if (!selectedTargets.length) {
+      setError("请先选择一个或多个 ClassIsland 安装目标");
+      return;
+    }
+    if (selectedTargets.some((target) => !target.compatible)) {
+      setError("所选 ClassIsland 版本低于 2.1.1.0，无法安装联动插件");
+      return;
+    }
+    const connectorInstalled = plugins.some((plugin) => plugin.id === "classisland-connector");
+    const connectorVersion = market ? latestCompatibleVersion(market, bridge.platform) : undefined;
+    if (!connectorInstalled && !connectorVersion) {
+      setError("市场暂无兼容的 SecAgent ClassIsland 连接器");
+      return;
+    }
+    setInstallingId("classisland-connector");
+    setClassIslandPhase("downloading");
+    setError("");
+    try {
+      if (!connectorInstalled && connectorVersion) setPlugins(await bridge.installMarketplaceVersion(connectorVersion));
+      const results = await bridge.installClassIslandCompanion(selectedTargets.map((target) => target.id));
+      setClassIslandResults((current) => ({ ...current, ...Object.fromEntries(results.map((result) => [result.targetId, result])) }));
+      setClassIslandTargets((current) => current.map((target) => {
+        const result = results.find((item) => item.targetId === target.id);
+        return result?.ok && result.version ? { ...target, installedPluginVersion: result.version } : target;
+      }));
+      const failures = results.filter((result) => !result.ok);
+      if (failures.length) setError(failures.map((result) => result.message).join("；"));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setInstallingId("");
+      setClassIslandPhase("idle");
+    }
+  };
+
+  const recommended = useMemo(() => apps.filter((app) => app.detected || app.pluginId === "classisland-connector"), [apps]);
 
   if (!settings || !progressReady) return <main className="settings-shell oobe-shell has-window-title"><p>正在读取配置…</p></main>;
 
@@ -345,13 +415,17 @@ export function OobeWizard() {
       {marketError && <div className="settings-error">{marketError}</div>}
       <section className="oobe-plugin-list">
         <h2>本机已检测到</h2>
-        {!recommended.length && <p className="empty-list">没有检测到已适配的课堂应用。你仍可安装下面的联动插件，或稍后在设置里处理。</p>}
+        {!apps.some((app) => app.detected) && <p className="empty-list">没有自动检测到已适配的课堂应用。你可以在 ClassIsland 卡片中手动选择安装位置，或稍后在设置里处理。</p>}
         {recommended.map((app, index) => {
           const market = marketPlugins.find((plugin) => plugin.id === app.pluginId);
           const installed = plugins.find((plugin) => plugin.id === app.pluginId);
           const version = latestCompatibleVersion(market, bridge.platform);
           const installing = installingId === app.pluginId;
-          return <article className={`settings-card oobe-plugin-card${installing ? " is-installing" : ""}`} aria-busy={installing} style={{ animationDelay: `${index * 70}ms` }} key={app.pluginId}>
+          const isClassIsland = app.pluginId === "classisland-connector";
+          const selectedClassIslandTargets = classIslandTargets.filter((target) => classIslandSelectedIds.includes(target.id));
+          const classIslandCanInstall = selectedClassIslandTargets.length > 0 && selectedClassIslandTargets.every((target) => target.compatible) && (Boolean(installed) || Boolean(version));
+          const classIslandPhaseLabel = classIslandPhase === "downloading" ? "下载中…" : classIslandPhase === "verifying" ? "校验中…" : classIslandPhase === "installing" ? "安装中…" : classIslandPhase === "restarting" ? "重启中…" : installed ? "安装 ClassIsland 插件" : version ? "安装并配置" : "市场暂无连接器";
+          return <article className={`settings-card oobe-plugin-card${isClassIsland ? " oobe-plugin-card-classisland" : ""}${installing ? " is-installing" : ""}`} aria-busy={installing} style={{ animationDelay: `${index * 70}ms` }} key={app.pluginId}>
             <div className="oobe-plugin-main">
               <span className={`oobe-plugin-icon${installed?.icon ? " has-plugin-icon" : ""}`} aria-hidden="true">
                 <img className="oobe-plugin-icon-app" src={app.icon} alt="" />
@@ -359,10 +433,24 @@ export function OobeWizard() {
               </span>
               <div className="oobe-plugin-copy">
                 <strong>{app.appName}</strong>
-                <span>{app.description} · 已在本机找到</span>
+                <span>{isClassIsland ? (classIslandTargets.length ? app.description : "未自动找到安装目录，可手动选择") : `${app.description} · 已在本机找到`}</span>
               </div>
             </div>
-            {installed ? <span className="oobe-plugin-state" aria-label="已安装" title="已安装"><Check aria-hidden="true" size={20} strokeWidth={2.4} /></span> : market && version ? <button className="primary-button" type="button" disabled={installingId === app.pluginId} onClick={() => void installPlugin(market)}>{installingId === app.pluginId ? "安装中…" : `安装联动插件`}</button> : <span className="oobe-plugin-state">市场暂无该联动插件</span>}
+            {isClassIsland ? <div className="oobe-plugin-side-actions">
+              {installed && <span className="oobe-plugin-state" aria-label="SecAgent 连接器已安装" title="SecAgent 连接器已安装"><Check aria-hidden="true" size={20} strokeWidth={2.4} /></span>}
+              <button className="primary-button" type="button" disabled={installing || !classIslandCanInstall} onClick={() => void installClassIslandPlugin(market)}>{installing ? classIslandPhaseLabel : installed ? "安装 ClassIsland 插件" : version ? "安装并配置" : "市场暂无连接器"}</button>
+            </div> : installed ? <span className="oobe-plugin-state" aria-label="已安装" title="已安装"><Check aria-hidden="true" size={20} strokeWidth={2.4} /></span> : market && version ? <button className="primary-button" type="button" disabled={installing} onClick={() => void installPlugin(market)}>{installing ? "安装中…" : `安装联动插件`}</button> : <span className="oobe-plugin-state">市场暂无该联动插件</span>}
+            {isClassIsland && <div className="oobe-classisland-targets">
+              <div className="oobe-classisland-target-heading"><strong>选择 ClassIsland 安装目标</strong><button className="secondary-button" type="button" disabled={installing} onClick={() => void pickClassIslandExecutable()}>选择 ClassIsland.exe</button></div>
+              {!classIslandTargets.length && <p className="empty-list">未找到 ClassIsland，可选择其可执行文件。</p>}
+              {classIslandTargets.map((target) => {
+                const result = classIslandResults[target.id];
+                return <label className={`oobe-classisland-target${target.compatible ? "" : " is-incompatible"}`} key={target.id}>
+                  <input type="checkbox" checked={classIslandSelectedIds.includes(target.id)} disabled={!target.compatible || installing} onChange={() => setClassIslandSelectedIds((current) => current.includes(target.id) ? current.filter((id) => id !== target.id) : [...current, target.id])} />
+                  <span><strong>ClassIsland {target.version ? `v${target.version}` : "版本未知"}{target.isRunning ? " · 正在运行" : ""}</strong><small>{target.executablePath}{target.installedPluginVersion ? ` · 已安装 SecAgent 插件 v${target.installedPluginVersion}` : ""}</small>{!target.compatible && <em>{target.reason}</em>}{result && <em className={result.ok ? "is-success" : "is-error"}>{result.message}</em>}</span>
+                </label>;
+              })}
+            </div>}
           </article>;
         })}
       </section>
