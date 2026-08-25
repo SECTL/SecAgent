@@ -113,6 +113,7 @@ test("downloads through ghproxy first, verifies the asset, and installs to the s
       versionOf: () => "2.1.1.0",
       fetcher,
       exists: (candidate) => fs.existsSync(candidate),
+      restartProcess: async () => undefined,
       now: () => 123
     });
     const [target] = await installer.detect();
@@ -144,7 +145,7 @@ test("falls back from the proxy to direct GitHub for both release metadata and t
       if (url.includes("api.github.com")) return new Response(JSON.stringify({ tag_name: "0.1.0.1", assets: [{ name: CLASSISLAND_PLUGIN_ASSET_NAME, browser_download_url: "https://github.com/SECTL/ClassIsland-SecAgent-Plugin/releases/download/0.1.0.1/ClassIsland.SecAgent.Plugin.cipx", digest: `sha256:${digest}`, size: bytes.length }] }), { status: 200 });
       return new Response(bytes, { status: 200 });
     };
-    const installer = new ClassIslandInstaller({ platform: "win32", executablePaths: [exe], runningProcesses: [], versionOf: () => "2.1.1.0", fetcher, exists: (candidate) => fs.existsSync(candidate) });
+    const installer = new ClassIslandInstaller({ platform: "win32", executablePaths: [exe], runningProcesses: [], versionOf: () => "2.1.1.0", fetcher, exists: (candidate) => fs.existsSync(candidate), restartProcess: async () => undefined });
     const [target] = await installer.detect();
     const [result] = await installer.install([target.id]);
     assert.equal(result.ok, true);
@@ -176,7 +177,7 @@ test("uses the GitHub release page digest when the REST API is rate limited", as
       if (url.includes("expanded_assets")) return new Response(`<li><a href="/SECTL/ClassIsland-SecAgent-Plugin/releases/download/0.1.0.1/${CLASSISLAND_PLUGIN_ASSET_NAME}"><span>${CLASSISLAND_PLUGIN_ASSET_NAME}</span></a><span>sha256:${digest}</span></li>`, { status: 200 });
       return new Response(bytes, { status: 200 });
     };
-    const installer = new ClassIslandInstaller({ platform: "win32", executablePaths: [exe], runningProcesses: [], versionOf: () => "2.1.1.0", fetcher, exists: (candidate) => fs.existsSync(candidate) });
+    const installer = new ClassIslandInstaller({ platform: "win32", executablePaths: [exe], runningProcesses: [], versionOf: () => "2.1.1.0", fetcher, exists: (candidate) => fs.existsSync(candidate), restartProcess: async () => undefined });
     const [target] = await installer.detect();
     const [result] = await installer.install([target.id]);
     assert.equal(result.ok, true);
@@ -212,6 +213,57 @@ test("does not write a package when ClassIsland is too old or the digest is inva
     const [target] = await invalidInstaller.detect();
     await assert.rejects(() => invalidInstaller.install([target.id]), /SHA-256/);
     assert.equal(fs.existsSync(path.win32.join(root, "Cache", "PluginPackages", CLASSISLAND_PLUGIN_ASSET_NAME)), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("restarts a running ClassIsland and starts an idle instance after installing", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-classisland-start-"));
+  try {
+    const exe = path.win32.join(root, "ClassIsland.exe");
+    fs.mkdirSync(root, { recursive: true });
+    fs.writeFileSync(exe, "test executable");
+    fs.writeFileSync(path.win32.join(root, "PackageType"), "folder\n");
+    const bytes = Buffer.from("startable cipx bytes");
+    const digest = crypto.createHash("sha256").update(bytes).digest("hex");
+    const launches: Array<{ executablePath: string; args: string[] }> = [];
+    const fetcher = async (input: string | URL): Promise<Response> => String(input).includes("api.github.com")
+      ? new Response(JSON.stringify({ tag_name: "0.1.0.1", assets: [{ name: CLASSISLAND_PLUGIN_ASSET_NAME, browser_download_url: "https://github.com/example/plugin.cipx", digest: `sha256:${digest}`, size: bytes.length }] }), { status: 200 })
+      : new Response(bytes, { status: 200 });
+
+    const runningInstaller = new ClassIslandInstaller({
+      platform: "win32",
+      executablePaths: [exe],
+      runningProcesses: [{ executablePath: exe, pid: 321, commandLine: `"${exe}" --profile school`, version: "2.1.1.0" }],
+      versionOf: () => "2.1.1.0",
+      fetcher,
+      exists: (candidate) => fs.existsSync(candidate),
+      requestGracefulClose: async () => undefined,
+      isProcessRunning: async () => false,
+      restartProcess: async (executablePath, args) => { launches.push({ executablePath, args }); }
+    });
+    const [runningTarget] = await runningInstaller.detect();
+    const [runningResult] = await runningInstaller.install([runningTarget.id]);
+    assert.equal(runningResult.ok, true);
+    assert.match(runningResult.message, /自动重启/);
+    assert.deepEqual(launches, [{ executablePath: exe, args: ["--profile", "school"] }]);
+
+    launches.length = 0;
+    const idleInstaller = new ClassIslandInstaller({
+      platform: "win32",
+      executablePaths: [exe],
+      runningProcesses: [],
+      versionOf: () => "2.1.1.0",
+      fetcher,
+      exists: (candidate) => fs.existsSync(candidate),
+      restartProcess: async (executablePath, args) => { launches.push({ executablePath, args }); }
+    });
+    const [idleTarget] = await idleInstaller.detect();
+    const [idleResult] = await idleInstaller.install([idleTarget.id]);
+    assert.equal(idleResult.ok, true);
+    assert.match(idleResult.message, /自动启动/);
+    assert.deepEqual(launches, [{ executablePath: exe, args: [] }]);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

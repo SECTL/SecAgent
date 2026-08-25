@@ -423,8 +423,9 @@ export function OobeWizard() {
           const installing = installingId === app.pluginId;
           const isClassIsland = app.pluginId === "classisland-connector";
           const selectedClassIslandTargets = classIslandTargets.filter((target) => classIslandSelectedIds.includes(target.id));
-          const classIslandCanInstall = selectedClassIslandTargets.length > 0 && selectedClassIslandTargets.every((target) => target.compatible) && (Boolean(installed) || Boolean(version));
-          const classIslandPhaseLabel = classIslandPhase === "downloading" ? "下载中…" : classIslandPhase === "verifying" ? "校验中…" : classIslandPhase === "installing" ? "安装中…" : classIslandPhase === "restarting" ? "重启中…" : installed ? "安装 ClassIsland 插件" : version ? "安装并配置" : "市场暂无连接器";
+          const classIslandCompanionInstalled = selectedClassIslandTargets.length > 0 && selectedClassIslandTargets.every((target) => Boolean(target.installedPluginVersion));
+          const classIslandCanInstall = selectedClassIslandTargets.length > 0 && selectedClassIslandTargets.every((target) => target.compatible) && !classIslandCompanionInstalled && (Boolean(installed) || Boolean(version));
+          const classIslandPhaseLabel = classIslandPhase === "downloading" ? "下载中…" : classIslandPhase === "verifying" ? "校验中…" : classIslandPhase === "installing" ? "安装中…" : classIslandPhase === "restarting" ? "重启中…" : classIslandCompanionInstalled ? "ClassIsland 插件已安装" : installed ? "安装 ClassIsland 插件" : version ? "安装并配置" : "市场暂无连接器";
           return <article className={`settings-card oobe-plugin-card${isClassIsland ? " oobe-plugin-card-classisland" : ""}${installing ? " is-installing" : ""}`} aria-busy={installing} style={{ animationDelay: `${index * 70}ms` }} key={app.pluginId}>
             <div className="oobe-plugin-main">
               <span className={`oobe-plugin-icon${installed?.icon ? " has-plugin-icon" : ""}`} aria-hidden="true">
@@ -438,7 +439,7 @@ export function OobeWizard() {
             </div>
             {isClassIsland ? <div className="oobe-plugin-side-actions">
               {installed && <span className="oobe-plugin-state" aria-label="SecAgent 连接器已安装" title="SecAgent 连接器已安装"><Check aria-hidden="true" size={20} strokeWidth={2.4} /></span>}
-              <button className="primary-button" type="button" disabled={installing || !classIslandCanInstall} onClick={() => void installClassIslandPlugin(market)}>{installing ? classIslandPhaseLabel : installed ? "安装 ClassIsland 插件" : version ? "安装并配置" : "市场暂无连接器"}</button>
+              <button className="primary-button" type="button" disabled={installing || !classIslandCanInstall} onClick={() => void installClassIslandPlugin(market)}>{installing ? classIslandPhaseLabel : classIslandCompanionInstalled ? "ClassIsland 插件已安装" : installed ? "安装 ClassIsland 插件" : version ? "安装并配置" : "市场暂无连接器"}</button>
             </div> : installed ? <span className="oobe-plugin-state" aria-label="已安装" title="已安装"><Check aria-hidden="true" size={20} strokeWidth={2.4} /></span> : market && version ? <button className="primary-button" type="button" disabled={installing} onClick={() => void installPlugin(market)}>{installing ? "安装中…" : `安装联动插件`}</button> : <span className="oobe-plugin-state">市场暂无该联动插件</span>}
             {isClassIsland && <div className="oobe-classisland-targets">
               <div className="oobe-classisland-target-heading"><strong>选择 ClassIsland 安装目标</strong><button className="secondary-button" type="button" disabled={installing} onClick={() => void pickClassIslandExecutable()}>选择 ClassIsland.exe</button></div>

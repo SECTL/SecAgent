@@ -183,7 +183,8 @@ $result = Get-ChildItem -Path $roots -Filter '*.lnk' -File -Recurse -ErrorAction
 async function discoverRunningProcesses(platform: SupportedPlatform, commandRunner: CommandRunner): Promise<ClassIslandRunningProcess[]> {
   if (platform !== "win32") return [];
   const script = String.raw`
-Get-CimInstance Win32_Process -Filter "Name = 'ClassIsland.exe'" |
+Get-CimInstance Win32_Process |
+  Where-Object { $_.Name -ieq 'ClassIsland.exe' } |
   ForEach-Object {
     $version = $null
     try { $version = (Get-Item -LiteralPath $_.ExecutablePath).VersionInfo.ProductVersion } catch { }
@@ -627,12 +628,12 @@ export class ClassIslandInstaller {
       try {
         report("installing", "正在写入 ClassIsland 插件包");
         writeAtomic(packagePath, packageData.bytes, this.platform);
-        let restartFailed = false;
-        if (closed.length) report("restarting", "正在重新启动 ClassIsland");
-        for (const candidate of closed) {
-          try { await restart(candidate.executablePath, candidate.launchArgs); } catch { restartFailed = true; }
-        }
-        for (const candidate of group) results.push({ targetId: candidate.id, ok: !restartFailed, action: alreadyInstalled ? "already-installed" : restartFailed ? "failed" : "installed", message: restartFailed ? "插件已写入，但 ClassIsland 自动重启失败，请手动启动" : alreadyInstalled ? `已安装 ClassIsland 插件 v${packageData.version}` : `已安装 ClassIsland 插件 v${packageData.version}`, version: packageData.version });
+        const launchCandidate = closed[0] || group[0];
+        const restarting = closed.length > 0;
+        report("restarting", restarting ? "正在重新启动 ClassIsland" : "正在启动 ClassIsland");
+        let launchFailed = false;
+        try { await restart(launchCandidate.executablePath, launchCandidate.launchArgs); } catch { launchFailed = true; }
+        for (const candidate of group) results.push({ targetId: candidate.id, ok: !launchFailed, action: launchFailed ? "failed" : "installed", message: launchFailed ? `插件已写入，但 ClassIsland 自动${restarting ? "重启" : "启动"}失败，请手动启动` : restarting ? `已安装 ClassIsland 插件 v${packageData.version}，ClassIsland 已自动重启` : `已安装 ClassIsland 插件 v${packageData.version}，ClassIsland 已自动启动`, version: packageData.version });
       } catch (error) {
         for (const candidate of closed) await restart(candidate.executablePath, candidate.launchArgs).catch(() => undefined);
         for (const candidate of group) results.push({ targetId: candidate.id, ok: false, action: "failed", message: `写入 ClassIsland 插件失败：${error instanceof Error ? error.message : String(error)}` });
