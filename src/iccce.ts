@@ -257,6 +257,12 @@ function executableCandidates(input: string, platform: SupportedPlatform): strin
   return WINDOWS_ICCCE_EXECUTABLES.map((name) => api.join(normalized, name));
 }
 
+function isKnownIccceExecutable(candidate: string, platform: SupportedPlatform): boolean {
+  if (platform !== "win32") return true;
+  const name = path.win32.basename(candidate).toLowerCase();
+  return WINDOWS_ICCCE_EXECUTABLES.some((executable) => executable.toLowerCase() === name);
+}
+
 function staticExecutablePaths(platform: SupportedPlatform, home: string, env: NodeJS.ProcessEnv): string[] {
   const api = platformPath(platform);
   if (platform !== "win32") return [];
@@ -339,7 +345,7 @@ export async function discoverIccceInstallations(options: IccceDiscoveryOptions 
   const runningByPath = new Map(running.map((item) => [normalizePath(item.executablePath, platform), item]));
   const candidates = new Map<string, CachedCandidate>();
   const versionOf = options.versionOf || ((executablePath: string) => defaultVersionOf(executablePath, platform, commandRunner));
-  for (const executablePath of [...new Set(inputPaths.map((item) => api.normalize(item)))]) {
+  for (const executablePath of [...new Set(inputPaths.map((item) => api.normalize(item)))].filter((item) => isKnownIccceExecutable(item, platform))) {
     if (!exists(executablePath)) continue;
     const processInfo = runningByPath.get(normalizePath(executablePath, platform));
     const version = processInfo?.version || await versionOf(executablePath);

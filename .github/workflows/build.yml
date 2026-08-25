@@ -35,6 +35,10 @@ jobs:
         if: matrix.name == 'windows'
         run: npm run package:windows
 
+      - name: Generate Windows installer file manifest
+        if: matrix.name == 'windows'
+        run: node scripts/create-installer-manifest.mjs release/win-unpacked release/SecAgent.files.sha256
+
       - name: Package Linux or macOS application
         if: matrix.name != 'windows'
         run: npm run package
@@ -68,6 +72,7 @@ jobs:
             /DAppVersion=${{ steps.windows-meta.outputs.appVersion }}
             /DSourceDir=${{ github.workspace }}\release\win-unpacked
             /DOutputDir=${{ github.workspace }}\release\inno
+            /DManifestFile=${{ github.workspace }}\release\SecAgent.files.sha256
             /DOutputBaseFilename=${{ steps.windows-meta.outputs.setup }}
 
       - name: Prepare Windows installer output

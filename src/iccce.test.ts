@@ -35,6 +35,25 @@ test("resolves ICC-CE PluginPackages and detects the installed side plugin", asy
   }
 });
 
+test("does not treat an ICC-CE uninstaller as an application target", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-iccce-uninstaller-"));
+  try {
+    const uninstaller = path.win32.join(root, "unins000.exe");
+    fs.writeFileSync(uninstaller, "uninstaller");
+    const found = await discoverIccceInstallations({
+      platform: "win32",
+      home: "C:\\Users\\teacher",
+      env: { LOCALAPPDATA: "C:\\Users\\teacher\\AppData\\Local" },
+      commandRunner: async () => ({ stdout: JSON.stringify([uninstaller]), stderr: "" }),
+      exists: (candidate) => fs.existsSync(candidate),
+      versionOf: () => "1.8.0.2"
+    });
+    assert.deepEqual(found, []);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("downloads ICC-CE icpx through ghproxy, verifies it, and restarts the selected instance", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-iccce-install-"));
   try {

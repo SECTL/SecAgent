@@ -357,6 +357,9 @@ html.wake-mode, html.wake-mode body, body.wake-mode { min-width: 0; overflow: hi
 @keyframes oobe-page-back-out { from { opacity: 1; transform: translateX(0); } to { opacity: 0; transform: translateX(32px); } }
 @keyframes oobe-page-back-in { from { opacity: 0; transform: translateX(-32px); } to { opacity: 1; transform: translateX(0); } }
 .oobe-shell .oobe-header { max-width: 760px; margin: 18px auto 22px; }
+.oobe-plugin-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.oobe-plugin-heading h1 { min-width: 0; }
+.oobe-install-all-button { flex: 0 0 auto; }
 .oobe-step-label { margin: 0 0 6px; color: #2389ec; font-size: 12px; font-weight: 650; letter-spacing: .08em; }
 .oobe-choice-grid { display: grid; grid-template-columns: 1fr; gap: 12px; max-width: 760px; margin: 0 auto 18px; }
 .oobe-choice { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 18px; padding: 18px 16px; border: 1px solid #e0e0e0; border-radius: 14px; background: #fff; text-align: left; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,.03); transition: transform 320ms cubic-bezier(.2, 1.3, .4, 1), border-color 160ms ease, box-shadow 160ms ease, background 160ms ease; }
@@ -421,5 +424,5 @@ html.wake-mode, html.wake-mode body, body.wake-mode { min-width: 0; overflow: hi
 .oobe-plugin-state { color: #176b39; font-size: 13px; white-space: nowrap; }
 .oobe-actions { display: flex; justify-content: flex-end; gap: 8px; max-width: 760px; margin: 8px auto 0; }
 .primary-button:disabled { opacity: .55; cursor: not-allowed; }
-@media (max-width: 640px) { .oobe-plugin-side-actions { flex-basis: 100%; justify-content: flex-start; margin-left: 54px; } .oobe-classisland-target-heading { align-items: flex-start; flex-direction: column; } }
+@media (max-width: 640px) { .oobe-plugin-heading { align-items: flex-start; flex-direction: column; } .oobe-plugin-side-actions { flex-basis: 100%; justify-content: flex-start; margin-left: 54px; } .oobe-classisland-target-heading { align-items: flex-start; flex-direction: column; } }
 @media (prefers-reduced-motion: reduce) { .oobe-page, .oobe-page-exit.oobe-page-forward, .oobe-page-exit.oobe-page-back, .oobe-page-enter.oobe-page-forward, .oobe-page-enter.oobe-page-back, .oobe-plugin-card::before, .oobe-plugin-icon.has-plugin-icon .oobe-plugin-icon-app, .oobe-plugin-icon.has-plugin-icon .oobe-plugin-icon-plugin { animation: none; } .oobe-choice, .oobe-choice-arrow { transition-duration: 0ms; } }

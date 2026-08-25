@@ -467,6 +467,28 @@ export function OobeWizard() {
     }
   };
 
+  const installAllPlugins = async () => {
+    if (installingId) return;
+    setError("");
+    const tasks: Array<() => Promise<void>> = [];
+    const classIslandMarket = marketPlugins.find((plugin) => plugin.id === "classisland-connector");
+    const secRandomMarket = marketPlugins.find((plugin) => plugin.id === "secrandom");
+    const iccceMarket = marketPlugins.find((plugin) => plugin.id === "iccce-connector");
+    if (classIslandSelectedIds.length) tasks.push(() => installClassIslandPlugin(classIslandMarket));
+    if (secRandomSelectedIds.length) tasks.push(() => installSecRandomPlugin(secRandomMarket));
+    if (iccceSelectedIds.length) tasks.push(() => installIcccePlugin(iccceMarket));
+    for (const app of apps) {
+      if (!app.detected || app.pluginId === "classisland-connector" || app.pluginId === "secrandom" || app.pluginId === "iccce-connector") continue;
+      const market = marketPlugins.find((plugin) => plugin.id === app.pluginId);
+      if (market) tasks.push(() => installPlugin(market));
+    }
+    if (!tasks.length) {
+      setError("没有可安装的课堂联动插件，请先选择安装目标或等待检测完成");
+      return;
+    }
+    for (const task of tasks) await task();
+  };
+
   const recommended = useMemo(() => apps.filter((app) => app.detected || app.pluginId === "classisland-connector" || app.pluginId === "secrandom" || app.pluginId === "iccce-connector"), [apps]);
 
   if (!settings || !progressReady) return <main className="settings-shell oobe-shell has-window-title"><p>正在读取配置…</p></main>;
@@ -484,7 +506,7 @@ export function OobeWizard() {
         {OOBE_STEP_ORDER.map((item, index) => <span className={`oobe-progress-segment ${index <= OOBE_STEP_ORDER.indexOf(step) ? "is-active" : ""}`} key={item} />)}
       </div>
       <p className="oobe-step-label">第 {step === "source" ? "1" : step === "config" ? "2" : "3"} / 3 步</p>
-      <h1>{step === "source" ? "选择模型服务" : step === "config" ? "配置模型服务" : "安装课堂联动插件"}</h1>
+      {step === "plugins" ? <div className="oobe-plugin-heading"><h1>安装课堂联动插件</h1><button className="secondary-button oobe-install-all-button" type="button" disabled={Boolean(installingId) || busy} onClick={() => void installAllPlugins()}>一键安装所有</button></div> : <h1>{step === "source" ? "选择模型服务" : "配置模型服务"}</h1>}
       {step !== "plugins" && <p>{step === "source"
         ? "先选择使用 SECTL 官方模型服务，还是接入自己的模型提供商。"
         : step === "config"
