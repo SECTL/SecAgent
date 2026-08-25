@@ -365,7 +365,7 @@ export async function discoverClassIslandInstallations(options: ClassIslandDisco
   const readFile = options.readFile || defaultReadFile;
   const commandRunner = options.commandRunner || defaultCommandRunner;
   const running = options.runningProcesses || await discoverRunningProcesses(platform, commandRunner);
-  const externalPaths = platform === "win32" && !options.executablePaths && !options.runningProcesses ? await discoverWindowsExternalPaths(commandRunner, env) : [];
+  const externalPaths = platform === "win32" && !options.executablePaths?.length && !options.runningProcesses ? await discoverWindowsExternalPaths(commandRunner, env) : [];
   const inputPaths = [
     ...staticExecutablePaths(platform, home, env),
     ...(options.executablePaths || []),

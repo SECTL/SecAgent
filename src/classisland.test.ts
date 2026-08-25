@@ -70,6 +70,25 @@ test("discovers multiple ClassIsland versions and marks old versions incompatibl
   assert.match(found.find((item) => item.executablePath === paths[1])?.reason || "", /2\.1\.1\.0/);
 });
 
+test("scans Windows external locations when the installer has no explicit executable paths", async () => {
+  const exe = "C:\\Program Files\\ClassIsland\\ClassIsland.exe";
+  const commandRunner = async (_file: string, args: string[]) => ({
+    stdout: args.join(" ").includes("WScript.Shell") ? "[]" : JSON.stringify([exe]),
+    stderr: ""
+  });
+  const installer = new ClassIslandInstaller({
+    platform: "win32",
+    executablePaths: [],
+    commandRunner,
+    versionOf: () => "2.1.1.0",
+    exists: (candidate) => candidate === exe,
+    readFile: () => "installer"
+  });
+  const [target] = await installer.detect();
+  assert.equal(target?.executablePath, exe);
+  assert.equal(target?.source, "discovery");
+});
+
 test("downloads through ghproxy first, verifies the asset, and installs to the selected portable instance", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-classisland-"));
   try {
