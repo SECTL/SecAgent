@@ -158,6 +158,35 @@ test("falls back from the proxy to direct GitHub for both release metadata and t
   }
 });
 
+test("uses the GitHub release page digest when the REST API is rate limited", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-classisland-page-fallback-"));
+  try {
+    const exe = path.win32.join(root, "ClassIsland.exe");
+    fs.mkdirSync(root, { recursive: true });
+    fs.writeFileSync(exe, "test executable");
+    fs.writeFileSync(path.win32.join(root, "PackageType"), "folder\n");
+    const bytes = Buffer.from("release page cipx bytes");
+    const digest = crypto.createHash("sha256").update(bytes).digest("hex");
+    const calls: string[] = [];
+    const fetcher = async (input: string | URL): Promise<Response> => {
+      const url = String(input);
+      calls.push(url);
+      if (url.includes("api.github.com")) return new Response(JSON.stringify({ message: "rate limit exceeded" }), { status: 403 });
+      if (url.includes("releases/latest")) return new Response('<a href="/SECTL/ClassIsland-SecAgent-Plugin/releases/tag/0.1.0.1">latest</a>', { status: 200 });
+      if (url.includes("expanded_assets")) return new Response(`<li><a href="/SECTL/ClassIsland-SecAgent-Plugin/releases/download/0.1.0.1/${CLASSISLAND_PLUGIN_ASSET_NAME}"><span>${CLASSISLAND_PLUGIN_ASSET_NAME}</span></a><span>sha256:${digest}</span></li>`, { status: 200 });
+      return new Response(bytes, { status: 200 });
+    };
+    const installer = new ClassIslandInstaller({ platform: "win32", executablePaths: [exe], runningProcesses: [], versionOf: () => "2.1.1.0", fetcher, exists: (candidate) => fs.existsSync(candidate) });
+    const [target] = await installer.detect();
+    const [result] = await installer.install([target.id]);
+    assert.equal(result.ok, true);
+    assert.equal(calls.some((url) => url.includes("releases/expanded_assets/0.1.0.1")), true);
+    assert.equal(fs.existsSync(path.win32.join(root, "data", "Cache", "PluginPackages", CLASSISLAND_PLUGIN_ASSET_NAME)), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("does not write a package when ClassIsland is too old or the digest is invalid", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-classisland-"));
   try {

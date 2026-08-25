@@ -11,6 +11,7 @@ export const CLASSISLAND_PLUGIN_ID = "classisland.secagent";
 export const CLASSISLAND_PLUGIN_ASSET_NAME = "ClassIsland.SecAgent.Plugin.cipx";
 export const MIN_CLASSISLAND_VERSION = "2.1.1.0";
 export const CLASSISLAND_RELEASE_API_URL = `https://api.github.com/repos/${CLASSISLAND_PLUGIN_REPOSITORY}/releases/latest`;
+const CLASSISLAND_RELEASE_PAGE_URL = `https://github.com/${CLASSISLAND_PLUGIN_REPOSITORY}/releases/latest`;
 
 const CLASSISLAND_PLUGIN_VERSION_PATTERN = /^version\s*:\s*["']?([^"'\r\n#]+)["']?/im;
 const WINDOWS_CLASSISLAND_EXE = "ClassIsland.exe";
@@ -208,6 +209,62 @@ Get-CimInstance Win32_Process -Filter "Name = 'ClassIsland.exe'" |
   } catch {
     return [];
   }
+}
+
+interface ClassIslandReleaseMetadata {
+  tag_name: string;
+  assets: Array<{ name: string; browser_download_url: string; digest: string }>;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function releaseTagFromPage(url: string | undefined, html: string): string | undefined {
+  const candidates = [url || "", ...(html.match(/\/releases\/tag\/[^\s"'<]+/gi) || [])];
+  for (const candidate of candidates) {
+    const match = candidate.match(/\/releases\/tag\/([^/?#"'<]+)/i);
+    if (match?.[1]) return decodeURIComponent(match[1]);
+  }
+  return undefined;
+}
+
+function releaseAssetFromExpandedPage(html: string): ClassIslandReleaseMetadata["assets"][number] | undefined {
+  const blocks = html.match(/<li\b[\s\S]*?<\/li>/gi) || [];
+  for (const block of blocks) {
+    if (!new RegExp(`>${escapeRegExp(CLASSISLAND_PLUGIN_ASSET_NAME)}<`, "i").test(block)) continue;
+    const href = block.match(/href=["']([^"']+\/releases\/download\/[^"']+)["']/i)?.[1]?.replaceAll("&amp;", "&");
+    const digest = block.match(/sha256:([a-f0-9]{64})/i)?.[1];
+    if (!href || !digest) continue;
+    const browserDownloadUrl = new URL(href, "https://github.com").toString();
+    if (new URL(browserDownloadUrl).hostname !== "github.com") continue;
+    return { name: CLASSISLAND_PLUGIN_ASSET_NAME, browser_download_url: browserDownloadUrl, digest: `sha256:${digest}` };
+  }
+  return undefined;
+}
+
+async function fetchReleasePageMetadata(fetcher: Fetcher, now: () => number): Promise<ClassIslandReleaseMetadata | undefined> {
+  let lastError: unknown;
+  for (const pageUrl of marketplaceRequestUrls(`${CLASSISLAND_RELEASE_PAGE_URL}?secagent_cache=${now()}`)) {
+    try {
+      const response = await fetcher(pageUrl, { signal: AbortSignal.timeout(12_000), headers: { Accept: "text/html", "User-Agent": "SecAgent" } });
+      if (!response.ok) { lastError = new Error(`HTTP ${response.status}`); continue; }
+      const html = await response.text();
+      const tag = releaseTagFromPage(response.url, html);
+      if (!tag) { lastError = new Error("GitHub Release 页面缺少版本标签"); continue; }
+      const expandedUrl = `https://github.com/${CLASSISLAND_PLUGIN_REPOSITORY}/releases/expanded_assets/${encodeURIComponent(tag)}?secagent_cache=${now()}`;
+      for (const assetsUrl of marketplaceRequestUrls(expandedUrl)) {
+        try {
+          const assetsResponse = await fetcher(assetsUrl, { signal: AbortSignal.timeout(12_000), headers: { Accept: "text/html", "User-Agent": "SecAgent" } });
+          if (!assetsResponse.ok) { lastError = new Error(`HTTP ${assetsResponse.status}`); continue; }
+          const asset = releaseAssetFromExpandedPage(await assetsResponse.text());
+          if (asset) return { tag_name: tag, assets: [asset] };
+          lastError = new Error(`Release 页面缺少 ${CLASSISLAND_PLUGIN_ASSET_NAME} 或 SHA-256`);
+        } catch (error) { lastError = error; }
+      }
+    } catch (error) { lastError = error; }
+  }
+  return undefined;
 }
 
 function parseWindowsCommandLine(commandLine: string | undefined): string[] {
@@ -420,6 +477,10 @@ async function downloadLatestClassIslandPlugin(fetcher: Fetcher, now: () => numb
         break;
       } catch (error) { lastError = error; }
     }
+  }
+  if (!release) {
+    const pageRelease = await fetchReleasePageMetadata(fetcher, now);
+    if (pageRelease) release = pageRelease;
   }
   if (!release) throw new Error(`无法读取 ClassIsland 最新 Release：${lastError instanceof Error ? lastError.message : String(lastError)}`);
   const assets = Array.isArray(release.assets) ? release.assets : [];
