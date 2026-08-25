@@ -376,6 +376,12 @@ html.wake-mode, html.wake-mode body, body.wake-mode { min-width: 0; overflow: hi
 .oobe-plugin-card { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .oobe-plugin-card > div { display: grid; gap: 4px; min-width: 0; }
 .oobe-plugin-card span { color: #777; font-size: 12px; }
+.oobe-page-plugins .oobe-header > p:last-of-type { display: none; }
+.oobe-progress { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; max-width: 760px; margin: 0 auto 12px; }
+.oobe-progress-segment { display: block; height: 4px; border-radius: 999px; background: #e4e8ed; transition: background 240ms ease, transform 240ms ease; }
+.oobe-progress-segment.is-active { background: #2389ec; transform: scaleY(1.15); }
+.oobe-plugins-reveal .oobe-plugin-card { animation: oobe-plugin-card-rise 480ms cubic-bezier(.2, .8, .2, 1) both; }
+@keyframes oobe-plugin-card-rise { from { opacity: 0; transform: translateY(22px); } to { opacity: 1; transform: translateY(0); } }
 .oobe-plugin-state { color: #176b39; font-size: 13px; white-space: nowrap; }
 .oobe-actions { display: flex; justify-content: flex-end; gap: 8px; max-width: 760px; margin: 8px auto 0; }
 .primary-button:disabled { opacity: .55; cursor: not-allowed; }

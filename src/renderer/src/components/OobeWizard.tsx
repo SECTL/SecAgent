@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight } from "lucide-react";
 import { PresetCombobox } from "./PresetCombobox.js";
 import { emptyProvider } from "../utils.js";
-import { COMPANION_PLUGIN_IDS } from "../../../companion-catalog.js";
 
 type SourcePath = "official" | "custom";
 type OobeStep = "source" | "config" | "plugins";
@@ -25,10 +24,6 @@ function latestCompatibleVersion(plugin: MarketplacePlugin | undefined, platform
     .filter((version) => version.minHostApiVersion <= 1 && version.platforms.includes(platform))
     .slice()
     .sort((left, right) => compareMarketVersions(right.version, left.version))[0];
-}
-
-function isConnectorPlugin(plugin: MarketplacePlugin): boolean {
-  return COMPANION_PLUGIN_IDS.has(plugin.id) || /联动/.test(`${plugin.name}${plugin.description}`);
 }
 
 export function OobeWizard() {
@@ -54,6 +49,8 @@ export function OobeWizard() {
   const [installingId, setInstallingId] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [progressReady, setProgressReady] = useState(false);
+  const [pluginsReveal, setPluginsReveal] = useState(false);
 
   useEffect(() => () => {
     if (transitionTimer.current !== undefined) window.clearTimeout(transitionTimer.current);
@@ -86,32 +83,63 @@ export function OobeWizard() {
   };
 
   useEffect(() => {
-    void bridge.getSettings().then(setSettings).catch((reason) => setError(String(reason)));
-    void bridge.listProviders().then(setPresets).catch(() => undefined);
-    void bridge.officialStatus().then((status) => {
+    let disposed = false;
+    void bridge.detectInstalledApps().then((detectedApps) => {
+      if (!disposed) setApps(detectedApps);
+    }).catch(() => undefined);
+    void Promise.all([
+      bridge.getSettings(),
+      bridge.listProviders(),
+      bridge.officialStatus(),
+      bridge.getOobeProgress()
+    ]).then(([loadedSettings, loadedPresets, status, savedProgress]) => {
+      if (disposed) return;
+      setSettings(loadedSettings);
+      setPresets(loadedPresets);
       setOfficialLoggedIn(status.loggedIn);
       setOfficialEmail(status.email);
-    }).catch(() => undefined);
+
+      // Older builds already persisted the login token but did not persist OOBE progress.
+      // Treat that state as the official service configuration page when onboarding resumes.
+      const progress = savedProgress || (status.loggedIn ? { step: "config" as const, source: "official" as const } : undefined);
+      if (progress) {
+        setStep(progress.step);
+        setSource(progress.source || null);
+        if (progress.provider) setProvider({ ...emptyProvider(), ...progress.provider, models: progress.provider.models.map((model) => ({ ...model })) });
+        setIntroPhase("complete");
+      }
+      setProgressReady(true);
+    }).catch((reason) => {
+      if (disposed) return;
+      setError(String(reason));
+      setProgressReady(true);
+    });
+    return () => { disposed = true; };
   }, [bridge]);
 
   useEffect(() => {
     if (step !== "plugins") return;
     let disposed = false;
     void Promise.all([
-      bridge.detectInstalledApps(),
       bridge.listPlugins(),
       bridge.listMarketplace().catch((reason) => {
         if (!disposed) setMarketError(reason instanceof Error ? reason.message : String(reason));
         return [] as MarketplacePlugin[];
       })
-    ]).then(([detected, installed, market]) => {
+    ]).then(([installed, market]) => {
       if (disposed) return;
-      setApps(detected);
       setPlugins(installed);
       setMarketPlugins(market);
     }).catch((reason) => { if (!disposed) setError(String(reason)); });
     return () => { disposed = true; };
   }, [bridge, step]);
+
+  useEffect(() => {
+    setPluginsReveal(false);
+    if (step !== "plugins") return;
+    const timer = window.setTimeout(() => setPluginsReveal(true), 0);
+    return () => window.clearTimeout(timer);
+  }, [step]);
 
   const updateProvider = (patch: Partial<ProviderConfig>) => setProvider((current) => ({ ...current, ...patch }));
   const applyPreset = (presetId: string) => {
@@ -138,6 +166,29 @@ export function OobeWizard() {
     setSettings(saved);
     return saved;
   };
+
+  const saveProgress = async (progress: OobeProgress) => {
+    await bridge.saveOobeProgress(progress);
+  };
+
+  const chooseSource = async (nextSource: SourcePath) => {
+    setError("");
+    try {
+      await saveProgress({ step: "config", source: nextSource, ...(nextSource === "custom" ? { provider } : {}) });
+      setSource(nextSource);
+      goToStep("config");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  useEffect(() => {
+    if (!progressReady || step !== "config" || source !== "custom") return;
+    const timer = window.setTimeout(() => {
+      void bridge.saveOobeProgress({ step: "config", source, provider }).catch(() => undefined);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [bridge, progressReady, provider, source, step]);
 
   const loginOfficial = async () => {
     setError("");
@@ -172,6 +223,7 @@ export function OobeWizard() {
           : [...settings.providers.filter((item) => item.id !== "sectl-official"), provider, ...settings.providers.filter((item) => item.id === "sectl-official")];
         await persist({ ...settings, customModelMode: true, providers });
       }
+      await saveProgress({ step: "plugins", source, ...(source === "custom" ? { provider } : {}) });
       goToStep("plugins");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -206,12 +258,8 @@ export function OobeWizard() {
   };
 
   const recommended = useMemo(() => apps.filter((app) => app.detected), [apps]);
-  const otherConnectors = useMemo(() => {
-    const recommendedIds = new Set(recommended.map((app) => app.pluginId));
-    return marketPlugins.filter((plugin) => isConnectorPlugin(plugin) && !recommendedIds.has(plugin.id));
-  }, [marketPlugins, recommended]);
 
-  if (!settings) return <main className="settings-shell oobe-shell has-window-title"><p>正在读取配置…</p></main>;
+  if (!settings || !progressReady) return <main className="settings-shell oobe-shell has-window-title"><p>正在读取配置…</p></main>;
 
   return <main className={`settings-shell oobe-shell has-window-title ${introPhase === "intro" ? "oobe-intro-active" : ""} ${bridge.platform === "darwin" ? "macos-settings" : ""} ${bridge.platform === "win32" ? "windows-settings" : ""}`}>
     <div className={`settings-window-title oobe-window-title ${introPhase === "intro" ? "oobe-window-title-intro" : introPhase === "transition" ? "oobe-window-title-transition" : "oobe-window-title-ready"}`}>欢迎使用 SecAgent</div>
@@ -220,26 +268,28 @@ export function OobeWizard() {
       <button className="oobe-splash-start" type="button" aria-label="开始配置 SecAgent" onClick={beginIntro}><ArrowRight aria-hidden="true" size={30} strokeWidth={1.8} /></button>
     </section>}
     <div className={`oobe-content ${introPhase === "intro" ? "oobe-content-hidden" : introPhase === "transition" ? "oobe-content-intro-enter" : "oobe-content-ready"}`}>
-    <div className={`oobe-page ${pageTransition === "exit" ? "oobe-page-exit" : pageTransition === "enter" ? "oobe-page-enter" : ""} oobe-page-${pageDirection}`}>
+    <div className={`oobe-page ${pageTransition === "exit" ? "oobe-page-exit" : pageTransition === "enter" ? "oobe-page-enter" : ""} oobe-page-${pageDirection} ${step === "plugins" ? "oobe-page-plugins" : ""} ${pluginsReveal ? "oobe-plugins-reveal" : ""}`}>
     <header className="oobe-header">
-      <p className="eyebrow">WELCOME TO SECAGENT</p>
+      <div className="oobe-progress" role="progressbar" aria-label="OOBE 步骤进度" aria-valuemin={1} aria-valuemax={OOBE_STEP_ORDER.length} aria-valuenow={OOBE_STEP_ORDER.indexOf(step) + 1}>
+        {OOBE_STEP_ORDER.map((item, index) => <span className={`oobe-progress-segment ${index <= OOBE_STEP_ORDER.indexOf(step) ? "is-active" : ""}`} key={item} />)}
+      </div>
       <p className="oobe-step-label">第 {step === "source" ? "1" : step === "config" ? "2" : "3"} / 3 步</p>
       <h1>{step === "source" ? "选择模型服务" : step === "config" ? "配置模型服务" : "安装课堂联动插件"}</h1>
-      <p>{step === "source"
+      {step !== "plugins" && <p>{step === "source"
         ? "先选择使用 SECTL 官方模型服务，还是接入自己的模型提供商。"
         : step === "config"
           ? "完成模型服务的登录或接口配置，之后即可开始使用 SecAgent。"
-          : "先看看本机已经装了哪些适配应用，再安装对应的联动插件。这一步也可以跳过。"}</p>
+          : ""}</p>}
     </header>
     {error && <div className="settings-error">{error}</div>}
 
     {step === "source" && <>
       <div className="oobe-choice-grid">
-        <button type="button" className="oobe-choice" onClick={() => { setSource("official"); goToStep("config"); }}>
+        <button type="button" className="oobe-choice" onClick={() => void chooseSource("official")}>
           <span className="oobe-choice-copy"><strong>登录官方服务</strong><span>使用 SECTL 账号使用官方模型，不必自己准备 API Key。默认关闭自定义模型模式。</span></span>
           <span className="oobe-choice-arrow" aria-hidden="true"><ArrowRight size={22} strokeWidth={2} /></span>
         </button>
-        <button type="button" className="oobe-choice" onClick={() => { setSource("custom"); goToStep("config"); }}>
+        <button type="button" className="oobe-choice" onClick={() => void chooseSource("custom")}>
           <span className="oobe-choice-copy"><strong>设置自定义模型提供商</strong><span>接入 OpenAI 兼容、Anthropic、Gemini 等自备供应商，并开启自定义模型模式。</span></span>
           <span className="oobe-choice-arrow" aria-hidden="true"><ArrowRight size={22} strokeWidth={2} /></span>
         </button>
@@ -286,7 +336,7 @@ export function OobeWizard() {
       </article>}
 
       <div className="oobe-actions">
-        <button className="secondary-button" type="button" onClick={() => { setSource(null); goToStep("source"); }}>上一步</button>
+        <button className="secondary-button" type="button" onClick={() => void saveProgress({ step: "source" }).then(() => { setSource(null); goToStep("source"); }).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))}>上一步</button>
         <button className="primary-button" type="button" disabled={!source || busy || (source === "official" && !officialLoggedIn)} onClick={() => void continueFromSource()}>{busy ? "保存中…" : "下一步"}</button>
       </div>
     </>}
@@ -296,11 +346,11 @@ export function OobeWizard() {
       <section className="oobe-plugin-list">
         <h2>本机已检测到</h2>
         {!recommended.length && <p className="empty-list">没有检测到已适配的课堂应用。你仍可安装下面的联动插件，或稍后在设置里处理。</p>}
-        {recommended.map((app) => {
+        {recommended.map((app, index) => {
           const market = marketPlugins.find((plugin) => plugin.id === app.pluginId);
           const installed = plugins.find((plugin) => plugin.id === app.pluginId);
           const version = latestCompatibleVersion(market, bridge.platform);
-          return <article className="settings-card oobe-plugin-card" key={app.pluginId}>
+          return <article className="settings-card oobe-plugin-card" style={{ animationDelay: `${index * 70}ms` }} key={app.pluginId}>
             <div>
               <strong>{app.appName}</strong>
               <span>{app.description} · 已在本机找到</span>
@@ -309,22 +359,8 @@ export function OobeWizard() {
           </article>;
         })}
       </section>
-      {otherConnectors.length > 0 && <section className="oobe-plugin-list">
-        <h2>其他联动插件</h2>
-        {otherConnectors.map((plugin) => {
-          const installed = plugins.find((item) => item.id === plugin.id);
-          const version = latestCompatibleVersion(plugin, bridge.platform);
-          return <article className="settings-card oobe-plugin-card" key={plugin.id}>
-            <div>
-              <strong>{plugin.name}</strong>
-              <span>{plugin.description}</span>
-            </div>
-            {installed ? <span className="oobe-plugin-state">已安装</span> : version ? <button className="secondary-button" type="button" disabled={installingId === plugin.id} onClick={() => void installPlugin(plugin)}>{installingId === plugin.id ? "安装中…" : "安装"}</button> : <span className="oobe-plugin-state">当前系统暂无可用版本</span>}
-          </article>;
-        })}
-      </section>}
       <div className="oobe-actions">
-        <button className="secondary-button" type="button" onClick={() => goToStep("config")}>上一步</button>
+        <button className="secondary-button" type="button" onClick={() => void saveProgress({ step: "config", source: source || undefined, ...(source === "custom" ? { provider } : {}) }).then(() => goToStep("config")).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))}>上一步</button>
         <button className="secondary-button" type="button" disabled={busy} onClick={() => void finish()}>暂时跳过</button>
         <button className="primary-button" type="button" disabled={busy} onClick={() => void finish()}>{busy ? "完成中…" : "完成并开始使用"}</button>
       </div>

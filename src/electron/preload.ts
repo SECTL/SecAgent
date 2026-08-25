@@ -23,6 +23,8 @@ contextBridge.exposeInMainWorld("secagent", {
   listMarketplace: () => ipcRenderer.invoke("marketplace:list"),
   installMarketplaceVersion: (version: unknown) => ipcRenderer.invoke("marketplace:install", version),
   detectInstalledApps: () => ipcRenderer.invoke("apps:detect"),
+  getOobeProgress: () => ipcRenderer.invoke("oobe:progress:get"),
+  saveOobeProgress: (progress: unknown) => ipcRenderer.invoke("oobe:progress:save", progress),
   openExternal: (url: string) => ipcRenderer.invoke("shell:open-external", url),
   completeOnboarding: () => ipcRenderer.invoke("oobe:complete"),
   createSession: () => ipcRenderer.invoke("sessions:create"),

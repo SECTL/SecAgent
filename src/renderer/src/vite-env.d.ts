@@ -18,6 +18,7 @@ interface PluginStatus { id: string; format?: "secagent" | "agent"; name: string
 interface MarketplaceVersion { version: string; minHostApiVersion: number; assetUrl: string; sha256: string; permissions: string[]; platforms: string[] }
 interface MarketplacePlugin { id: string; format?: "secagent" | "agent"; name: string; description: string; repository: string; icon?: string; readme?: string; versions: MarketplaceVersion[] }
 interface DetectedCompanionApp { pluginId: string; appName: string; description: string; detected: boolean; evidence?: string }
+interface OobeProgress { step: "source" | "config" | "plugins"; source?: "official" | "custom"; provider?: Omit<ProviderConfig, "apiKey"> }
 interface Window {
   secagent: {
     platform: NodeJS.Platform;
@@ -42,6 +43,8 @@ interface Window {
     listMarketplace(): Promise<MarketplacePlugin[]>;
     installMarketplaceVersion(version: MarketplaceVersion): Promise<PluginStatus[]>;
     detectInstalledApps(): Promise<DetectedCompanionApp[]>;
+    getOobeProgress(): Promise<OobeProgress | undefined>;
+    saveOobeProgress(progress: OobeProgress): Promise<OobeProgress | undefined>;
     openExternal(url: string): Promise<{ ok: true }>;
     completeOnboarding(): Promise<{ ok: true }>;
     createSession(): Promise<SessionData>;

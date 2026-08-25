@@ -1,0 +1,52 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { isOnboardingComplete, markOnboardingComplete, oobeProgressPath, readOobeProgress, saveOobeProgress, type OobeProgress } from "./config.js";
+
+function temporaryWorkspace(): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "secagent-oobe-"));
+}
+
+test("persists OOBE progress and clears it when onboarding completes", () => {
+  const workspace = temporaryWorkspace();
+  try {
+    const progress: OobeProgress = { step: "config", source: "official" };
+    saveOobeProgress(workspace, progress);
+    assert.deepEqual(readOobeProgress(workspace), progress);
+
+    markOnboardingComplete(workspace);
+    assert.equal(isOnboardingComplete(workspace), true);
+    assert.equal(readOobeProgress(workspace), undefined);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("does not persist a custom provider API key in OOBE progress", () => {
+  const workspace = temporaryWorkspace();
+  try {
+    const progress = {
+      step: "config",
+      source: "custom",
+      provider: {
+        id: "custom-provider",
+        name: "Custom",
+        provider: "openai-compatible",
+        apiKeyEnv: "CUSTOM_API_KEY",
+        apiKey: "do-not-write-this",
+        baseUrl: "https://example.test/v1",
+        endpoint: "/chat/completions",
+        models: [{ id: "model", name: "Model", enabled: true }]
+      }
+    } as unknown as OobeProgress;
+    saveOobeProgress(workspace, progress);
+
+    const raw = JSON.parse(fs.readFileSync(oobeProgressPath(workspace), "utf8")) as { provider?: { apiKey?: string } };
+    assert.equal(raw.provider?.apiKey, undefined);
+    assert.equal("apiKey" in (readOobeProgress(workspace)?.provider || {}), false);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});

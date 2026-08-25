@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { DEFAULT_WORKSPACE } from "../paths.js";
-import { configuredModels, configPath, initializeWorkspace, isOnboardingComplete, loadConfig, markOnboardingComplete, readSettings, saveSettings, useConfiguredModel, writeWorkspaceEnv, type SettingsPayload } from "../config.js";
+import { configuredModels, configPath, initializeWorkspace, isOnboardingComplete, loadConfig, markOnboardingComplete, readOobeProgress, readSettings, saveOobeProgress, saveSettings, useConfiguredModel, writeWorkspaceEnv, type OobeProgress, type SettingsPayload } from "../config.js";
 import { loadEnabledSkills } from "../skills.js";
 import { AuditStore } from "../audit.js";
 import { SecAgentRuntime, type TraceEvent } from "../runtime.js";
@@ -644,6 +644,11 @@ ipcMain.handle("plugins:install", async () => {
 ipcMain.handle("marketplace:list", () => marketplace.list());
 ipcMain.handle("marketplace:install", async (_event, version: MarketplaceVersion) => { if (!pluginManager) throw new Error("插件管理器尚未启动"); await marketplace.install(pluginManager, version); return pluginManager.list(); });
 ipcMain.handle("apps:detect", () => detectCompanionApps());
+ipcMain.handle("oobe:progress:get", () => readOobeProgress(DEFAULT_WORKSPACE));
+ipcMain.handle("oobe:progress:save", (_event, progress: OobeProgress) => {
+  saveOobeProgress(DEFAULT_WORKSPACE, progress);
+  return readOobeProgress(DEFAULT_WORKSPACE);
+});
 ipcMain.handle("shell:open-external", async (_event, url: string) => {
   let parsed: URL;
   try { parsed = new URL(url); } catch { throw new Error("无效的链接"); }

@@ -9,6 +9,7 @@ import { DEFAULT_WAKE_HOTKEY, normalizeWakeHotkey } from "./wake-hotkey.js";
 export const DEFAULT_GOOGLE_MODEL = "gemini-2.5-flash";
 export const DEFAULT_MAX_TOKENS = 16_384;
 const ONBOARDING_MARKER = ".oobe-complete";
+const OOBE_PROGRESS_FILE = ".oobe-progress.json";
 const LEGACY_AGENT_MODEL_FIELDS = ["provider", "model", "apiKeyEnv", "baseUrl", "endpoint", "anthropicVersion", "maxTokens"] as const;
 const WORKSPACE_RUNTIME_ENV_KEYS = new Set(["SECTL_OFFICIAL_TOKEN", "SECTL_OFFICIAL_EMAIL", "SECTL_OFFICIAL_SECTL_TOKEN", "SECTL_OFFICIAL_USER_ID"]);
 /** The packaged app ships public service defaults; development uses the project .env. */
@@ -59,6 +60,47 @@ export function markOnboardingComplete(workspaceInput: string): void {
   const workspace = expandPath(workspaceInput);
   ensureWorkspaceDirectories(workspace);
   fs.writeFileSync(path.join(workspace, ONBOARDING_MARKER), "1\n", "utf8");
+  clearOobeProgress(workspace);
+}
+
+export type OobeStep = "source" | "config" | "plugins";
+export type OobeSource = "official" | "custom";
+export interface OobeProgress {
+  step: OobeStep;
+  source?: OobeSource;
+  provider?: Omit<ProviderConfig, "apiKey">;
+}
+
+export function oobeProgressPath(workspace: string): string { return path.join(expandPath(workspace), OOBE_PROGRESS_FILE); }
+
+export function readOobeProgress(workspaceInput: string): OobeProgress | undefined {
+  try {
+    const raw = JSON.parse(fs.readFileSync(oobeProgressPath(workspaceInput), "utf8")) as Partial<OobeProgress>;
+    if (raw.step !== "source" && raw.step !== "config" && raw.step !== "plugins") return undefined;
+    const source = raw.source === "official" || raw.source === "custom" ? raw.source : undefined;
+    const provider = raw.provider && typeof raw.provider === "object" ? raw.provider : undefined;
+    return { step: raw.step, ...(source ? { source } : {}), ...(provider ? { provider } : {}) };
+  } catch {
+    return undefined;
+  }
+}
+
+export function saveOobeProgress(workspaceInput: string, progress: OobeProgress): void {
+  const workspace = expandPath(workspaceInput);
+  ensureWorkspaceDirectories(workspace);
+  const provider = progress.provider
+    ? Object.fromEntries(Object.entries(progress.provider).filter(([key]) => key !== "apiKey")) as Omit<ProviderConfig, "apiKey">
+    : undefined;
+  const safeProgress: OobeProgress = {
+    step: progress.step,
+    ...(progress.source ? { source: progress.source } : {}),
+    ...(provider ? { provider } : {})
+  };
+  fs.writeFileSync(oobeProgressPath(workspace), `${JSON.stringify(safeProgress, null, 2)}\n`, "utf8");
+}
+
+export function clearOobeProgress(workspaceInput: string): void {
+  try { fs.rmSync(oobeProgressPath(workspaceInput), { force: true }); } catch { /* Best effort cleanup. */ }
 }
 
 /**
