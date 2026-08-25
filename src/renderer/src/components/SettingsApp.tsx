@@ -5,6 +5,7 @@ import { PresetCombobox } from "./PresetCombobox.js";
 import { OobeWizard } from "./OobeWizard.js";
 import { reasoningEffortLabels, ttsRates, ttsVoices } from "../constants.js";
 import { emptyMcp, emptyProvider, reasoningEffortsForModel } from "../utils.js";
+import { formatOfficialBalanceExpiry, formatOfficialPoints } from "../official-balance.js";
 import { DEFAULT_WAKE_HOTKEY, displayWakeHotkey, wakeHotkeyFromKeyboardEvent } from "../../../wake-hotkey.js";
 
 function WakeHotkeyField({ value, platform, onChange }: { value: string; platform: NodeJS.Platform; onChange: (value: string) => void }) {
@@ -29,6 +30,7 @@ export function SettingsApp() {
   const [error, setError] = useState("");
   const [officialEmail, setOfficialEmail] = useState("");
   const [officialPoints, setOfficialPoints] = useState<number | null>(null);
+  const [officialPointBalances, setOfficialPointBalances] = useState<Array<{ points: number; expiresAt: string | null }>>([]);
   const [officialPointsBusy, setOfficialPointsBusy] = useState(false);
   const [officialLoggedIn, setOfficialLoggedIn] = useState(false);
   const [officialExpired, setOfficialExpired] = useState(false);
@@ -61,12 +63,13 @@ export function SettingsApp() {
     try {
       const result = await bridge.officialBalance();
       setOfficialPoints(result.points);
+      setOfficialPointBalances(result.balances);
       setOfficialExpired(result.expired);
       if (result.expired) {
         setOfficialLoggedIn(false);
         setError("登录已过期，请重新登录。");
       }
-    } catch { setOfficialPoints(null); setOfficialExpired(false); } finally { setOfficialPointsBusy(false); }
+    } catch { setOfficialPoints(null); setOfficialPointBalances([]); setOfficialExpired(false); } finally { setOfficialPointsBusy(false); }
   };
   useEffect(() => { void bridge.officialStatus().then((status) => { setOfficialLoggedIn(status.loggedIn); setOfficialEmail(status.email); if (status.loggedIn) void refreshOfficialPoints(); }).catch(() => undefined); }, [bridge]);
   useEffect(() => {
@@ -143,7 +146,34 @@ export function SettingsApp() {
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setOfficialBusy(false); }
   };
-  const officialLogout = async () => { await bridge.officialLogout(); setOfficialLoggedIn(false); setOfficialExpired(false); setOfficialPoints(null); setSettings((current) => current && { ...current, providers: current.providers.filter((provider) => provider.id !== "sectl-official") }); };
+  const officialLogout = async () => { await bridge.officialLogout(); setOfficialLoggedIn(false); setOfficialExpired(false); setOfficialPoints(null); setOfficialPointBalances([]); setSettings((current) => current && { ...current, providers: current.providers.filter((provider) => provider.id !== "sectl-official") }); };
+  useEffect(() => {
+    const row = document.querySelector<HTMLElement>(".official-balance-row");
+    if (!row) {
+      document.querySelectorAll(".official-balance-groups").forEach((element) => element.remove());
+      return;
+    }
+    const value = row.querySelector<HTMLElement>(".points-value");
+    if (value) value.textContent = officialPointsBusy ? "读取中…" : officialPoints === null ? "暂不可用" : `${formatOfficialPoints(officialPoints)} Points`;
+    const host = row.parentElement;
+    if (!host) return;
+    let groups = host.querySelector<HTMLElement>(".official-balance-groups");
+    if (!groups) {
+      groups = document.createElement("div");
+      groups.className = "official-balance-groups";
+      host.insertBefore(groups, row.nextSibling);
+    }
+    groups.replaceChildren(...(officialPointBalances.length ? officialPointBalances.map((balance) => {
+      const item = document.createElement("div");
+      item.className = "official-balance-group";
+      const points = document.createElement("strong");
+      points.textContent = `${formatOfficialPoints(balance.points)} Points`;
+      const expiry = document.createElement("span");
+      expiry.textContent = formatOfficialBalanceExpiry(balance.expiresAt);
+      item.append(points, expiry);
+      return item;
+    }) : [Object.assign(document.createElement("span"), { textContent: "暂无有效额度" })]));
+  });
   const defaultModel = availableModels.find((model) => model.id === settings.defaultModelId) || availableModels.find((model) => model.id === "sectl-official") || availableModels[0];
   const defaultReasoningEfforts = reasoningEffortsForModel(defaultModel);
   const defaultReasoningEffort = defaultReasoningEfforts.includes(settings.defaultReasoningEffort || "high") ? (settings.defaultReasoningEffort || "high") : defaultReasoningEfforts.includes("high") ? "high" : defaultReasoningEfforts[0];

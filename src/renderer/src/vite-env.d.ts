@@ -38,7 +38,7 @@ interface Window {
     getSettings(): Promise<SettingsPayload>;
     openSettings(): Promise<{ ok: true }>;
     officialStatus(): Promise<{ loggedIn: boolean; email: string }>;
-    officialBalance(): Promise<{ points: number | null; expired: boolean }>;
+    officialBalance(): Promise<{ points: number | null; balances: Array<{ points: number; expiresAt: string | null }>; expired: boolean }>;
     officialOAuthLogin(): Promise<SettingsPayload>;
     officialLogout(): Promise<{ loggedIn: boolean }>;
     saveSettings(payload: SettingsPayload): Promise<SettingsPayload>;

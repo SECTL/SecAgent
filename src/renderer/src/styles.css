@@ -426,3 +426,6 @@ html.wake-mode, html.wake-mode body, body.wake-mode { min-width: 0; overflow: hi
 .primary-button:disabled { opacity: .55; cursor: not-allowed; }
 @media (max-width: 640px) { .oobe-plugin-heading { align-items: flex-start; flex-direction: column; } .oobe-plugin-side-actions { flex-basis: 100%; justify-content: flex-start; margin-left: 54px; } .oobe-classisland-target-heading { align-items: flex-start; flex-direction: column; } }
 @media (prefers-reduced-motion: reduce) { .oobe-page, .oobe-page-exit.oobe-page-forward, .oobe-page-exit.oobe-page-back, .oobe-page-enter.oobe-page-forward, .oobe-page-enter.oobe-page-back, .oobe-plugin-card::before, .oobe-plugin-icon.has-plugin-icon .oobe-plugin-icon-app, .oobe-plugin-icon.has-plugin-icon .oobe-plugin-icon-plugin { animation: none; } .oobe-choice, .oobe-choice-arrow { transition-duration: 0ms; } }
+.official-balance-groups { display: flex; flex-direction: column; gap: 4px; min-width: 210px; }
+.official-balance-group { display: flex; align-items: baseline; gap: 8px; font-size: 12px; color: var(--muted, #66717d); }
+.official-balance-group strong { color: #1676d2; font-size: 13px; }

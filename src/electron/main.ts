@@ -574,12 +574,12 @@ ipcMain.handle("official:balance", async () => {
   loadConfig(DEFAULT_WORKSPACE);
   const token = process.env.SECTL_OFFICIAL_TOKEN;
   const baseUrl = (process.env.SECTL_OFFICIAL_API_URL || "").replace(/\/$/, "");
-  if (!token || !baseUrl) return { points: null, expired: false };
+  if (!token || !baseUrl) return { points: null, balances: [], expired: false };
   const response = await fetch(`${baseUrl}/account`, { headers: { Authorization: `Bearer ${token}` } });
-  const payload = await response.json().catch(() => ({})) as { points?: number; detail?: string };
-  if (response.status === 401) return { points: null, expired: true };
+  const payload = await response.json().catch(() => ({})) as { points?: number; point_balances?: Array<{ points?: number; expires_at?: string | null }>; detail?: string };
+  if (response.status === 401) return { points: null, balances: [], expired: true };
   if (!response.ok || typeof payload.points !== "number") throw new Error(payload.detail || "无法获取 Points 余额");
-  return { points: payload.points, expired: false };
+  return { points: payload.points, balances: (payload.point_balances || []).filter((item) => typeof item.points === "number").map((item) => ({ points: item.points as number, expiresAt: item.expires_at ?? null })), expired: false };
 });
 ipcMain.handle("official:login", async (_event, email: string, password: string) => {
   loadConfig(DEFAULT_WORKSPACE);
