@@ -29,7 +29,9 @@ export const DEFAULT_TTS_VOICE = "zh-CN-XiaoxiaoNeural";
 export const DEFAULT_TTS_RATE = "+0%";
 export const DEFAULT_WAKE_PHRASE = "小泽同学";
 export const DEFAULT_UPDATE_PREFERENCES: UpdatePreferences = { channel: "stable", autoCheck: true, autoDownload: true, autoInstallOnQuit: true };
-export const DEFAULT_TELEMETRY_SETTINGS: TelemetrySettings = { enabled: true };
+// Installers for managed/education deployments can opt out before the first
+// workspace is created without changing the user's persisted setting later.
+export const DEFAULT_TELEMETRY_SETTINGS: TelemetrySettings = { enabled: !["0", "false", "no", "off"].includes((process.env.SECTL_TELEMETRY_DEFAULT_ENABLED || "true").toLowerCase()) };
 
 const template = (workspace: string): SecAgentConfig => ({
   version: 1,

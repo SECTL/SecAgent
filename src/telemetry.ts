@@ -133,6 +133,7 @@ export class TelemetryClient {
   readonly installId: string;
   readonly instanceId = crypto.randomUUID();
   private readonly baseUrl: string;
+  private readonly queueFile: string;
   private readonly appVersion: string;
   private readonly platform: NodeJS.Platform;
   private readonly arch: string;
@@ -143,39 +144,47 @@ export class TelemetryClient {
   private readonly suppressed = new Map<string, number>();
   private readonly lastSent = new Map<string, number>();
   private readonly breadcrumbs: Array<{ at: string; stage: string; status?: string; sizes?: Record<string, number> }> = [];
+  private readonly activeControllers = new Set<AbortController>();
   private flushTimer?: NodeJS.Timeout;
   private heartbeatTimer?: NodeJS.Timeout;
+  private flushPromise?: Promise<void>;
 
   constructor(options: TelemetryClientOptions) {
     this.installId = readOrCreateIdentity(options.storageDirectory).installId;
     this.baseUrl = cleanBaseUrl(options.baseUrl);
+    this.queueFile = path.join(options.storageDirectory, "telemetry-events.json");
     this.appVersion = options.appVersion;
     this.platform = options.platform || process.platform;
     this.arch = options.arch || process.arch;
     this.locale = options.locale || Intl.DateTimeFormat().resolvedOptions().locale || "unknown";
     this.enabled = options.enabled;
     this.getAuthToken = options.getAuthToken;
+    if (this.enabled) this.queue.push(...readQueuedEvents(this.queueFile, this.installId, this.instanceId, this.appVersion).slice(-1_000));
+    else writeQueuedEvents(this.queueFile, []);
   }
 
   start(): void {
     if (!this.enabled || !this.baseUrl) return;
     void this.sendHeartbeat();
+    void this.flush();
     this.flushTimer = setInterval(() => { void this.flush(); }, 30_000);
     this.flushTimer.unref?.();
     this.scheduleHeartbeat();
   }
 
-  stop(): void {
+  stop(clearQueue = false): void {
     if (this.flushTimer) clearInterval(this.flushTimer);
     if (this.heartbeatTimer) clearTimeout(this.heartbeatTimer);
     this.flushTimer = undefined;
     this.heartbeatTimer = undefined;
-    this.queue.length = 0;
+    for (const controller of this.activeControllers) controller.abort();
+    if (clearQueue) this.queue.length = 0;
+    writeQueuedEvents(this.queueFile, this.queue);
   }
 
   setEnabled(enabled: boolean): void {
     this.enabled = enabled;
-    this.stop();
+    this.stop(!enabled);
     if (enabled) this.start();
   }
 
@@ -218,6 +227,7 @@ export class TelemetryClient {
       breadcrumbs: [...this.breadcrumbs]
     };
     this.queue.push(event);
+    writeQueuedEvents(this.queueFile, this.queue);
     if (this.queue.length >= TELEMETRY_EVENT_BATCH_LIMIT) void this.flush();
   }
 
@@ -279,25 +289,53 @@ export class TelemetryClient {
   }
 
   private async flush(): Promise<void> {
+    if (this.flushPromise) return this.flushPromise;
+    this.flushPromise = this.flushOnce().finally(() => { this.flushPromise = undefined; });
+    return this.flushPromise;
+  }
+
+  private async flushOnce(): Promise<void> {
     if (!this.isEnabled() || !this.queue.length) return;
     const events = this.queue.splice(0, TELEMETRY_EVENT_BATCH_LIMIT);
     const body = JSON.stringify({ schemaVersion: TELEMETRY_SCHEMA_VERSION, events });
     if (Buffer.byteLength(body) > TELEMETRY_EVENT_BATCH_BYTES) {
       this.queue.unshift(...events.slice(0, Math.max(1, Math.floor(events.length / 2))));
+      writeQueuedEvents(this.queueFile, this.queue);
       return;
     }
-    await this.post("/telemetry/v1/events", body, { "Content-Type": "application/json" }).catch(() => { this.queue.unshift(...events.slice(0, 20)); });
+    writeQueuedEvents(this.queueFile, this.queue);
+    await this.post("/telemetry/v1/events", body, { "Content-Type": "application/json" }).catch(() => {
+      if (this.enabled) { this.queue.unshift(...events.slice(0, 20)); writeQueuedEvents(this.queueFile, this.queue); }
+    });
+    writeQueuedEvents(this.queueFile, this.queue);
   }
 
   private async post(endpoint: string, body: string | Buffer, headers: Record<string, string>): Promise<void> {
     if (!this.baseUrl) return;
     const authorization = this.getAuthToken?.();
     const controller = new AbortController();
+    this.activeControllers.add(controller);
     const timer = setTimeout(() => controller.abort(), 8_000);
     try {
-      await fetch(`${this.baseUrl}${endpoint}`, { method: "POST", body: body as unknown as BodyInit, headers: { ...headers, ...(authorization ? { Authorization: `Bearer ${authorization}` } : {}) }, signal: controller.signal });
-    } finally { clearTimeout(timer); }
+      const response = await fetch(`${this.baseUrl}${endpoint}`, { method: "POST", body: body as unknown as BodyInit, headers: { ...headers, ...(authorization ? { Authorization: `Bearer ${authorization}` } : {}) }, signal: controller.signal });
+      if (!response.ok) throw new Error(`telemetry HTTP ${response.status}`);
+    } finally { clearTimeout(timer); this.activeControllers.delete(controller); }
   }
+}
+
+function readQueuedEvents(file: string, installId: string, instanceId: string, appVersion: string): TelemetryEvent[] {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((event): event is TelemetryEvent => Boolean(event && typeof event === "object" && (event as TelemetryEvent).installId === installId && typeof (event as TelemetryEvent).eventId === "string" && typeof (event as TelemetryEvent).type === "string"))
+      .map((event) => ({ ...event, instanceId: event.instanceId || instanceId, appVersion: event.appVersion || appVersion }));
+  } catch { return []; }
+}
+
+function writeQueuedEvents(file: string, events: TelemetryEvent[]): void {
+  try {
+    fs.writeFileSync(file, `${JSON.stringify(events.slice(-1_000))}\n`, { encoding: "utf8", mode: 0o600 });
+  } catch { /* Offline persistence is best effort and must not affect the app. */ }
 }
 
 function sanitizeContext(value: Record<string, unknown>): Record<string, unknown> {

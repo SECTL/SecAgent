@@ -38,7 +38,7 @@ interface OobeProgress { step: "source" | "config" | "plugins"; source?: "offici
 interface Window {
   secagent: {
     platform: NodeJS.Platform;
-    telemetryConfig: { sentryDsn?: string };
+  telemetryConfig: { sentryDsn?: string; enabled: boolean };
     listSessions(): Promise<SessionMeta[]>;
     listModels(): Promise<ModelOption[]>;
     listProviders(): Promise<ProviderPreset[]>;

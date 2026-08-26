@@ -2,7 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 
 contextBridge.exposeInMainWorld("secagent", {
   platform: process.platform,
-  telemetryConfig: { sentryDsn: ipcRenderer.sendSync("telemetry:dsn") || undefined },
+  telemetryConfig: { sentryDsn: ipcRenderer.sendSync("telemetry:dsn") || undefined, enabled: ipcRenderer.sendSync("telemetry:enabled") !== false },
   listSessions: () => ipcRenderer.invoke("sessions:list"),
   listModels: () => ipcRenderer.invoke("models:list"),
   listProviders: () => ipcRenderer.invoke("providers:list"),

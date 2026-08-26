@@ -7,7 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { DEFAULT_WORKSPACE } from "../paths.js";
-import { configuredModels, configPath, initializeWorkspace, isOnboardingComplete, loadConfig, markOnboardingComplete, readOobeProgress, readSettings, saveOobeProgress, saveSettings, useConfiguredModel, writeWorkspaceEnv, type OobeProgress, type SettingsPayload } from "../config.js";
+import { configuredModels, configPath, DEFAULT_TELEMETRY_SETTINGS, initializeWorkspace, isOnboardingComplete, loadConfig, markOnboardingComplete, readOobeProgress, readSettings, saveOobeProgress, saveSettings, useConfiguredModel, writeWorkspaceEnv, type OobeProgress, type SettingsPayload } from "../config.js";
 import { loadEnabledSkills } from "../skills.js";
 import { AuditStore } from "../audit.js";
 import { SecAgentRuntime, type TraceEvent } from "../runtime.js";
@@ -32,15 +32,36 @@ import { WindowsUpdateManager } from "./update-manager.js";
 import { TelemetryClient, hashIdentifier, normalizeMessage, sanitizeStack, type TelemetryFailure } from "../telemetry.js";
 
 const SENTRY_DSN = process.env.SENTRY_DSN?.trim() || "";
-if (SENTRY_DSN) {
+function readInitialTelemetryEnabled(): boolean {
+  if (!fs.existsSync(configPath(DEFAULT_WORKSPACE))) return DEFAULT_TELEMETRY_SETTINGS.enabled;
+  try { return readSettings(DEFAULT_WORKSPACE).telemetry.enabled; }
+  catch { return false; }
+}
+
+// Fail closed for an existing opt-out and avoid starting Sentry's native
+// minidump/session integrations until the user has opted in.
+let sentryTelemetryEnabled = readInitialTelemetryEnabled();
+let sentryInitialized = false;
+function initializeSentry(): void {
+  if (!SENTRY_DSN || !sentryTelemetryEnabled || sentryInitialized) return;
   Sentry.init({
     dsn: SENTRY_DSN,
     sendDefaultPii: false,
+    integrations: (defaults) => defaults.filter((integration) => integration.name !== "MainProcessSession"),
     beforeSend: (event) => {
+      if (!sentryTelemetryEnabled) return null;
       if (event.request) {
         delete event.request.headers;
+        delete event.request.cookies;
+        delete event.request.data;
+        delete event.request.query_string;
         if (event.request.url) event.request.url = event.request.url.replace(/[?&](?:token|key|code|state)=[^&]*/gi, "");
       }
+      delete event.user;
+      delete event.extra;
+      delete event.breadcrumbs;
+      if (event.message) event.message = normalizeMessage(event.message);
+      if (event.transaction) event.transaction = normalizeMessage(event.transaction);
       for (const exception of event.exception?.values || []) {
         if (exception.value) exception.value = normalizeMessage(exception.value);
         if (exception.stacktrace?.frames) for (const frame of exception.stacktrace.frames) {
@@ -50,7 +71,9 @@ if (SENTRY_DSN) {
       return event;
     }
   });
+  sentryInitialized = true;
 }
+initializeSentry();
 
 let windowRef: BrowserWindow | undefined;
 let settingsWindow: BrowserWindow | undefined;
@@ -116,7 +139,10 @@ function writeWindowsAutostart(enabled: boolean): void {
 function launchWindowsInstaller(installerPath: string): void {
   if (process.platform !== "win32") throw new Error("更新安装仅支持 Windows");
   const child = spawn(installerPath, ["/SP-", "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"], { detached: true, stdio: "ignore", windowsHide: true });
-  child.once("error", (error) => logMain("updates.install.process.failed", { error: error.message, path: installerPath }));
+  child.once("error", (error) => {
+    logMain("updates.install.process.failed", { error: error.message, path: installerPath });
+    recordTelemetryFailure({ type: "update.failed", error, context: { phase: "launch" } });
+  });
   child.unref();
 }
 
@@ -128,6 +154,7 @@ async function updateInstalledPlugins(): Promise<void> {
     else logMain("marketplace.plugins.checked", { updated: 0 });
   } catch (error) {
     logMain("marketplace.plugins.update.failed", { error: error instanceof Error ? error.message : String(error) });
+    recordTelemetryFailure({ type: "plugin.start.failed", error, context: { phase: "marketplace-update" } });
   }
 }
 
@@ -269,7 +296,7 @@ async function openWorkspaceFilePreview(relativePath: string): Promise<{ ok: tru
 }
 
 function sendToAppWindows(channel: string, payload: unknown): void {
-  for (const target of [windowRef, settingsWindow, wakeWindow]) {
+  for (const target of [windowRef, settingsWindow, wakeWindow, voiceWakeWindow]) {
     if (!target || target.isDestroyed() || target.webContents.isDestroyed()) continue;
     try {
       target.webContents.send(channel, payload);
@@ -320,6 +347,7 @@ async function startConfiguredVoiceWake(): Promise<void> {
     // audio while the visible wake overlay is open in front of it.
     webPreferences: { preload: path.join(__dirname, "../preload/preload.cjs"), contextIsolation: true, nodeIntegration: false, autoplayPolicy: "no-user-gesture-required", backgroundThrottling: false }
   });
+  installWindowDiagnostics(voiceWakeWindow, "voice-wake");
   voiceWakeWindow.on("closed", () => { stopVoiceWake(); voiceWakeWindow = undefined; });
   const query = new URLSearchParams({ "voice-wake": "1", phrase }).toString();
   if (process.env.ELECTRON_RENDERER_URL) await voiceWakeWindow.loadURL(`${process.env.ELECTRON_RENDERER_URL}?${query}`);
@@ -363,6 +391,7 @@ async function openWakeWindow(): Promise<void> {
     alwaysOnTop: true,
     webPreferences: { preload: path.join(__dirname, "../preload/preload.cjs"), contextIsolation: true, nodeIntegration: false, autoplayPolicy: "no-user-gesture-required" }
   });
+  installWindowDiagnostics(wakeWindow, "wake");
   if (process.platform === "darwin") {
     // Keep the overlay in the current macOS Space, including a separate
     // full-screen app Space. Without visibleOnFullScreen, focusing this
@@ -553,6 +582,7 @@ function store(): SessionStore { return new SessionStore(DEFAULT_WORKSPACE); }
 
 function classifyAgentFailure(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
+  if (/empty|invalid|malformed.*response|empty response|空响应|返回为空|模型返回|格式错误/i.test(message)) return "model.response.invalid";
   if (/timeout|timed out|超时/i.test(message)) return "model.timeout";
   if (/401|403|unauthorized|forbidden|密钥|token|认证/i.test(message)) return "model.auth_failed";
   if (/429|rate.?limit|限流/i.test(message)) return "model.rate_limited";
@@ -676,6 +706,15 @@ ipcMain.handle("settings:get", () => {
   return process.platform === "win32" ? { ...settings, autostart: readWindowsAutostart() } : settings;
 });
 ipcMain.on("telemetry:dsn", (event) => { event.returnValue = SENTRY_DSN; });
+ipcMain.on("telemetry:enabled", (event) => {
+  try {
+    // Preload runs before app.ready. An existing workspace has the persisted
+    // choice; a fresh workspace follows the default opt-in setting.
+    event.returnValue = !fs.existsSync(configPath(DEFAULT_WORKSPACE)) || readSettings(DEFAULT_WORKSPACE).telemetry.enabled;
+  } catch {
+    event.returnValue = false;
+  }
+});
 ipcMain.handle("settings:open", () => { openSettings(); return { ok: true }; });
 ipcMain.handle("updates:get-state", () => updateManager?.getState() || ({ currentVersion: app.getVersion(), channel: "stable", status: "unsupported", downloadedBytes: 0 } satisfies UpdateState));
 ipcMain.handle("updates:check", () => updateManager?.check(false) || ({ currentVersion: app.getVersion(), channel: "stable", status: "unsupported", downloadedBytes: 0 } satisfies UpdateState));
@@ -811,18 +850,31 @@ ipcMain.handle("official:oauth-login", async () => {
 });
 ipcMain.handle("official:logout", () => { loadConfig(DEFAULT_WORKSPACE); writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_TOKEN", ""); writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_SECTL_TOKEN", ""); writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_USER_ID", ""); writeWorkspaceEnv(DEFAULT_WORKSPACE, "SECTL_OFFICIAL_EMAIL", ""); return { loggedIn: false }; });
 ipcMain.handle("plugins:list", () => pluginManager?.list() || []);
-ipcMain.handle("plugins:settings-call", async (_event, pluginId: string, pageId: string, action: string, args: Record<string, unknown> = {}) => pluginManager?.callSettings(pluginId, pageId, action, args));
-ipcMain.handle("plugins:set-enabled", async (_event, id: string, enabled: boolean) => { await pluginManager?.setEnabled(id, enabled); return pluginManager?.list() || []; });
-ipcMain.handle("plugins:reload", async (_event, id: string) => { await pluginManager?.reload(id); return pluginManager?.list() || []; });
+ipcMain.handle("plugins:settings-call", async (_event, pluginId: string, pageId: string, action: string, args: Record<string, unknown> = {}) => {
+  try { return await pluginManager?.callSettings(pluginId, pageId, action, args); }
+  catch (error) { recordTelemetryFailure({ type: "plugin.call.failed", error, context: { pluginId, pageId, action } }); throw error; }
+});
+ipcMain.handle("plugins:set-enabled", async (_event, id: string, enabled: boolean) => {
+  try { await pluginManager?.setEnabled(id, enabled); return pluginManager?.list() || []; }
+  catch (error) { recordTelemetryFailure({ type: "plugin.start.failed", error, context: { pluginId: id, enabled } }); throw error; }
+});
+ipcMain.handle("plugins:reload", async (_event, id: string) => {
+  try { await pluginManager?.reload(id); return pluginManager?.list() || []; }
+  catch (error) { recordTelemetryFailure({ type: "plugin.start.failed", error, context: { pluginId: id, phase: "reload" } }); throw error; }
+});
 ipcMain.handle("plugins:uninstall", async (_event, id: string) => { await pluginManager?.uninstall(id); return pluginManager?.list() || []; });
 ipcMain.handle("plugins:install", async () => {
   const result = await dialog.showOpenDialog(settingsWindow || windowRef!, { properties: ["openFile"], filters: [{ name: "SecAgent plugin", extensions: ["zip"] }] });
   if (result.canceled || !result.filePaths[0]) return pluginManager?.list() || [];
-  await pluginManager?.install(result.filePaths[0]);
-  return pluginManager?.list() || [];
+  try { await pluginManager?.install(result.filePaths[0]); return pluginManager?.list() || []; }
+  catch (error) { recordTelemetryFailure({ type: "plugin.start.failed", error, context: { phase: "install" } }); throw error; }
 });
 ipcMain.handle("marketplace:list", () => marketplace.list());
-ipcMain.handle("marketplace:install", async (_event, version: MarketplaceVersion) => { if (!pluginManager) throw new Error("插件管理器尚未启动"); await marketplace.install(pluginManager, version); return pluginManager.list(); });
+ipcMain.handle("marketplace:install", async (_event, version: MarketplaceVersion) => {
+  if (!pluginManager) throw new Error("插件管理器尚未启动");
+  try { await marketplace.install(pluginManager, version); return pluginManager.list(); }
+  catch (error) { recordTelemetryFailure({ type: "plugin.start.failed", error, context: { phase: "marketplace-install", version: version.version } }); throw error; }
+});
 ipcMain.handle("apps:detect", () => detectCompanionApps());
 ipcMain.handle("classisland:detect", () => classIslandInstaller.detect());
 ipcMain.handle("classisland:pick", async () => {
@@ -930,11 +982,16 @@ ipcMain.handle("settings:save", (_event, payload: SettingsPayload) => {
     if (previousWakeHotkey) globalShortcut.unregister(previousWakeHotkey);
     activeWakeShortcut = nextWakeHotkey;
   }
+  sentryTelemetryEnabled = saved.telemetry.enabled;
+  initializeSentry();
   telemetry?.setEnabled(saved.telemetry.enabled);
   sendToAppWindows("settings:changed", saved);
   updateManager?.setPreferences(saved.updates);
   closeVoiceWakeWindow();
-  if (saved.wake.voiceEnabled) void startConfiguredVoiceWake().catch((error) => logMain("voice-wake.start.failed", { error: String(error) }));
+  if (saved.wake.voiceEnabled) void startConfiguredVoiceWake().catch((error) => {
+    logMain("voice-wake.start.failed", { error: String(error) });
+    recordTelemetryFailure({ type: "speech.failed", error, context: { phase: "voice-wake-start" } });
+  });
   return saved;
 });
 ipcMain.on("wake:context", (_event, payload: unknown) => {
@@ -948,14 +1005,21 @@ ipcMain.on("wake:context", (_event, payload: unknown) => {
 });
 ipcMain.handle("wake:close", () => { closeWakeWindow(); return { ok: true }; });
 ipcMain.on("wake:interactive", (_event, interactive: boolean) => { if (wakeWindow && !wakeWindow.isDestroyed()) wakeWindow.setIgnoreMouseEvents(!interactive); });
-ipcMain.handle("speech:start", (event) => startSpeech(wakeWindow?.webContents.id === event.sender.id ? wakeWindow : windowRef, { betterRecognition: readSettings(DEFAULT_WORKSPACE).speech.betterRecognition === true }));
+ipcMain.handle("speech:start", (event) => {
+  try { return startSpeech(wakeWindow?.webContents.id === event.sender.id ? wakeWindow : windowRef, { betterRecognition: readSettings(DEFAULT_WORKSPACE).speech.betterRecognition === true }); }
+  catch (error) { recordTelemetryFailure({ type: "speech.failed", error, context: { phase: "start" } }); throw error; }
+});
 ipcMain.handle("speech:stop", () => { stopSpeech(); return { ok: true }; });
-ipcMain.handle("voice-wake:start", (event, phrase: string) => startVoiceWake(voiceWakeWindow?.webContents.id === event.sender.id ? voiceWakeWindow : undefined, phrase, () => {
-  // Keep the hidden microphone window alive so the listener can be resumed
-  // after the one-shot wake overlay closes.
-  stopVoiceWake();
-  void openWakeWindow().catch((error) => logMain("wake.open.failed", { error: String(error), reason: "voice" }));
-}));
+ipcMain.handle("voice-wake:start", (event, phrase: string) => {
+  try {
+    return startVoiceWake(voiceWakeWindow?.webContents.id === event.sender.id ? voiceWakeWindow : undefined, phrase, () => {
+      // Keep the hidden microphone window alive so the listener can be resumed
+      // after the one-shot wake overlay closes.
+      stopVoiceWake();
+      void openWakeWindow().catch((error) => logMain("wake.open.failed", { error: String(error), reason: "voice" }));
+    });
+  } catch (error) { recordTelemetryFailure({ type: "speech.failed", error, context: { phase: "voice-wake-start" } }); throw error; }
+});
 ipcMain.handle("voice-wake:stop", () => { stopVoiceWake(); return { ok: true }; });
 ipcMain.on("voice-wake:log", (_event, payload: unknown) => {
   const data = payload && typeof payload === "object" ? payload : { detail: String(payload) };
@@ -974,6 +1038,7 @@ ipcMain.handle("tts:synthesize", async (_event, text: string) => {
     return encoded;
   } catch (error) {
     logMain("tts.synthesize.failed", { characters: clean.length, message: error instanceof Error ? error.message : String(error) });
+    recordTelemetryFailure({ type: "speech.failed", error, context: { phase: "tts", inputLength: clean.length } });
     throw error;
   }
 });
@@ -1054,7 +1119,7 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
       recordTelemetryFailure({ type: "tool.call.failed", error: new Error("tool returned an error"), context: { sessionId: hashIdentifier(id), tool: typeof data.name === "string" ? data.name : undefined } });
     }
     if (ordered.stage === "model.response" && typeof data.status === "number" && data.status >= 400) {
-      recordTelemetryFailure({ type: data.status === 429 ? "model.rate_limited" : data.status === 401 || data.status === 403 ? "model.auth_failed" : "model.request.failed", context: { sessionId: hashIdentifier(id), status: data.status } });
+      recordTelemetryFailure({ type: data.status === 408 || data.status === 504 ? "model.timeout" : data.status === 429 ? "model.rate_limited" : data.status === 401 || data.status === 403 ? "model.auth_failed" : data.status === 400 ? "model.response.invalid" : "model.request.failed", context: { sessionId: hashIdentifier(id), status: data.status } });
     }
     logMain("session.runtime", { sessionId: id, ...ordered });
     sendToAppWindows("sessions:runtime-event", { sessionId: id, ...ordered });
@@ -1105,6 +1170,7 @@ app.whenReady().then(async () => {
   const needsOnboarding = !fs.existsSync(configPath(DEFAULT_WORKSPACE)) || !isOnboardingComplete(DEFAULT_WORKSPACE);
   initializeWorkspace(DEFAULT_WORKSPACE);
   const initialSettings = readSettings(DEFAULT_WORKSPACE);
+  sentryTelemetryEnabled = initialSettings.telemetry.enabled;
   telemetry = new TelemetryClient({
     baseUrl: process.env.SECTL_OFFICIAL_API_URL || "",
     storageDirectory: app.getPath("userData"),
@@ -1120,7 +1186,10 @@ app.whenReady().then(async () => {
     platform: process.platform,
     isPackaged: app.isPackaged,
     storageDirectory: app.getPath("userData"),
-    publish: (state) => sendToAppWindows("updates:state", state),
+    publish: (state) => {
+      sendToAppWindows("updates:state", state);
+      if (state.status === "error") recordTelemetryFailure({ type: "update.failed", error: new Error(state.error || "update failed"), context: { channel: state.channel } });
+    },
     quit: () => app.quit(),
     launchInstaller: launchWindowsInstaller,
     log: logMain
@@ -1133,7 +1202,11 @@ app.whenReady().then(async () => {
     },
     oauthLogin: runSectlOAuthLogin,
   }, openPluginSvgPreview);
-  await pluginManager.initialize();
+  try { await pluginManager.initialize(); }
+  catch (error) {
+    recordTelemetryFailure({ type: "plugin.start.failed", error, context: { phase: "initialize" } });
+    throw error;
+  }
   secAgentHttpServer = new SecAgentHttpServer(pluginManager, marketplace);
   try { await secAgentHttpServer.start(); }
   catch (error) { logMain("secagent-http.error", { message: error instanceof Error ? error.message : String(error), port: 42189 }); }
@@ -1168,7 +1241,10 @@ app.whenReady().then(async () => {
   createWindow(!needsOnboarding && !isAutostartLaunch());
   try {
     registerWakeShortcut(initialSettings.wake.hotkey || DEFAULT_WAKE_HOTKEY);
-    if (initialSettings.wake.voiceEnabled) void startConfiguredVoiceWake().catch((error) => logMain("voice-wake.start.failed", { error: String(error) }));
+    if (initialSettings.wake.voiceEnabled) void startConfiguredVoiceWake().catch((error) => {
+      logMain("voice-wake.start.failed", { error: String(error) });
+      recordTelemetryFailure({ type: "speech.failed", error, context: { phase: "voice-wake-start" } });
+    });
   }
   catch (error) { logMain("wake.shortcut.register.failed", { error: error instanceof Error ? error.message : String(error) }); }
   if (needsOnboarding) openSettings(true);
