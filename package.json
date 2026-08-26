@@ -3,6 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "license": "GPL-3.0-or-later",
+  "author": {
+    "name": "SECTL",
+    "url": "https://sectl.cn"
+  },
+  "homepage": "https://sectl.cn",
   "type": "module",
   "main": "./out/main/main.js",
   "bin": {
@@ -82,6 +87,7 @@
       "node_modules/sherpa-onnx/**/*"
     ],
     "win": {
+      "icon": "resources/icon.ico",
       "target": [
         "dir"
       ]
@@ -90,6 +96,7 @@
       "target": [
         "AppImage"
       ],
+      "icon": "src/renderer/public/icon.png",
       "category": "Utility"
     },
     "mac": {
