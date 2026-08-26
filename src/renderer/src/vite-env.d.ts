@@ -11,13 +11,14 @@ type UpdateStatus = "unsupported" | "idle" | "checking" | "up-to-date" | "availa
 interface UpdatePreferences { channel: UpdateChannel; autoCheck: boolean; autoDownload: boolean; autoInstallOnQuit: boolean }
 interface UpdateRelease { version: string; tag: string; releaseType?: "alpha" | "beta"; channel: UpdateChannel; htmlUrl: string; body: string; publishedAt?: string; assetName: string; assetUrl: string; checksumUrl?: string; sha256?: string; size?: number }
 interface UpdateState { currentVersion: string; channel: UpdateChannel; status: UpdateStatus; release?: UpdateRelease; downloadedVersion?: string; downloadedBytes: number; totalBytes?: number; checkedAt?: string; error?: string }
-interface ModelOption { id: string; name: string; model: string; provider: string }
+interface ModelOption { id: string; name: string; model: string; provider: string; virtual?: boolean }
 interface ModelProfile { id: string; name?: string; enabled?: boolean; provider: "openai-compatible" | "openai-responses" | "anthropic" | "google"; model: string; apiKeyEnv: string; apiKey?: string; apiKeyConfigured?: boolean; baseUrl: string; endpoint?: string; anthropicVersion?: string; maxTokens?: number }
 interface McpServerConfig { transport: "stdio" | "http"; command?: string; args?: string[]; url?: string; enabled: boolean }
 interface ProviderModel { id: string; name?: string; enabled?: boolean }
 interface ProviderConfig { id: string; name: string; preset?: string; provider: ModelProfile["provider"]; apiKeyEnv: string; apiKey?: string; apiKeyConfigured?: boolean; baseUrl: string; endpoint?: string; anthropicVersion?: string; maxTokens?: number; models: ProviderModel[] }
 interface ProviderPreset { id: string; name: string; env: string[]; api: string; models: ProviderModel[] }
-interface SettingsPayload { providers: ProviderConfig[]; models: ModelProfile[]; tts: { voice: string; rate: string }; wake: { hotkey: string; modelId?: string; voiceEnabled?: boolean; voicePhrase?: string }; speech: { betterRecognition?: boolean }; updates: UpdatePreferences; mcp: { servers: Record<string, McpServerConfig> }; defaultModelId?: string; defaultReasoningEffort?: ReasoningEffort; autostart?: boolean; customModelMode?: boolean }
+interface TelemetrySettings { enabled: boolean }
+interface SettingsPayload { providers: ProviderConfig[]; models: ModelProfile[]; tts: { voice: string; rate: string }; wake: { hotkey: string; modelId?: string; voiceEnabled?: boolean; voicePhrase?: string }; speech: { betterRecognition?: boolean }; updates: UpdatePreferences; telemetry: TelemetrySettings; mcp: { servers: Record<string, McpServerConfig> }; defaultModelId?: string; defaultReasoningEffort?: ReasoningEffort; autostart?: boolean; customModelMode?: boolean }
 interface SkillSummary { name: string; description: string; path: string }
 interface PluginStatus { id: string; format?: "secagent" | "agent"; name: string; version: string; icon?: string; enabled: boolean; state: "inactive" | "starting" | "error" | "ready"; message?: string; description?: string; author?: string; repository?: string; permissions?: string[]; readme?: string; settingsPages: Array<{ id: string; title: string; description?: string }> }
 interface MarketplaceVersion { version: string; minHostApiVersion: number; assetUrl: string; sha256: string; permissions: string[]; platforms: string[] }
@@ -37,6 +38,7 @@ interface OobeProgress { step: "source" | "config" | "plugins"; source?: "offici
 interface Window {
   secagent: {
     platform: NodeJS.Platform;
+    telemetryConfig: { sentryDsn?: string };
     listSessions(): Promise<SessionMeta[]>;
     listModels(): Promise<ModelOption[]>;
     listProviders(): Promise<ProviderPreset[]>;
@@ -82,6 +84,7 @@ interface Window {
     deleteSession(id: string): Promise<SessionMeta[]>;
     getSession(id: string): Promise<SessionData>;
     getRuntimeEvents(id: string): Promise<SessionRuntimeEvent[]>;
+    uploadDiagnostic(id: string): Promise<{ bytes: number }>;
     previewWorkspaceFile(relativePath: string): Promise<{ ok: true }>;
     sendMessage(id: string, text: string, modelId?: string, reasoningEffort?: ReasoningEffort, attachments?: ChatAttachment[]): Promise<SessionData>;
     stopMessage(id: string): Promise<{ ok: true; stopped: boolean }>;

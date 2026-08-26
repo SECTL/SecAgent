@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 
 contextBridge.exposeInMainWorld("secagent", {
   platform: process.platform,
+  telemetryConfig: { sentryDsn: ipcRenderer.sendSync("telemetry:dsn") || undefined },
   listSessions: () => ipcRenderer.invoke("sessions:list"),
   listModels: () => ipcRenderer.invoke("models:list"),
   listProviders: () => ipcRenderer.invoke("providers:list"),
@@ -59,6 +60,7 @@ contextBridge.exposeInMainWorld("secagent", {
   deleteSession: (id: string) => ipcRenderer.invoke("sessions:delete", id),
   getSession: (id: string) => ipcRenderer.invoke("sessions:get", id),
   getRuntimeEvents: (id: string) => ipcRenderer.invoke("sessions:runtime-events", id),
+  uploadDiagnostic: (id: string) => ipcRenderer.invoke("sessions:diagnostic-upload", id),
   previewWorkspaceFile: (relativePath: string) => ipcRenderer.invoke("workspace:preview-file", relativePath),
   sendMessage: (id: string, text: string, modelId?: string, reasoningEffort?: string, attachments?: unknown[]) => ipcRenderer.invoke("sessions:send", id, text, modelId, reasoningEffort, attachments),
   stopMessage: (id: string) => ipcRenderer.invoke("sessions:stop", id),

@@ -47,11 +47,14 @@ export function SettingsApp() {
   const [officialExpired, setOfficialExpired] = useState(false);
   const [officialBusy, setOfficialBusy] = useState(false);
   const [updateState, setUpdateState] = useState<UpdateState | null>(null);
+  const [diagnosticSessions, setDiagnosticSessions] = useState<SessionMeta[]>([]);
+  const [diagnosticSessionId, setDiagnosticSessionId] = useState("");
+  const [diagnosticBusy, setDiagnosticBusy] = useState(false);
   const settingsLoaded = useRef(false);
   const skipAutosave = useRef(true);
   const [activePage, setActivePage] = useState(() => {
     const hash = window.location.hash.replace(/^#/, "");
-    const builtInPage = ["settings-wake", "settings-tts", "settings-speech", "settings-models", "settings-mcp", "settings-plugins", "settings-system", "settings-updates"].includes(hash);
+    const builtInPage = ["settings-wake", "settings-tts", "settings-speech", "settings-models", "settings-mcp", "settings-plugins", "settings-system", "settings-updates", "settings-telemetry"].includes(hash);
     const supportedPage = hash !== "settings-system" || bridge.platform === "win32";
     return isOobe ? "settings-models" : (supportedPage && (builtInPage || hash.startsWith("plugin-")) ? hash : "settings-tts");
   });
@@ -75,6 +78,13 @@ export function SettingsApp() {
     void bridge.getUpdateState().then(setUpdateState).catch(() => undefined);
     return bridge.onUpdateState(setUpdateState);
   }, [bridge]);
+  useEffect(() => {
+    if (isOobe) return;
+    void bridge.listSessions().then((sessions) => {
+      setDiagnosticSessions(sessions.slice(0, 20));
+      setDiagnosticSessionId((current) => current || sessions[0]?.id || "");
+    }).catch(() => undefined);
+  }, [bridge, isOobe]);
   const refreshOfficialPoints = async () => {
     setOfficialPointsBusy(true);
     try {
@@ -206,6 +216,18 @@ export function SettingsApp() {
     try { setUpdateState(await bridge.installUpdate()); }
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
   };
+  const uploadDiagnostic = async () => {
+    if (!diagnosticSessionId || !settings.telemetry.enabled) return;
+    if (!window.confirm("将上传所选会话的消息内容和脱敏运行 trace，仅用于故障诊断。是否继续？")) return;
+    setDiagnosticBusy(true);
+    setError("");
+    try {
+      const result = await bridge.uploadDiagnostic(diagnosticSessionId);
+      setError(`诊断包已上传（${Math.round(result.bytes / 1024)} KB）`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally { setDiagnosticBusy(false); }
+  };
   const defaultModel = availableModels.find((model) => model.id === settings.defaultModelId) || availableModels.find((model) => model.id === "sectl-official") || availableModels[0];
   const defaultReasoningEfforts = reasoningEffortsForModel(defaultModel);
   const defaultReasoningEffort = defaultReasoningEfforts.includes(settings.defaultReasoningEffort || "high") ? (settings.defaultReasoningEffort || "high") : defaultReasoningEfforts.includes("high") ? "high" : defaultReasoningEfforts[0];
@@ -216,6 +238,7 @@ export function SettingsApp() {
     <div className="settings-window-title">SecAgent设置</div>
     {!isOobe && <nav className="settings-nav" aria-label="Settings navigation"><button type="button" className={activePage === "settings-wake" ? "active" : ""} aria-current={activePage === "settings-wake" ? "page" : undefined} onClick={() => { setActivePage("settings-wake"); window.history.replaceState(null, "", "#settings-wake"); }}>随时唤醒</button>{bridge.platform === "win32" && <button type="button" className={activePage === "settings-system" ? "active" : ""} aria-current={activePage === "settings-system" ? "page" : undefined} onClick={() => { setActivePage("settings-system"); window.history.replaceState(null, "", "#settings-system"); }}>系统</button>}<button type="button" className={activePage === "settings-updates" ? "active" : ""} aria-current={activePage === "settings-updates" ? "page" : undefined} onClick={() => { setActivePage("settings-updates"); window.history.replaceState(null, "", "#settings-updates"); }}>更新</button><button type="button" className={activePage === "settings-tts" ? "active" : ""} aria-current={activePage === "settings-tts" ? "page" : undefined} onClick={() => { setActivePage("settings-tts"); window.history.replaceState(null, "", "#settings-tts"); }}>朗读</button><button type="button" className={activePage === "settings-speech" ? "active" : ""} aria-current={activePage === "settings-speech" ? "page" : undefined} onClick={() => { setActivePage("settings-speech"); window.history.replaceState(null, "", "#settings-speech"); }}>语音识别</button><button type="button" className={activePage === "settings-models" ? "active" : ""} aria-current={activePage === "settings-models" ? "page" : undefined} onClick={() => { setActivePage("settings-models"); window.history.replaceState(null, "", "#settings-models"); }}>模型</button><button type="button" className={activePage === "settings-mcp" ? "active" : ""} aria-current={activePage === "settings-mcp" ? "page" : undefined} onClick={() => { setActivePage("settings-mcp"); window.history.replaceState(null, "", "#settings-mcp"); }}>MCP 服务</button><button type="button" className={activePage === "settings-plugins" ? "active" : ""} aria-current={activePage === "settings-plugins" ? "page" : undefined} onClick={() => { setActivePage("settings-plugins"); window.history.replaceState(null, "", "#settings-plugins"); }}>插件</button>{plugins.flatMap((plugin) => plugin.settingsPages.map((page) => { const pageId = `plugin-${plugin.id}-${page.id}`; return <button type="button" className={activePage === pageId ? "active" : ""} aria-current={activePage === pageId ? "page" : undefined} key={pageId} onClick={() => { setActivePage(pageId); window.history.replaceState(null, "", `#${pageId}`); }}>{page.title}</button>; }))}</nav>}
     {error && <div className="settings-error">{error}</div>}
+    {!isOobe && <button type="button" className="secondary-button telemetry-settings-link" onClick={() => { setActivePage("settings-telemetry"); window.history.replaceState(null, "", "#settings-telemetry"); }}>诊断与隐私设置</button>}
     <section id="settings-wake" className={`settings-section ${isOobe || activePage === "settings-wake" ? "settings-section-active" : ""}`}><div className="section-title"><div><h2>随时唤醒</h2><p>按下全局快捷键后，在当前显示器工作区唤起语音 Agent。窗口不会覆盖任务栏。</p></div></div>
       <article className="settings-card"><WakeHotkeyField value={settings.wake.hotkey} platform={bridge.platform} onChange={(hotkey) => setSettings((current) => current && { ...current, wake: { ...current.wake, hotkey } })} /><div className="form-grid wake-model-setting"><label>随时唤起使用的模型<select value={settings.wake.modelId || settings.defaultModelId || availableModels[0]?.id || ""} onChange={(event) => setSettings((current) => current && { ...current, wake: { ...current.wake, modelId: event.target.value } })}>{availableModels.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label></div><label className="toggle-row"><span className="toggle-copy"><strong>语音唤醒</strong><small>开启后持续使用麦克风，识别到唤醒词后等同于按下上面的快捷键。</small></span><input type="checkbox" checked={settings.wake.voiceEnabled === true} onChange={(event) => setSettings((current) => current && { ...current, wake: { ...current.wake, voiceEnabled: event.target.checked } })} /></label><label>唤醒词<input value={settings.wake.voicePhrase || "小泽同学"} onChange={(event) => setSettings((current) => current && { ...current, wake: { ...current.wake, voicePhrase: event.target.value } })} placeholder="小泽同学" /></label><p className="settings-help">Windows 默认 Ctrl Alt A；macOS 默认 Ctrl Option A。语音唤醒始终使用随安装包提供的本地模型，无需网络。</p></article>
     </section>
@@ -262,6 +285,9 @@ export function SettingsApp() {
 
     {bridge.platform === "win32" && <section id="settings-system" className={"settings-section " + (activePage === "settings-system" ? "settings-section-active" : "")}><div className="section-title"><div><h2>系统</h2><p>管理 SecAgent 是否随 Windows 登录自动启动。</p></div></div>
       <article className="settings-card"><label className="toggle-row"><span className="toggle-copy"><strong>开机自启</strong><small>开启后，Windows 登录时会在后台启动 SecAgent；需要使用时可从托盘打开主窗口。</small></span><input type="checkbox" checked={settings.autostart === true} onChange={(event) => setSettings((current) => current && { ...current, autostart: event.target.checked })} /></label></article>
+    </section>}
+    {!isOobe && <section id="settings-telemetry" className={`settings-section ${activePage === "settings-telemetry" ? "settings-section-active" : ""}`}><div className="section-title"><div><h2>诊断与隐私</h2><p>上传脱敏的错误、崩溃和 Agent 执行失败信息，帮助改进 SecAgent。关闭后不会发送任何遥测。</p></div></div>
+      <article className="settings-card"><label className="toggle-row"><span className="toggle-copy"><strong>上传匿名诊断数据</strong><small>包含应用版本、系统、错误类型、网络状态、工具名和脱敏运行阶段；不会上传普通对话内容、API Key 或附件。</small></span><input type="checkbox" checked={settings.telemetry.enabled} onChange={(event) => setSettings((current) => current && { ...current, telemetry: { enabled: event.target.checked } })} /></label><div className="diagnostic-upload-row"><div><strong>上传一次完整诊断包</strong><p className="settings-help">仅在你主动选择会话并确认后上传该会话内容和脱敏 trace，不会自动持续开启。</p></div><div className="diagnostic-upload-controls"><select disabled={!settings.telemetry.enabled || diagnosticBusy || !diagnosticSessions.length} value={diagnosticSessionId} onChange={(event) => setDiagnosticSessionId(event.target.value)}><option value="">选择会话</option>{diagnosticSessions.map((session) => <option key={session.id} value={session.id}>{session.title} · {new Date(session.updatedAt).toLocaleString()}</option>)}</select><button type="button" className="secondary-button" disabled={!settings.telemetry.enabled || diagnosticBusy || !diagnosticSessionId} onClick={() => void uploadDiagnostic()}>{diagnosticBusy ? "上传中…" : "上传诊断包"}</button></div></div></article>
     </section>}
   </main>;
 }

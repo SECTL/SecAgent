@@ -56,6 +56,11 @@ export interface UpdatePreferences {
   autoInstallOnQuit: boolean;
 }
 
+export interface TelemetrySettings {
+  /** Master switch. When false, the client must not send telemetry requests. */
+  enabled: boolean;
+}
+
 export type UpdateStatus = "unsupported" | "idle" | "checking" | "up-to-date" | "available" | "downloading" | "downloaded" | "installing" | "error";
 
 export interface UpdateRelease {
@@ -102,6 +107,7 @@ export interface SecAgentConfig {
   wake?: { hotkey?: string; modelId?: string; voiceEnabled?: boolean; voicePhrase?: string };
   speech?: { betterRecognition?: boolean };
   updates?: UpdatePreferences;
+  telemetry?: TelemetrySettings;
   mcp: { servers: Record<string, McpServerConfig> };
   defaults?: { modelId?: string; reasoningEffort?: ReasoningEffort; customModelMode?: boolean; autostart?: boolean };
 }

@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, screen, session, shell, Tray } from "electron";
+import * as Sentry from "@sentry/electron/main";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import crypto from "node:crypto";
@@ -28,6 +29,28 @@ import { DEFAULT_WAKE_HOTKEY, normalizeWakeHotkey } from "../wake-hotkey.js";
 import { generateSessionTitle } from "../session-title.js";
 import { normalizeReasoningEffort } from "../reasoning.js";
 import { WindowsUpdateManager } from "./update-manager.js";
+import { TelemetryClient, hashIdentifier, normalizeMessage, sanitizeStack, type TelemetryFailure } from "../telemetry.js";
+
+const SENTRY_DSN = process.env.SENTRY_DSN?.trim() || "";
+if (SENTRY_DSN) {
+  Sentry.init({
+    dsn: SENTRY_DSN,
+    sendDefaultPii: false,
+    beforeSend: (event) => {
+      if (event.request) {
+        delete event.request.headers;
+        if (event.request.url) event.request.url = event.request.url.replace(/[?&](?:token|key|code|state)=[^&]*/gi, "");
+      }
+      for (const exception of event.exception?.values || []) {
+        if (exception.value) exception.value = normalizeMessage(exception.value);
+        if (exception.stacktrace?.frames) for (const frame of exception.stacktrace.frames) {
+          if (frame.filename) frame.filename = frame.filename.replace(/[A-Za-z]:\\[^ )]+/g, "<path>");
+        }
+      }
+      return event;
+    }
+  });
+}
 
 let windowRef: BrowserWindow | undefined;
 let settingsWindow: BrowserWindow | undefined;
@@ -53,6 +76,20 @@ const AUTO_START_ARG = "--autostart";
 const AUTO_START_ARGS = [AUTO_START_ARG];
 let marketplaceUpdateTimer: NodeJS.Timeout | undefined;
 let updateCheckTimer: NodeJS.Timeout | undefined;
+let telemetry: TelemetryClient | undefined;
+
+function captureSafeException(error: unknown): Error {
+  const source = error instanceof Error ? error : new Error(String(error));
+  const safe = new Error(normalizeMessage(source.message));
+  safe.name = source.name.slice(0, 120);
+  if (source.stack) safe.stack = sanitizeStack(source.stack);
+  return safe;
+}
+
+function recordTelemetryFailure(failure: TelemetryFailure): void {
+  telemetry?.recordFailure(failure);
+  if (SENTRY_DSN && telemetry?.isEnabled()) Sentry.captureException(captureSafeException(failure.error || failure.type));
+}
 
 function isAutostartLaunch(): boolean {
   return process.platform === "win32" && process.argv.includes(AUTO_START_ARG);
@@ -121,6 +158,15 @@ function logMain(stage: string, data: unknown = {}): void {
   fs.appendFileSync(path.join(logDir, "electron-main.jsonl"), line, "utf8");
   if (stage.startsWith("companion.")) fs.appendFileSync(path.join(logDir, "companion-install.jsonl"), line, "utf8");
 }
+
+process.on("uncaughtException", (error) => {
+  logMain("process.uncaught", { error: normalizeMessage(error instanceof Error ? error.message : String(error)) });
+  recordTelemetryFailure({ type: "main.uncaught", error });
+});
+process.on("unhandledRejection", (reason) => {
+  logMain("process.unhandled-rejection", { error: normalizeMessage(reason instanceof Error ? reason.message : String(reason)) });
+  recordTelemetryFailure({ type: "unhandled.rejection", error: reason });
+});
 
 async function ensureMacDockVisible(): Promise<void> {
   if (process.platform !== "darwin") return;
@@ -231,6 +277,15 @@ function sendToAppWindows(channel: string, payload: unknown): void {
       // A renderer may close between the destroyed check and send().
     }
   }
+}
+
+function installWindowDiagnostics(target: BrowserWindow, kind: string): void {
+  target.webContents.on("render-process-gone", (_event, details) => {
+    recordTelemetryFailure({ type: "renderer.crashed", error: new Error(details.reason || "renderer process gone"), context: { window: kind, exitCode: details.exitCode } });
+  });
+  target.webContents.on("unresponsive", () => {
+    recordTelemetryFailure({ type: "renderer.unresponsive", context: { window: kind } });
+  });
 }
 
 function closeWakeWindow(): void {
@@ -369,6 +424,7 @@ function createWindow(visible = true): void {
     webPreferences: { preload: path.join(__dirname, "../preload/preload.cjs"), contextIsolation: true, nodeIntegration: false }
   });
   configureWindowChrome(windowRef);
+  installWindowDiagnostics(windowRef, "main");
   installWindowShortcuts(windowRef);
   windowRef.on("close", (event) => {
     if (isQuitting) return;
@@ -431,6 +487,7 @@ function openSettings(oobeOrMenuItem: boolean | Electron.MenuItem = false, _wind
     webPreferences: { preload: path.join(__dirname, "../preload/preload.cjs"), contextIsolation: true, nodeIntegration: false }
   });
   configureWindowChrome(settingsWindow);
+  installWindowDiagnostics(settingsWindow, "settings");
   settingsWindow.on("page-title-updated", (event) => { event.preventDefault(); });
   settingsWindow.setTitle("SecAgent设置");
   const query = oobe ? "?settings=1&oobe=1" : "?settings=1";
@@ -494,6 +551,17 @@ function createApplicationMenu(): void {
 
 function store(): SessionStore { return new SessionStore(DEFAULT_WORKSPACE); }
 
+function classifyAgentFailure(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/timeout|timed out|超时/i.test(message)) return "model.timeout";
+  if (/401|403|unauthorized|forbidden|密钥|token|认证/i.test(message)) return "model.auth_failed";
+  if (/429|rate.?limit|限流/i.test(message)) return "model.rate_limited";
+  if (/mcp|工具发现|discovery/i.test(message)) return "mcp.discovery.failed";
+  if (/tool|工具|插件/i.test(message)) return "tool.call.failed";
+  if (/模型|model|endpoint|连接|connect|network|fetch/i.test(message)) return "model.request.failed";
+  return "agent.run.failed";
+}
+
 function historyInput(session: SessionData, current: string): string {
   const history = session.messages.slice(-20).map((message) => `${message.role === "user" ? "教师" : "SecAgent"}：${message.content}`).join("\n");
   return history ? `以下是当前会话的历史，请结合上下文理解最后一条新消息。\n\n${history}\n\n教师的新消息：${current}` : current;
@@ -541,6 +609,13 @@ ipcMain.handle("sessions:create", () => { const session = store().create(); logM
 ipcMain.handle("sessions:delete", (_event, id: string) => { store().delete(id); logMain("ipc.sessions.delete", { sessionId: id }); return store().list(); });
 ipcMain.handle("sessions:get", (_event, id: string) => { logMain("ipc.sessions.get", { sessionId: id }); return store().get(id); });
 ipcMain.handle("sessions:runtime-events", (_event, id: string) => { logMain("ipc.sessions.runtime-events", { sessionId: id }); return store().getRuntimeEvents(id).map((item) => ({ sessionId: id, ...item })); });
+ipcMain.handle("sessions:diagnostic-upload", async (_event, id: string) => {
+  if (!telemetry?.isEnabled()) throw new Error("请先在设置中开启匿名诊断数据上传");
+  const sessionStore = store();
+  const result = await telemetry.uploadDiagnostic(sessionStore.get(id), sessionStore.getRuntimeEvents(id));
+  logMain("telemetry.diagnostic.uploaded", { sessionId: hashIdentifier(id), bytes: result.bytes });
+  return result;
+});
 ipcMain.handle("workspace:preview-file", (_event, relativePath: string) => openWorkspaceFilePreview(relativePath));
 function officialProvider(baseUrl: string) {
   return { id: "sectl-official", name: "SecAgent 官方服务", preset: "custom", provider: "openai-responses" as const, apiKeyEnv: "SECTL_OFFICIAL_TOKEN", baseUrl: `${baseUrl}/v1`, endpoint: "/responses", maxTokens: 16384, models: [{ id: "deepseek-v4-flash", name: "DeepSeek V4 Flash" }] };
@@ -566,13 +641,15 @@ ipcMain.handle("models:list", async () => {
     }
   } catch { /* 自愈失败不阻塞模型列表 */ }
   try {
-    const response = await fetch(`${baseUrl}/models`, { headers: { Authorization: `Bearer ${token}` } });
-    const payload = await response.json() as { data?: Array<{ id?: string; name?: string }> };
-    const remote = (payload.data || []).filter((model) => model.id).map((model) => ({ id: `official:sectl-official:${model.id}`, name: model.name || model.id || "官方模型", model: model.id || "", provider: "openai-responses" }));
+    const query = new URLSearchParams({ custom_model_mode: String(customModelMode) });
+    const response = await fetch(`${baseUrl}/models?${query}`, { headers: { Authorization: `Bearer ${token}` } });
+    const payload = await response.json() as { data?: Array<{ id?: string; name?: string; virtual?: boolean }> };
+    const remote = (payload.data || []).filter((model) => model.id).map((model) => ({ id: `official:sectl-official:${model.id}`, name: model.name || model.id || "官方模型", model: model.id || "", provider: "openai-responses", virtual: model.virtual === true }));
     // 低延迟档位暂不开放（回头再用）。
-    const visibleRemote = remote.filter((model) => model.model !== "virtual-latency");
+    // 自定义模型模式永远不显示中转服务的虚拟档位；后端也会按后台 allow-list 过滤真实模型。
+    const visibleRemote = remote.filter((model) => model.model !== "virtual-latency" && (!customModelMode || (!model.virtual && !model.model.startsWith("virtual-"))));
     if (customModelMode) {
-      // 自定义模型模式开启：官方模型（含虚拟档位）与自定义模型全部可选。
+      // 自定义模型模式开启：只加入后台允许的官方真实模型与本地自定义模型。
       return [...visibleRemote, ...options];
     }
     // 关闭：官方档位模式 —— 下拉只有快速/标准/深度三个虚拟档位，看不到具体模型。
@@ -598,6 +675,7 @@ ipcMain.handle("settings:get", () => {
   const settings = readSettings(DEFAULT_WORKSPACE);
   return process.platform === "win32" ? { ...settings, autostart: readWindowsAutostart() } : settings;
 });
+ipcMain.on("telemetry:dsn", (event) => { event.returnValue = SENTRY_DSN; });
 ipcMain.handle("settings:open", () => { openSettings(); return { ok: true }; });
 ipcMain.handle("updates:get-state", () => updateManager?.getState() || ({ currentVersion: app.getVersion(), channel: "stable", status: "unsupported", downloadedBytes: 0 } satisfies UpdateState));
 ipcMain.handle("updates:check", () => updateManager?.check(false) || ({ currentVersion: app.getVersion(), channel: "stable", status: "unsupported", downloadedBytes: 0 } satisfies UpdateState));
@@ -852,6 +930,7 @@ ipcMain.handle("settings:save", (_event, payload: SettingsPayload) => {
     if (previousWakeHotkey) globalShortcut.unregister(previousWakeHotkey);
     activeWakeShortcut = nextWakeHotkey;
   }
+  telemetry?.setEnabled(saved.telemetry.enabled);
   sendToAppWindows("settings:changed", saved);
   updateManager?.setPreferences(saved.updates);
   closeVoiceWakeWindow();
@@ -968,6 +1047,15 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
       }
     }
     sessionStore.appendRuntimeEvent(id, ordered);
+    telemetry?.addBreadcrumb(ordered);
+    const data = ordered.data && typeof ordered.data === "object" ? ordered.data as Record<string, unknown> : {};
+    if (ordered.stage === "mcp.tools/error") recordTelemetryFailure({ type: "mcp.discovery.failed", context: { sessionId: hashIdentifier(id), stage: ordered.stage } });
+    if ((ordered.stage === "mcp.tools/result" || ordered.stage === "secagent.tools/result") && data.result && typeof data.result === "object" && "error" in (data.result as Record<string, unknown>)) {
+      recordTelemetryFailure({ type: "tool.call.failed", error: new Error("tool returned an error"), context: { sessionId: hashIdentifier(id), tool: typeof data.name === "string" ? data.name : undefined } });
+    }
+    if (ordered.stage === "model.response" && typeof data.status === "number" && data.status >= 400) {
+      recordTelemetryFailure({ type: data.status === 429 ? "model.rate_limited" : data.status === 401 || data.status === 403 ? "model.auth_failed" : "model.request.failed", context: { sessionId: hashIdentifier(id), status: data.status } });
+    }
     logMain("session.runtime", { sessionId: id, ...ordered });
     sendToAppWindows("sessions:runtime-event", { sessionId: id, ...ordered });
   };
@@ -1003,6 +1091,7 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
     const message = `执行失败：${error instanceof Error ? error.message : String(error)}`;
     sessionStore.appendMessage(id, "assistant", message, toolCalls, activities);
     trace({ stage: "runtime.error", data: { message } });
+    recordTelemetryFailure({ type: classifyAgentFailure(error), error, context: { sessionId: hashIdentifier(id), model: config.agent.model, provider: config.agent.provider, inputLength: text.length, attachmentCount: attachments.length, toolCount: toolCalls.length } });
     return sessionStore.get(id);
   } finally {
     if (activeSessionRuns.get(id) === abortController) activeSessionRuns.delete(id);
@@ -1016,6 +1105,15 @@ app.whenReady().then(async () => {
   const needsOnboarding = !fs.existsSync(configPath(DEFAULT_WORKSPACE)) || !isOnboardingComplete(DEFAULT_WORKSPACE);
   initializeWorkspace(DEFAULT_WORKSPACE);
   const initialSettings = readSettings(DEFAULT_WORKSPACE);
+  telemetry = new TelemetryClient({
+    baseUrl: process.env.SECTL_OFFICIAL_API_URL || "",
+    storageDirectory: app.getPath("userData"),
+    appVersion: app.getVersion(),
+    enabled: initialSettings.telemetry.enabled,
+    getAuthToken: () => process.env.SECTL_OFFICIAL_TOKEN || undefined
+  });
+  telemetry.start();
+  if (SENTRY_DSN) Sentry.getCurrentScope().setTags({ app_version: app.getVersion(), platform: process.platform, arch: process.arch });
   updateManager = new WindowsUpdateManager({
     currentVersion: app.getVersion(),
     preferences: initialSettings.updates,
@@ -1076,5 +1174,5 @@ app.whenReady().then(async () => {
   if (needsOnboarding) openSettings(true);
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
-app.on("before-quit", () => { updateManager?.handleBeforeQuit(); isQuitting = true; closeWakeWindow(); closeVoiceWakeWindow(); globalShortcut.unregisterAll(); if (marketplaceUpdateTimer) clearInterval(marketplaceUpdateTimer); if (updateCheckTimer) clearInterval(updateCheckTimer); void secAgentHttpServer?.stop(); void pluginManager?.shutdown(); });
+app.on("before-quit", () => { telemetry?.stop(); updateManager?.handleBeforeQuit(); isQuitting = true; closeWakeWindow(); closeVoiceWakeWindow(); globalShortcut.unregisterAll(); if (marketplaceUpdateTimer) clearInterval(marketplaceUpdateTimer); if (updateCheckTimer) clearInterval(updateCheckTimer); void secAgentHttpServer?.stop(); void pluginManager?.shutdown(); });
 app.on("window-all-closed", () => { /* Keep the process alive so the tray can reopen the main window. */ });
