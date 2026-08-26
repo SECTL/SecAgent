@@ -45,7 +45,31 @@ const secRandomInstaller = new SecRandomInstaller();
 const iccceInstaller = new IccceInstaller();
 const activeSessionRuns = new Map<string, AbortController>();
 const MARKETPLACE_UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const AUTO_START_ARG = "--autostart";
+const AUTO_START_ARGS = [AUTO_START_ARG];
 let marketplaceUpdateTimer: NodeJS.Timeout | undefined;
+
+function isAutostartLaunch(): boolean {
+  return process.platform === "win32" && process.argv.includes(AUTO_START_ARG);
+}
+
+function readWindowsAutostart(): boolean {
+  if (process.platform !== "win32") return false;
+  try {
+    const loginItem = app.getLoginItemSettings({ path: process.execPath, args: AUTO_START_ARGS });
+    // executableWillLaunchAtLogin also recognizes entries created by older
+    // installers that did not include the current argument list.
+    return loginItem.openAtLogin || loginItem.executableWillLaunchAtLogin;
+  } catch (error) {
+    logMain("autostart.read.failed", { error: error instanceof Error ? error.message : String(error) });
+    return false;
+  }
+}
+
+function writeWindowsAutostart(enabled: boolean): void {
+  if (process.platform !== "win32") return;
+  app.setLoginItemSettings({ openAtLogin: enabled, path: process.execPath, args: AUTO_START_ARGS });
+}
 
 async function updateInstalledPlugins(): Promise<void> {
   if (!pluginManager) return;
@@ -556,7 +580,10 @@ ipcMain.handle("providers:list", async () => {
     return [];
   }
 });
-ipcMain.handle("settings:get", () => readSettings(DEFAULT_WORKSPACE));
+ipcMain.handle("settings:get", () => {
+  const settings = readSettings(DEFAULT_WORKSPACE);
+  return process.platform === "win32" ? { ...settings, autostart: readWindowsAutostart() } : settings;
+});
 ipcMain.handle("settings:open", () => { openSettings(); return { ok: true }; });
 ipcMain.handle("settings:skills", () => {
   const { config } = loadConfig(DEFAULT_WORKSPACE);
@@ -784,9 +811,16 @@ ipcMain.handle("settings:save", (_event, payload: SettingsPayload) => {
     }
   }
   let saved: SettingsPayload;
+  const previousAutostart = readWindowsAutostart();
+  const nextAutostart = process.platform === "win32" && payload.autostart === true;
+  const autostartChanged = previousAutostart !== nextAutostart;
   try {
-    saved = saveSettings(DEFAULT_WORKSPACE, { ...payload, providers, wake: { hotkey: nextWakeHotkey, ...(payload.wake?.modelId ? { modelId: payload.wake.modelId } : {}), voiceEnabled: payload.wake?.voiceEnabled === true, voicePhrase: payload.wake?.voicePhrase } });
+    if (autostartChanged) writeWindowsAutostart(nextAutostart);
+    saved = saveSettings(DEFAULT_WORKSPACE, { ...payload, providers, autostart: nextAutostart, wake: { hotkey: nextWakeHotkey, ...(payload.wake?.modelId ? { modelId: payload.wake.modelId } : {}), voiceEnabled: payload.wake?.voiceEnabled === true, voicePhrase: payload.wake?.voicePhrase } });
   } catch (error) {
+    if (autostartChanged) {
+      try { writeWindowsAutostart(previousAutostart); } catch { /* Keep the original save error visible. */ }
+    }
     if (registeredNewShortcut) globalShortcut.unregister(nextWakeHotkey);
     throw error;
   }
@@ -992,7 +1026,7 @@ app.whenReady().then(async () => {
     app.dock?.setIcon(appIconPath());
   }
   logMain("app.ready");
-  createWindow(!needsOnboarding);
+  createWindow(!needsOnboarding && !isAutostartLaunch());
   try {
     const initialSettings = readSettings(DEFAULT_WORKSPACE);
     registerWakeShortcut(initialSettings.wake.hotkey || DEFAULT_WAKE_HOTKEY);

@@ -64,7 +64,7 @@ export interface SecAgentConfig {
   wake?: { hotkey?: string; modelId?: string; voiceEnabled?: boolean; voicePhrase?: string };
   speech?: { betterRecognition?: boolean };
   mcp: { servers: Record<string, McpServerConfig> };
-  defaults?: { modelId?: string; reasoningEffort?: ReasoningEffort; customModelMode?: boolean };
+  defaults?: { modelId?: string; reasoningEffort?: ReasoningEffort; customModelMode?: boolean; autostart?: boolean };
 }
 
 /** A tool supplied by a locally installed SecAgent plugin. */

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { isOnboardingComplete, markOnboardingComplete, oobeProgressPath, readOobeProgress, saveOobeProgress, type OobeProgress } from "./config.js";
+import { initializeWorkspace, isOnboardingComplete, markOnboardingComplete, oobeProgressPath, readOobeProgress, readSettings, saveOobeProgress, saveSettings, type OobeProgress } from "./config.js";
 
 function temporaryWorkspace(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "secagent-oobe-"));
@@ -46,6 +46,20 @@ test("does not persist a custom provider API key in OOBE progress", () => {
     const raw = JSON.parse(fs.readFileSync(oobeProgressPath(workspace), "utf8")) as { provider?: { apiKey?: string } };
     assert.equal(raw.provider?.apiKey, undefined);
     assert.equal("apiKey" in (readOobeProgress(workspace)?.provider || {}), false);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("persists the autostart preference with the settings", () => {
+  const workspace = temporaryWorkspace();
+  try {
+    initializeWorkspace(workspace);
+    const settings = readSettings(workspace);
+    const saved = saveSettings(workspace, { ...settings, autostart: true });
+
+    assert.equal(saved.autostart, true);
+    assert.equal(readSettings(workspace).autostart, true);
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
   }

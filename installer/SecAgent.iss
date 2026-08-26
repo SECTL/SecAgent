@@ -45,6 +45,10 @@ Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
 [Tasks]
 Name: "startmenu"; Description: "创建开始菜单快捷方式"; GroupDescription: "快捷方式："
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "快捷方式："
+Name: "autostart"; Description: "开机时自动启动 SecAgent"; GroupDescription: "其他选项："; Flags: unchecked
+
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "SecAgent"; ValueData: """{app}\SecAgent.exe"" --autostart"; Flags: uninsdeletevalue; Tasks: autostart
 
 [Files]
 Source: "{#ManifestFile}"; DestName: "SecAgent.files.sha256"; Flags: dontcopy noencryption
