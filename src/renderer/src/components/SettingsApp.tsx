@@ -112,6 +112,33 @@ export function SettingsApp() {
     setProviderModalOpen(true);
     setSettings((current) => current && { ...current, models: current.models.filter((model) => model.id !== draft.id) });
   }, [settings, providerModalOpen]);
+  useEffect(() => {
+    const row = document.querySelector<HTMLElement>(".official-balance-row");
+    if (!row) {
+      document.querySelectorAll(".official-balance-groups").forEach((element) => element.remove());
+      return;
+    }
+    const value = row.querySelector<HTMLElement>(".points-value");
+    if (value) value.textContent = officialPointsBusy ? "读取中…" : officialPoints === null ? "暂不可用" : `${formatOfficialPoints(officialPoints)} Points`;
+    const host = row.parentElement;
+    if (!host) return;
+    let groups = host.querySelector<HTMLElement>(".official-balance-groups");
+    if (!groups) {
+      groups = document.createElement("div");
+      groups.className = "official-balance-groups";
+      host.insertBefore(groups, row.nextSibling);
+    }
+    groups.replaceChildren(...(officialPointBalances.length ? officialPointBalances.map((balance) => {
+      const item = document.createElement("div");
+      item.className = "official-balance-group";
+      const points = document.createElement("strong");
+      points.textContent = `${formatOfficialPoints(balance.points)} Points`;
+      const expiry = document.createElement("span");
+      expiry.textContent = formatOfficialBalanceExpiry(balance.expiresAt);
+      item.append(points, expiry);
+      return item;
+    }) : [Object.assign(document.createElement("span"), { textContent: "暂无有效额度" })]));
+  });
   if (isOobe) return <OobeWizard />;
   if (!settings) return <main className="settings-shell"><p>正在读取配置…</p></main>;
   const updateProvider = (patch: Partial<ProviderConfig>) => setEditingProvider((current) => current && { ...current, ...patch });
@@ -148,33 +175,6 @@ export function SettingsApp() {
     finally { setOfficialBusy(false); }
   };
   const officialLogout = async () => { await bridge.officialLogout(); setOfficialLoggedIn(false); setOfficialExpired(false); setOfficialPoints(null); setOfficialPointBalances([]); setSettings((current) => current && { ...current, providers: current.providers.filter((provider) => provider.id !== "sectl-official") }); };
-  useEffect(() => {
-    const row = document.querySelector<HTMLElement>(".official-balance-row");
-    if (!row) {
-      document.querySelectorAll(".official-balance-groups").forEach((element) => element.remove());
-      return;
-    }
-    const value = row.querySelector<HTMLElement>(".points-value");
-    if (value) value.textContent = officialPointsBusy ? "读取中…" : officialPoints === null ? "暂不可用" : `${formatOfficialPoints(officialPoints)} Points`;
-    const host = row.parentElement;
-    if (!host) return;
-    let groups = host.querySelector<HTMLElement>(".official-balance-groups");
-    if (!groups) {
-      groups = document.createElement("div");
-      groups.className = "official-balance-groups";
-      host.insertBefore(groups, row.nextSibling);
-    }
-    groups.replaceChildren(...(officialPointBalances.length ? officialPointBalances.map((balance) => {
-      const item = document.createElement("div");
-      item.className = "official-balance-group";
-      const points = document.createElement("strong");
-      points.textContent = `${formatOfficialPoints(balance.points)} Points`;
-      const expiry = document.createElement("span");
-      expiry.textContent = formatOfficialBalanceExpiry(balance.expiresAt);
-      item.append(points, expiry);
-      return item;
-    }) : [Object.assign(document.createElement("span"), { textContent: "暂无有效额度" })]));
-  });
   const defaultModel = availableModels.find((model) => model.id === settings.defaultModelId) || availableModels.find((model) => model.id === "sectl-official") || availableModels[0];
   const defaultReasoningEfforts = reasoningEffortsForModel(defaultModel);
   const defaultReasoningEffort = defaultReasoningEfforts.includes(settings.defaultReasoningEffort || "high") ? (settings.defaultReasoningEffort || "high") : defaultReasoningEfforts.includes("high") ? "high" : defaultReasoningEfforts[0];
