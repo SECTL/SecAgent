@@ -64,3 +64,17 @@ test("persists the autostart preference with the settings", () => {
     fs.rmSync(workspace, { recursive: true, force: true });
   }
 });
+
+test("defaults and persists Windows update preferences", () => {
+  const workspace = temporaryWorkspace();
+  try {
+    initializeWorkspace(workspace);
+    const settings = readSettings(workspace);
+    assert.deepEqual(settings.updates, { channel: "stable", autoCheck: true, autoDownload: true, autoInstallOnQuit: true });
+    const saved = saveSettings(workspace, { ...settings, updates: { channel: "preview", autoCheck: false, autoDownload: true, autoInstallOnQuit: false } });
+    assert.deepEqual(saved.updates, { channel: "preview", autoCheck: false, autoDownload: true, autoInstallOnQuit: false });
+    assert.deepEqual(readSettings(workspace).updates, saved.updates);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});

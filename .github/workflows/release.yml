@@ -1,0 +1,70 @@
+name: Publish Windows Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+      - name: Validate tag and package version
+        id: version
+        shell: pwsh
+        run: |
+          $package = Get-Content package.json -Raw | ConvertFrom-Json
+          $tagVersion = "${{ github.ref_name }}" -replace '^v', ''
+          if ($package.version -ne $tagVersion) {
+            throw "Git tag version $tagVersion does not match package.json version $($package.version)"
+          }
+          "version=$tagVersion" >> $env:GITHUB_OUTPUT
+
+      - name: Package Windows application directory
+        run: npm run package:windows
+
+      - name: Generate Windows installer file manifest
+        run: node scripts/create-installer-manifest.mjs release/win-unpacked release/SecAgent.files.sha256
+
+      - name: Build Inno Setup installer
+        uses: Minionguyjpro/Inno-Setup-Action@v1.2.9
+        with:
+          path: installer/SecAgent.iss
+          install_latest: true
+          options: >-
+            /DAppVersion=${{ steps.version.outputs.version }}
+            /DSourceDir=${{ github.workspace }}\release\win-unpacked
+            /DOutputDir=${{ github.workspace }}\release\inno
+            /DManifestFile=${{ github.workspace }}\release\SecAgent.files.sha256
+            /DOutputBaseFilename=SecAgent-Setup-${{ steps.version.outputs.version }}
+
+      - name: Generate installer checksum
+        shell: pwsh
+        run: |
+          $setup = "release\inno\SecAgent-Setup-${{ steps.version.outputs.version }}.exe"
+          if (-not (Test-Path -LiteralPath $setup)) { throw "Installer was not generated: $setup" }
+          $hash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $(Split-Path -Leaf $setup)" | Set-Content -LiteralPath "$setup.sha256" -Encoding ascii
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/inno/SecAgent-Setup-${{ steps.version.outputs.version }}.exe
+            release/inno/SecAgent-Setup-${{ steps.version.outputs.version }}.exe.sha256
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true

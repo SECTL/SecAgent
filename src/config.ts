@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
 import { expandPath } from "./paths.js";
-import type { McpServerConfig, ModelProfile, ProviderConfig, ReasoningEffort, SecAgentConfig } from "./types.js";
+import type { McpServerConfig, ModelProfile, ProviderConfig, ReasoningEffort, SecAgentConfig, UpdatePreferences } from "./types.js";
 import type { GoogleModelInfo } from "./google-models.js";
 import { DEFAULT_WAKE_HOTKEY, normalizeWakeHotkey } from "./wake-hotkey.js";
 
@@ -28,6 +28,7 @@ export const DEFAULT_SYSTEM_PROMPT = `你是 SecAgent，一个教育场景操作
 export const DEFAULT_TTS_VOICE = "zh-CN-XiaoxiaoNeural";
 export const DEFAULT_TTS_RATE = "+0%";
 export const DEFAULT_WAKE_PHRASE = "小泽同学";
+export const DEFAULT_UPDATE_PREFERENCES: UpdatePreferences = { channel: "stable", autoCheck: true, autoDownload: true, autoInstallOnQuit: true };
 
 const template = (workspace: string): SecAgentConfig => ({
   version: 1,
@@ -47,6 +48,7 @@ const template = (workspace: string): SecAgentConfig => ({
   } as SecAgentConfig["agent"],
   tts: { voice: DEFAULT_TTS_VOICE, rate: DEFAULT_TTS_RATE },
   wake: { hotkey: DEFAULT_WAKE_HOTKEY, voiceEnabled: false, voicePhrase: DEFAULT_WAKE_PHRASE },
+  updates: { ...DEFAULT_UPDATE_PREFERENCES },
   mcp: { servers: {} }
 });
 
@@ -209,6 +211,12 @@ export function normalizeAndValidate(raw: SecAgentConfig, workspace: string): Se
     raw.agent.systemPrompt = DEFAULT_SYSTEM_PROMPT;
   }
   raw.tts = { voice: raw.tts?.voice || DEFAULT_TTS_VOICE, rate: raw.tts?.rate || DEFAULT_TTS_RATE };
+  raw.updates = {
+    channel: raw.updates?.channel === "preview" ? "preview" : DEFAULT_UPDATE_PREFERENCES.channel,
+    autoCheck: raw.updates?.autoCheck !== false,
+    autoDownload: raw.updates?.autoDownload !== false,
+    autoInstallOnQuit: raw.updates?.autoInstallOnQuit !== false
+  };
   try { raw.wake = { hotkey: normalizeWakeHotkey(raw.wake?.hotkey || DEFAULT_WAKE_HOTKEY), ...(raw.wake?.modelId ? { modelId: raw.wake.modelId } : {}), voiceEnabled: raw.wake?.voiceEnabled === true, voicePhrase: typeof raw.wake?.voicePhrase === "string" && raw.wake.voicePhrase.trim() ? raw.wake.voicePhrase.trim() : DEFAULT_WAKE_PHRASE }; }
   catch (error) { errors.push(error instanceof Error ? error.message : "随时唤醒快捷键无效"); }
   delete (raw.agent as { systemPromptFile?: unknown }).systemPromptFile;
@@ -305,6 +313,7 @@ export interface SettingsPayload {
   tts: { voice: string; rate: string };
   wake: { hotkey: string; modelId?: string; voiceEnabled?: boolean; voicePhrase?: string };
   speech: { betterRecognition?: boolean };
+  updates: UpdatePreferences;
   mcp: { servers: Record<string, McpServerConfig> };
   defaultModelId?: string;
   defaultReasoningEffort?: ReasoningEffort;
@@ -329,7 +338,7 @@ export function readSettings(workspaceInput: string): SettingsPayload {
       maxTokens: config.agent.maxTokens
     }];
   const providers = config.agent.providers?.length ? config.agent.providers : groupLegacyModels(configured);
-  return { providers: providers.map((provider) => ({ ...provider, apiKeyConfigured: Boolean(process.env[provider.apiKeyEnv]) })), models: configured.map((model) => ({ ...model, apiKeyConfigured: Boolean(process.env[model.apiKeyEnv]) })), tts: { voice: config.tts?.voice || DEFAULT_TTS_VOICE, rate: config.tts?.rate || DEFAULT_TTS_RATE }, wake: { hotkey: config.wake?.hotkey || DEFAULT_WAKE_HOTKEY, ...(config.wake?.modelId ? { modelId: config.wake.modelId } : {}), voiceEnabled: config.wake?.voiceEnabled === true, voicePhrase: config.wake?.voicePhrase || DEFAULT_WAKE_PHRASE }, speech: { betterRecognition: config.speech?.betterRecognition === true }, mcp: config.mcp, defaultModelId: config.defaults?.modelId, defaultReasoningEffort: config.defaults?.reasoningEffort, autostart: config.defaults?.autostart === true, customModelMode: config.defaults?.customModelMode ?? false };
+  return { providers: providers.map((provider) => ({ ...provider, apiKeyConfigured: Boolean(process.env[provider.apiKeyEnv]) })), models: configured.map((model) => ({ ...model, apiKeyConfigured: Boolean(process.env[model.apiKeyEnv]) })), tts: { voice: config.tts?.voice || DEFAULT_TTS_VOICE, rate: config.tts?.rate || DEFAULT_TTS_RATE }, wake: { hotkey: config.wake?.hotkey || DEFAULT_WAKE_HOTKEY, ...(config.wake?.modelId ? { modelId: config.wake.modelId } : {}), voiceEnabled: config.wake?.voiceEnabled === true, voicePhrase: config.wake?.voicePhrase || DEFAULT_WAKE_PHRASE }, speech: { betterRecognition: config.speech?.betterRecognition === true }, updates: { ...(config.updates || DEFAULT_UPDATE_PREFERENCES) }, mcp: config.mcp, defaultModelId: config.defaults?.modelId, defaultReasoningEffort: config.defaults?.reasoningEffort, autostart: config.defaults?.autostart === true, customModelMode: config.defaults?.customModelMode ?? false };
 }
 
 function groupLegacyModels(models: ModelProfile[]): ProviderConfig[] {
@@ -362,7 +371,9 @@ export function saveSettings(workspaceInput: string, payload: SettingsPayload): 
   for (const field of LEGACY_AGENT_MODEL_FIELDS) delete (canonicalAgent as unknown as Record<string, unknown>)[field];
   const candidateAgent = { ...canonicalAgent, models: models.map((model) => ({ ...model })) } as SecAgentConfig["agent"];
   const nextSpeech = { betterRecognition: payload.speech?.betterRecognition === true };
-  const candidate: SecAgentConfig = { ...raw, agent: candidateAgent, tts: nextTts, wake: nextWake, speech: nextSpeech, mcp: payload.mcp };
+  const currentUpdates = raw.updates || DEFAULT_UPDATE_PREFERENCES;
+  const nextUpdates: UpdatePreferences = { channel: payload.updates?.channel === "preview" ? "preview" : payload.updates?.channel === "stable" ? "stable" : currentUpdates.channel, autoCheck: payload.updates ? payload.updates.autoCheck !== false : currentUpdates.autoCheck, autoDownload: payload.updates ? payload.updates.autoDownload !== false : currentUpdates.autoDownload, autoInstallOnQuit: payload.updates ? payload.updates.autoInstallOnQuit !== false : currentUpdates.autoInstallOnQuit };
+  const candidate: SecAgentConfig = { ...raw, agent: candidateAgent, tts: nextTts, wake: nextWake, speech: nextSpeech, updates: nextUpdates, mcp: payload.mcp };
   delete (candidate as SecAgentConfig & { policy?: unknown }).policy;
   // Validate a normalized copy, then persist only the canonical multi-model fields.
   normalizeAndValidate(candidate, workspace);
@@ -371,6 +382,7 @@ export function saveSettings(workspaceInput: string, payload: SettingsPayload): 
   raw.tts = nextTts;
   raw.wake = nextWake;
   raw.speech = nextSpeech;
+  raw.updates = nextUpdates;
   raw.mcp = payload.mcp;
   raw.defaults = { modelId: payload.defaultModelId || undefined, reasoningEffort: payload.defaultReasoningEffort || undefined, customModelMode: Boolean(payload.customModelMode), autostart: payload.autostart === true };
   delete (raw as SecAgentConfig & { policy?: unknown }).policy;

@@ -7,6 +7,10 @@ contextBridge.exposeInMainWorld("secagent", {
   listProviders: () => ipcRenderer.invoke("providers:list"),
   getSettings: () => ipcRenderer.invoke("settings:get"),
   openSettings: () => ipcRenderer.invoke("settings:open"),
+  getUpdateState: () => ipcRenderer.invoke("updates:get-state"),
+  checkForUpdate: () => ipcRenderer.invoke("updates:check"),
+  downloadUpdate: () => ipcRenderer.invoke("updates:download"),
+  installUpdate: () => ipcRenderer.invoke("updates:install"),
   officialStatus: () => ipcRenderer.invoke("official:status"),
   officialBalance: () => ipcRenderer.invoke("official:balance"),
   officialOAuthLogin: () => ipcRenderer.invoke("official:oauth-login"),
@@ -89,6 +93,11 @@ contextBridge.exposeInMainWorld("secagent", {
     const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
     ipcRenderer.on("settings:changed", wrapped);
     return () => ipcRenderer.removeListener("settings:changed", wrapped);
+  },
+  onUpdateState: (listener: (state: unknown) => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
+    ipcRenderer.on("updates:state", wrapped);
+    return () => ipcRenderer.removeListener("updates:state", wrapped);
   },
   onPluginsChanged: (listener: (plugins: unknown) => void) => {
     const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);

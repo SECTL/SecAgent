@@ -47,6 +47,44 @@ export interface AgentConfig {
 
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
+export type UpdateChannel = "stable" | "preview";
+
+export interface UpdatePreferences {
+  channel: UpdateChannel;
+  autoCheck: boolean;
+  autoDownload: boolean;
+  autoInstallOnQuit: boolean;
+}
+
+export type UpdateStatus = "unsupported" | "idle" | "checking" | "up-to-date" | "available" | "downloading" | "downloaded" | "installing" | "error";
+
+export interface UpdateRelease {
+  version: string;
+  tag: string;
+  releaseType?: "alpha" | "beta";
+  channel: UpdateChannel;
+  htmlUrl: string;
+  body: string;
+  publishedAt?: string;
+  assetName: string;
+  assetUrl: string;
+  checksumUrl?: string;
+  sha256?: string;
+  size?: number;
+}
+
+export interface UpdateState {
+  currentVersion: string;
+  channel: UpdateChannel;
+  status: UpdateStatus;
+  release?: UpdateRelease;
+  downloadedVersion?: string;
+  downloadedBytes: number;
+  totalBytes?: number;
+  checkedAt?: string;
+  error?: string;
+}
+
 /** An image selected in the desktop composer, persisted with the user message. */
 export interface ChatAttachment {
   id: string;
@@ -63,6 +101,7 @@ export interface SecAgentConfig {
   tts?: { voice?: string; rate?: string };
   wake?: { hotkey?: string; modelId?: string; voiceEnabled?: boolean; voicePhrase?: string };
   speech?: { betterRecognition?: boolean };
+  updates?: UpdatePreferences;
   mcp: { servers: Record<string, McpServerConfig> };
   defaults?: { modelId?: string; reasoningEffort?: ReasoningEffort; customModelMode?: boolean; autostart?: boolean };
 }

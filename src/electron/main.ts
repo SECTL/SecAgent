@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, screen, session, shell, Tray } from "electron";
+import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -12,7 +13,7 @@ import { SecAgentRuntime, type TraceEvent } from "../runtime.js";
 import type { ConversationMessage } from "../model-provider.js";
 import { SessionStore, type AssistantActivity, type SessionData, type ToolCallRecord } from "../session-store.js";
 import { sendSpeechAudio, sendVoiceWakeAudio, startSpeech, startVoiceWake, stopSpeech, stopVoiceWake } from "./speech.js";
-import type { ChatAttachment, ReasoningEffort } from "../types.js";
+import type { ChatAttachment, ReasoningEffort, UpdateState } from "../types.js";
 import { listGoogleModels } from "../google-models.js";
 import { synthesizeSpeech } from "./tts.js";
 import { PluginManager, type SvgPreviewRequest } from "../plugin-manager.js";
@@ -26,6 +27,7 @@ import { Models } from "@opencode-ai/models";
 import { DEFAULT_WAKE_HOTKEY, normalizeWakeHotkey } from "../wake-hotkey.js";
 import { generateSessionTitle } from "../session-title.js";
 import { normalizeReasoningEffort } from "../reasoning.js";
+import { WindowsUpdateManager } from "./update-manager.js";
 
 let windowRef: BrowserWindow | undefined;
 let settingsWindow: BrowserWindow | undefined;
@@ -36,6 +38,7 @@ let wakeWindow: BrowserWindow | undefined;
 let voiceWakeWindow: BrowserWindow | undefined;
 let pluginManager: PluginManager | undefined;
 let secAgentHttpServer: SecAgentHttpServer | undefined;
+let updateManager: WindowsUpdateManager | undefined;
 let activeWakeShortcut: string | undefined;
 let activeWakeContext: { sessionId?: string; modelId?: string; reasoningEffort?: ReasoningEffort } = {};
 let wakeAbortController: AbortController | undefined;
@@ -45,9 +48,11 @@ const secRandomInstaller = new SecRandomInstaller({ log: logMain });
 const iccceInstaller = new IccceInstaller({ log: logMain });
 const activeSessionRuns = new Map<string, AbortController>();
 const MARKETPLACE_UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const AUTO_START_ARG = "--autostart";
 const AUTO_START_ARGS = [AUTO_START_ARG];
 let marketplaceUpdateTimer: NodeJS.Timeout | undefined;
+let updateCheckTimer: NodeJS.Timeout | undefined;
 
 function isAutostartLaunch(): boolean {
   return process.platform === "win32" && process.argv.includes(AUTO_START_ARG);
@@ -69,6 +74,13 @@ function readWindowsAutostart(): boolean {
 function writeWindowsAutostart(enabled: boolean): void {
   if (process.platform !== "win32") return;
   app.setLoginItemSettings({ openAtLogin: enabled, path: process.execPath, args: AUTO_START_ARGS });
+}
+
+function launchWindowsInstaller(installerPath: string): void {
+  if (process.platform !== "win32") throw new Error("更新安装仅支持 Windows");
+  const child = spawn(installerPath, ["/SP-", "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"], { detached: true, stdio: "ignore", windowsHide: true });
+  child.once("error", (error) => logMain("updates.install.process.failed", { error: error.message, path: installerPath }));
+  child.unref();
 }
 
 async function updateInstalledPlugins(): Promise<void> {
@@ -211,7 +223,7 @@ async function openWorkspaceFilePreview(relativePath: string): Promise<{ ok: tru
 }
 
 function sendToAppWindows(channel: string, payload: unknown): void {
-  for (const target of [windowRef, wakeWindow]) {
+  for (const target of [windowRef, settingsWindow, wakeWindow]) {
     if (!target || target.isDestroyed() || target.webContents.isDestroyed()) continue;
     try {
       target.webContents.send(channel, payload);
@@ -587,6 +599,16 @@ ipcMain.handle("settings:get", () => {
   return process.platform === "win32" ? { ...settings, autostart: readWindowsAutostart() } : settings;
 });
 ipcMain.handle("settings:open", () => { openSettings(); return { ok: true }; });
+ipcMain.handle("updates:get-state", () => updateManager?.getState() || ({ currentVersion: app.getVersion(), channel: "stable", status: "unsupported", downloadedBytes: 0 } satisfies UpdateState));
+ipcMain.handle("updates:check", () => updateManager?.check(false) || ({ currentVersion: app.getVersion(), channel: "stable", status: "unsupported", downloadedBytes: 0 } satisfies UpdateState));
+ipcMain.handle("updates:download", async () => {
+  if (!updateManager) throw new Error("更新服务尚未启动");
+  return updateManager.download();
+});
+ipcMain.handle("updates:install", () => {
+  if (!updateManager) throw new Error("更新服务尚未启动");
+  return updateManager.install();
+});
 ipcMain.handle("settings:skills", () => {
   const { config } = loadConfig(DEFAULT_WORKSPACE);
   return loadEnabledSkills(config).map((skill) => ({ name: skill.name, description: skill.description, path: skill.path }));
@@ -831,6 +853,7 @@ ipcMain.handle("settings:save", (_event, payload: SettingsPayload) => {
     activeWakeShortcut = nextWakeHotkey;
   }
   sendToAppWindows("settings:changed", saved);
+  updateManager?.setPreferences(saved.updates);
   closeVoiceWakeWindow();
   if (saved.wake.voiceEnabled) void startConfiguredVoiceWake().catch((error) => logMain("voice-wake.start.failed", { error: String(error) }));
   return saved;
@@ -992,6 +1015,18 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
 app.whenReady().then(async () => {
   const needsOnboarding = !fs.existsSync(configPath(DEFAULT_WORKSPACE)) || !isOnboardingComplete(DEFAULT_WORKSPACE);
   initializeWorkspace(DEFAULT_WORKSPACE);
+  const initialSettings = readSettings(DEFAULT_WORKSPACE);
+  updateManager = new WindowsUpdateManager({
+    currentVersion: app.getVersion(),
+    preferences: initialSettings.updates,
+    platform: process.platform,
+    isPackaged: app.isPackaged,
+    storageDirectory: app.getPath("userData"),
+    publish: (state) => sendToAppWindows("updates:state", state),
+    quit: () => app.quit(),
+    launchInstaller: launchWindowsInstaller,
+    log: logMain
+  });
   pluginManager = new PluginManager(DEFAULT_WORKSPACE, {
     getSession: async () => {
       loadConfig(DEFAULT_WORKSPACE);
@@ -1013,6 +1048,10 @@ app.whenReady().then(async () => {
   initialMarketplaceUpdate.unref?.();
   marketplaceUpdateTimer = setInterval(() => { void updateInstalledPlugins(); }, MARKETPLACE_UPDATE_INTERVAL_MS);
   marketplaceUpdateTimer.unref?.();
+  const initialUpdateCheck = setTimeout(() => { void updateManager?.check(true); }, 5_000);
+  initialUpdateCheck.unref?.();
+  updateCheckTimer = setInterval(() => { void updateManager?.check(true); }, UPDATE_CHECK_INTERVAL_MS);
+  updateCheckTimer.unref?.();
   // Electron otherwise rejects getUserMedia requests in some desktop environments.
   // Speech audio is streamed to the official cloud ASR service.
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
@@ -1030,7 +1069,6 @@ app.whenReady().then(async () => {
   logMain("app.ready");
   createWindow(!needsOnboarding && !isAutostartLaunch());
   try {
-    const initialSettings = readSettings(DEFAULT_WORKSPACE);
     registerWakeShortcut(initialSettings.wake.hotkey || DEFAULT_WAKE_HOTKEY);
     if (initialSettings.wake.voiceEnabled) void startConfiguredVoiceWake().catch((error) => logMain("voice-wake.start.failed", { error: String(error) }));
   }
@@ -1038,5 +1076,5 @@ app.whenReady().then(async () => {
   if (needsOnboarding) openSettings(true);
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
-app.on("before-quit", () => { isQuitting = true; closeWakeWindow(); closeVoiceWakeWindow(); globalShortcut.unregisterAll(); if (marketplaceUpdateTimer) clearInterval(marketplaceUpdateTimer); void secAgentHttpServer?.stop(); void pluginManager?.shutdown(); });
+app.on("before-quit", () => { updateManager?.handleBeforeQuit(); isQuitting = true; closeWakeWindow(); closeVoiceWakeWindow(); globalShortcut.unregisterAll(); if (marketplaceUpdateTimer) clearInterval(marketplaceUpdateTimer); if (updateCheckTimer) clearInterval(updateCheckTimer); void secAgentHttpServer?.stop(); void pluginManager?.shutdown(); });
 app.on("window-all-closed", () => { /* Keep the process alive so the tray can reopen the main window. */ });

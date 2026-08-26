@@ -6,13 +6,18 @@ interface SessionMessage { id: string; role: "user" | "assistant"; content: stri
 interface SessionData { meta: SessionMeta; messages: SessionMessage[] }
 interface SessionRuntimeEvent { sessionId: string; sequence: number; at: string; stage: string; data: unknown }
 type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+type UpdateChannel = "stable" | "preview";
+type UpdateStatus = "unsupported" | "idle" | "checking" | "up-to-date" | "available" | "downloading" | "downloaded" | "installing" | "error";
+interface UpdatePreferences { channel: UpdateChannel; autoCheck: boolean; autoDownload: boolean; autoInstallOnQuit: boolean }
+interface UpdateRelease { version: string; tag: string; releaseType?: "alpha" | "beta"; channel: UpdateChannel; htmlUrl: string; body: string; publishedAt?: string; assetName: string; assetUrl: string; checksumUrl?: string; sha256?: string; size?: number }
+interface UpdateState { currentVersion: string; channel: UpdateChannel; status: UpdateStatus; release?: UpdateRelease; downloadedVersion?: string; downloadedBytes: number; totalBytes?: number; checkedAt?: string; error?: string }
 interface ModelOption { id: string; name: string; model: string; provider: string }
 interface ModelProfile { id: string; name?: string; enabled?: boolean; provider: "openai-compatible" | "openai-responses" | "anthropic" | "google"; model: string; apiKeyEnv: string; apiKey?: string; apiKeyConfigured?: boolean; baseUrl: string; endpoint?: string; anthropicVersion?: string; maxTokens?: number }
 interface McpServerConfig { transport: "stdio" | "http"; command?: string; args?: string[]; url?: string; enabled: boolean }
 interface ProviderModel { id: string; name?: string; enabled?: boolean }
 interface ProviderConfig { id: string; name: string; preset?: string; provider: ModelProfile["provider"]; apiKeyEnv: string; apiKey?: string; apiKeyConfigured?: boolean; baseUrl: string; endpoint?: string; anthropicVersion?: string; maxTokens?: number; models: ProviderModel[] }
 interface ProviderPreset { id: string; name: string; env: string[]; api: string; models: ProviderModel[] }
-interface SettingsPayload { providers: ProviderConfig[]; models: ModelProfile[]; tts: { voice: string; rate: string }; wake: { hotkey: string; modelId?: string; voiceEnabled?: boolean; voicePhrase?: string }; speech: { betterRecognition?: boolean }; mcp: { servers: Record<string, McpServerConfig> }; defaultModelId?: string; defaultReasoningEffort?: ReasoningEffort; autostart?: boolean; customModelMode?: boolean }
+interface SettingsPayload { providers: ProviderConfig[]; models: ModelProfile[]; tts: { voice: string; rate: string }; wake: { hotkey: string; modelId?: string; voiceEnabled?: boolean; voicePhrase?: string }; speech: { betterRecognition?: boolean }; updates: UpdatePreferences; mcp: { servers: Record<string, McpServerConfig> }; defaultModelId?: string; defaultReasoningEffort?: ReasoningEffort; autostart?: boolean; customModelMode?: boolean }
 interface SkillSummary { name: string; description: string; path: string }
 interface PluginStatus { id: string; format?: "secagent" | "agent"; name: string; version: string; icon?: string; enabled: boolean; state: "inactive" | "starting" | "error" | "ready"; message?: string; description?: string; author?: string; repository?: string; permissions?: string[]; readme?: string; settingsPages: Array<{ id: string; title: string; description?: string }> }
 interface MarketplaceVersion { version: string; minHostApiVersion: number; assetUrl: string; sha256: string; permissions: string[]; platforms: string[] }
@@ -37,6 +42,10 @@ interface Window {
     listProviders(): Promise<ProviderPreset[]>;
     getSettings(): Promise<SettingsPayload>;
     openSettings(): Promise<{ ok: true }>;
+    getUpdateState(): Promise<UpdateState>;
+    checkForUpdate(): Promise<UpdateState>;
+    downloadUpdate(): Promise<UpdateState>;
+    installUpdate(): Promise<UpdateState>;
     officialStatus(): Promise<{ loggedIn: boolean; email: string }>;
     officialBalance(): Promise<{ points: number | null; balances: Array<{ points: number; expiresAt: string | null }>; expired: boolean }>;
     officialOAuthLogin(): Promise<SettingsPayload>;
@@ -92,6 +101,7 @@ interface Window {
     onSpeechEvent(listener: (event: unknown) => void): () => void;
     onVoiceWakeResume(listener: () => void): () => void;
     onSettingsChanged(listener: (settings: SettingsPayload) => void): () => void;
+    onUpdateState(listener: (state: UpdateState) => void): () => void;
     onPluginsChanged(listener: (plugins: PluginStatus[]) => void): () => void;
   };
 }

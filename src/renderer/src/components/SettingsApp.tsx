@@ -16,6 +16,17 @@ function WakeHotkeyField({ value, platform, onChange }: { value: string; platfor
   </div>;
 }
 
+function updateReleaseLabel(release: UpdateRelease | undefined, channel: UpdateChannel): string {
+  if (release?.releaseType === "alpha") return "内测版";
+  if (release?.releaseType === "beta") return "测试版";
+  return channel === "preview" ? "预览版" : "稳定版";
+}
+
+function formatUpdateBytes(value: number): string {
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
 export function SettingsApp() {
   const bridge = window.secagent;
   const isOobe = new URLSearchParams(window.location.search).get("oobe") === "1";
@@ -35,11 +46,12 @@ export function SettingsApp() {
   const [officialLoggedIn, setOfficialLoggedIn] = useState(false);
   const [officialExpired, setOfficialExpired] = useState(false);
   const [officialBusy, setOfficialBusy] = useState(false);
+  const [updateState, setUpdateState] = useState<UpdateState | null>(null);
   const settingsLoaded = useRef(false);
   const skipAutosave = useRef(true);
   const [activePage, setActivePage] = useState(() => {
     const hash = window.location.hash.replace(/^#/, "");
-    const builtInPage = ["settings-wake", "settings-tts", "settings-speech", "settings-models", "settings-mcp", "settings-plugins", "settings-system"].includes(hash);
+    const builtInPage = ["settings-wake", "settings-tts", "settings-speech", "settings-models", "settings-mcp", "settings-plugins", "settings-system", "settings-updates"].includes(hash);
     const supportedPage = hash !== "settings-system" || bridge.platform === "win32";
     return isOobe ? "settings-models" : (supportedPage && (builtInPage || hash.startsWith("plugin-")) ? hash : "settings-tts");
   });
@@ -58,6 +70,10 @@ export function SettingsApp() {
   useEffect(() => {
     void bridge.listPlugins().then(setPlugins).catch((reason) => setError(String(reason)));
     return bridge.onPluginsChanged(setPlugins);
+  }, [bridge]);
+  useEffect(() => {
+    void bridge.getUpdateState().then(setUpdateState).catch(() => undefined);
+    return bridge.onUpdateState(setUpdateState);
   }, [bridge]);
   const refreshOfficialPoints = async () => {
     setOfficialPointsBusy(true);
@@ -175,15 +191,48 @@ export function SettingsApp() {
     finally { setOfficialBusy(false); }
   };
   const officialLogout = async () => { await bridge.officialLogout(); setOfficialLoggedIn(false); setOfficialExpired(false); setOfficialPoints(null); setOfficialPointBalances([]); setSettings((current) => current && { ...current, providers: current.providers.filter((provider) => provider.id !== "sectl-official") }); };
+  const checkForUpdate = async () => {
+    setError("");
+    try { setUpdateState(await bridge.checkForUpdate()); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+  };
+  const downloadUpdate = async () => {
+    setError("");
+    try { setUpdateState(await bridge.downloadUpdate()); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+  };
+  const installUpdate = async () => {
+    setError("");
+    try { setUpdateState(await bridge.installUpdate()); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+  };
   const defaultModel = availableModels.find((model) => model.id === settings.defaultModelId) || availableModels.find((model) => model.id === "sectl-official") || availableModels[0];
   const defaultReasoningEfforts = reasoningEffortsForModel(defaultModel);
   const defaultReasoningEffort = defaultReasoningEfforts.includes(settings.defaultReasoningEffort || "high") ? (settings.defaultReasoningEffort || "high") : defaultReasoningEfforts.includes("high") ? "high" : defaultReasoningEfforts[0];
+  const updateSupported = bridge.platform === "win32";
+  const updateProgress = updateState?.totalBytes ? Math.min(100, Math.round(updateState.downloadedBytes / updateState.totalBytes * 100)) : undefined;
+  const updateReleaseType = updateReleaseLabel(updateState?.release, settings.updates.channel);
   return <main className={`settings-shell has-window-title ${isOobe ? "oobe-shell" : ""} ${bridge.platform === "darwin" ? "macos-settings" : ""} ${bridge.platform === "win32" ? "windows-settings" : ""}`}>
     <div className="settings-window-title">SecAgent设置</div>
-    {!isOobe && <nav className="settings-nav" aria-label="Settings navigation"><button type="button" className={activePage === "settings-wake" ? "active" : ""} aria-current={activePage === "settings-wake" ? "page" : undefined} onClick={() => { setActivePage("settings-wake"); window.history.replaceState(null, "", "#settings-wake"); }}>随时唤醒</button>{bridge.platform === "win32" && <button type="button" className={activePage === "settings-system" ? "active" : ""} aria-current={activePage === "settings-system" ? "page" : undefined} onClick={() => { setActivePage("settings-system"); window.history.replaceState(null, "", "#settings-system"); }}>系统</button>}<button type="button" className={activePage === "settings-tts" ? "active" : ""} aria-current={activePage === "settings-tts" ? "page" : undefined} onClick={() => { setActivePage("settings-tts"); window.history.replaceState(null, "", "#settings-tts"); }}>朗读</button><button type="button" className={activePage === "settings-speech" ? "active" : ""} aria-current={activePage === "settings-speech" ? "page" : undefined} onClick={() => { setActivePage("settings-speech"); window.history.replaceState(null, "", "#settings-speech"); }}>语音识别</button><button type="button" className={activePage === "settings-models" ? "active" : ""} aria-current={activePage === "settings-models" ? "page" : undefined} onClick={() => { setActivePage("settings-models"); window.history.replaceState(null, "", "#settings-models"); }}>模型</button><button type="button" className={activePage === "settings-mcp" ? "active" : ""} aria-current={activePage === "settings-mcp" ? "page" : undefined} onClick={() => { setActivePage("settings-mcp"); window.history.replaceState(null, "", "#settings-mcp"); }}>MCP 服务</button><button type="button" className={activePage === "settings-plugins" ? "active" : ""} aria-current={activePage === "settings-plugins" ? "page" : undefined} onClick={() => { setActivePage("settings-plugins"); window.history.replaceState(null, "", "#settings-plugins"); }}>插件</button>{plugins.flatMap((plugin) => plugin.settingsPages.map((page) => { const pageId = `plugin-${plugin.id}-${page.id}`; return <button type="button" className={activePage === pageId ? "active" : ""} aria-current={activePage === pageId ? "page" : undefined} key={pageId} onClick={() => { setActivePage(pageId); window.history.replaceState(null, "", `#${pageId}`); }}>{page.title}</button>; }))}</nav>}
+    {!isOobe && <nav className="settings-nav" aria-label="Settings navigation"><button type="button" className={activePage === "settings-wake" ? "active" : ""} aria-current={activePage === "settings-wake" ? "page" : undefined} onClick={() => { setActivePage("settings-wake"); window.history.replaceState(null, "", "#settings-wake"); }}>随时唤醒</button>{bridge.platform === "win32" && <button type="button" className={activePage === "settings-system" ? "active" : ""} aria-current={activePage === "settings-system" ? "page" : undefined} onClick={() => { setActivePage("settings-system"); window.history.replaceState(null, "", "#settings-system"); }}>系统</button>}<button type="button" className={activePage === "settings-updates" ? "active" : ""} aria-current={activePage === "settings-updates" ? "page" : undefined} onClick={() => { setActivePage("settings-updates"); window.history.replaceState(null, "", "#settings-updates"); }}>更新</button><button type="button" className={activePage === "settings-tts" ? "active" : ""} aria-current={activePage === "settings-tts" ? "page" : undefined} onClick={() => { setActivePage("settings-tts"); window.history.replaceState(null, "", "#settings-tts"); }}>朗读</button><button type="button" className={activePage === "settings-speech" ? "active" : ""} aria-current={activePage === "settings-speech" ? "page" : undefined} onClick={() => { setActivePage("settings-speech"); window.history.replaceState(null, "", "#settings-speech"); }}>语音识别</button><button type="button" className={activePage === "settings-models" ? "active" : ""} aria-current={activePage === "settings-models" ? "page" : undefined} onClick={() => { setActivePage("settings-models"); window.history.replaceState(null, "", "#settings-models"); }}>模型</button><button type="button" className={activePage === "settings-mcp" ? "active" : ""} aria-current={activePage === "settings-mcp" ? "page" : undefined} onClick={() => { setActivePage("settings-mcp"); window.history.replaceState(null, "", "#settings-mcp"); }}>MCP 服务</button><button type="button" className={activePage === "settings-plugins" ? "active" : ""} aria-current={activePage === "settings-plugins" ? "page" : undefined} onClick={() => { setActivePage("settings-plugins"); window.history.replaceState(null, "", "#settings-plugins"); }}>插件</button>{plugins.flatMap((plugin) => plugin.settingsPages.map((page) => { const pageId = `plugin-${plugin.id}-${page.id}`; return <button type="button" className={activePage === pageId ? "active" : ""} aria-current={activePage === pageId ? "page" : undefined} key={pageId} onClick={() => { setActivePage(pageId); window.history.replaceState(null, "", `#${pageId}`); }}>{page.title}</button>; }))}</nav>}
     {error && <div className="settings-error">{error}</div>}
     <section id="settings-wake" className={`settings-section ${isOobe || activePage === "settings-wake" ? "settings-section-active" : ""}`}><div className="section-title"><div><h2>随时唤醒</h2><p>按下全局快捷键后，在当前显示器工作区唤起语音 Agent。窗口不会覆盖任务栏。</p></div></div>
       <article className="settings-card"><WakeHotkeyField value={settings.wake.hotkey} platform={bridge.platform} onChange={(hotkey) => setSettings((current) => current && { ...current, wake: { ...current.wake, hotkey } })} /><div className="form-grid wake-model-setting"><label>随时唤起使用的模型<select value={settings.wake.modelId || settings.defaultModelId || availableModels[0]?.id || ""} onChange={(event) => setSettings((current) => current && { ...current, wake: { ...current.wake, modelId: event.target.value } })}>{availableModels.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label></div><label className="toggle-row"><span className="toggle-copy"><strong>语音唤醒</strong><small>开启后持续使用麦克风，识别到唤醒词后等同于按下上面的快捷键。</small></span><input type="checkbox" checked={settings.wake.voiceEnabled === true} onChange={(event) => setSettings((current) => current && { ...current, wake: { ...current.wake, voiceEnabled: event.target.checked } })} /></label><label>唤醒词<input value={settings.wake.voicePhrase || "小泽同学"} onChange={(event) => setSettings((current) => current && { ...current, wake: { ...current.wake, voicePhrase: event.target.value } })} placeholder="小泽同学" /></label><p className="settings-help">Windows 默认 Ctrl Alt A；macOS 默认 Ctrl Option A。语音唤醒始终使用随安装包提供的本地模型，无需网络。</p></article>
+    </section>
+    <section id="settings-updates" className={`settings-section ${activePage === "settings-updates" ? "settings-section-active" : ""}`}><div className="section-title"><div><h2>更新</h2><p>从 GitHub Release 获取 SecAgent 更新。当前仅支持 Windows 安装包更新。</p></div></div>
+      <article className="settings-card update-settings-card">
+        {!updateSupported ? <p className="settings-help">当前平台暂不支持应用内更新。</p> : <>
+          <div className="update-version-row"><div><span className="settings-help">当前版本</span><strong>{updateState?.currentVersion || "读取中…"}</strong></div><button type="button" className="secondary-button" disabled={updateState?.status === "checking"} onClick={() => void checkForUpdate()}>{updateState?.status === "checking" ? "检查中…" : "检查更新"}</button></div>
+          <div className="form-grid update-channel-grid"><label>更新通道<select value={settings.updates.channel} onChange={(event) => setSettings((current) => current && { ...current, updates: { ...current.updates, channel: event.target.value as UpdateChannel } })}><option value="stable">普通版</option><option value="preview">预览版</option></select></label></div>
+          <label className="toggle-row"><span className="toggle-copy"><strong>自动检查更新</strong><small>启动后及每 6 小时检查一次 GitHub Release。</small></span><input type="checkbox" checked={settings.updates.autoCheck} onChange={(event) => setSettings((current) => current && { ...current, updates: { ...current.updates, autoCheck: event.target.checked } })} /></label>
+          <label className="toggle-row"><span className="toggle-copy"><strong>自动下载更新</strong><small>自动检查发现新版本后，后台下载完整 Windows 安装包。</small></span><input type="checkbox" checked={settings.updates.autoDownload} onChange={(event) => setSettings((current) => current && { ...current, updates: { ...current.updates, autoDownload: event.target.checked } })} /></label>
+          <label className="toggle-row"><span className="toggle-copy"><strong>退出应用后自动安装</strong><small>已有下载完成的更新时，在应用退出过程中静默运行安装程序。</small></span><input type="checkbox" checked={settings.updates.autoInstallOnQuit} onChange={(event) => setSettings((current) => current && { ...current, updates: { ...current.updates, autoInstallOnQuit: event.target.checked } })} /></label>
+          {updateState?.status === "downloading" && <div className="update-progress"><div className="update-progress-label"><span>正在下载 {updateState.release?.version || "更新"}</span><span>{updateProgress === undefined ? formatUpdateBytes(updateState.downloadedBytes) : `${updateProgress}%`}</span></div><progress max="100" value={updateProgress ?? 0} /></div>}
+          {updateState?.status === "up-to-date" && <p className="settings-help update-success">当前已是最新的{settings.updates.channel === "preview" ? "预览" : "稳定"}版本。</p>}
+          {updateState?.release && <div className="update-release-card"><div className="card-heading"><div><strong>{updateState.release.version}</strong><span>{updateReleaseType}{updateState.release.publishedAt ? ` · ${new Date(updateState.release.publishedAt).toLocaleDateString()}` : ""}</span></div><button type="button" className="text-button" onClick={() => void bridge.openExternal(updateState.release!.htmlUrl)}>查看 Release</button></div>{updateState.release.body && <pre className="update-release-notes">{updateState.release.body}</pre>}<div className="update-actions">{updateState.status === "available" && <button type="button" className="primary-button" onClick={() => void downloadUpdate()}>下载更新</button>}{updateState.status === "downloaded" && <><span className="update-downloaded">已下载 {updateState.downloadedVersion}</span><button type="button" className="primary-button" onClick={() => void installUpdate()}>立即安装</button></>}{updateState.status === "installing" && <span className="update-downloaded">正在准备安装，应用即将退出…</span>}</div></div>}
+          {updateState?.status === "downloaded" && !updateState.release && <div className="update-release-card"><div className="card-heading"><div><strong>{updateState.downloadedVersion}</strong><span>已下载，等待安装</span></div><button type="button" className="primary-button" onClick={() => void installUpdate()}>立即安装</button></div></div>}
+        </>}
+      </article>
     </section>
     <section id="settings-tts" className={`settings-section ${isOobe || activePage === "settings-tts" ? "settings-section-active" : ""}`}><div className="section-title"><div><h2>朗读</h2><p>右键助手消息气泡选择“朗读”。语音由 Microsoft Edge 在线生成，不需要 API Key。</p></div></div>
       <article className="settings-card"><div className="form-grid"><label>语音音色<select value={settings.tts.voice} onChange={(event) => setSettings((current) => current && { ...current, tts: { ...current.tts, voice: event.target.value } })}>{ttsVoices.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>语速<select value={settings.tts.rate} onChange={(event) => setSettings((current) => current && { ...current, tts: { ...current.tts, rate: event.target.value } })}>{ttsRates.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></div></article>
