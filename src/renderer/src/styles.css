@@ -376,7 +376,7 @@ html.wake-mode, html.wake-mode body, body.wake-mode { min-width: 0; overflow: hi
 .oobe-model-add input { width: 180px; padding: 7px 9px; border: 1px solid #d8d8d8; border-radius: 7px; }
 .oobe-plugin-list { max-width: 760px; margin: 0 auto 22px; }
 .oobe-plugin-list h2 { margin: 0 0 10px; font-size: 15px; }
-.oobe-plugin-card { display: flex; align-items: center; justify-content: space-between; gap: 16px; position: relative; overflow: hidden; border-radius: 0; box-shadow: none; }
+.oobe-plugin-card { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; position: relative; overflow: hidden; border-radius: 0; box-shadow: none; }
 .oobe-plugin-card::before { content: ""; position: absolute; z-index: 0; top: 0; bottom: 0; left: -38%; width: 38%; pointer-events: none; background: linear-gradient(90deg, transparent, rgba(35,137,236,.16), rgba(35,137,236,.28)); }
 .oobe-plugin-card.is-installing::before { animation: oobe-plugin-install-progress 1.15s ease-in-out infinite; }
 .oobe-plugin-card > * { position: relative; z-index: 1; }
@@ -390,7 +390,17 @@ html.wake-mode, html.wake-mode body, body.wake-mode { min-width: 0; overflow: hi
 .oobe-plugin-card-classisland { flex-wrap: wrap; }
 .oobe-plugin-card-secrandom { flex-wrap: wrap; }
 .oobe-plugin-card-iccce { flex-wrap: wrap; }
-.oobe-plugin-side-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-left: auto; }
+.oobe-plugin-side-actions { display: grid; gap: 7px; min-width: 310px; margin-left: auto; }
+.oobe-plugin-side-actions-single { display: flex; align-items: center; justify-content: flex-end; gap: 10px; min-height: 34px; }
+.oobe-plugin-side-action { display: grid; grid-template-columns: 92px minmax(0, auto); align-items: center; justify-content: end; gap: 9px; min-height: 34px; }
+.oobe-plugin-side-label { color: #6f7780; font-size: 11px; font-weight: 650; white-space: nowrap; }
+.oobe-plugin-side-action > .oobe-plugin-side-label { text-align: right; }
+.oobe-plugin-side-action .primary-button,
+.oobe-plugin-side-action .secondary-button,
+.oobe-plugin-side-actions-single .primary-button { padding: 7px 10px; font-size: 12px; white-space: nowrap; }
+.oobe-plugin-side-state { display: inline-flex; align-items: center; justify-content: flex-start; gap: 5px; min-height: 28px; color: #69747e; font-size: 12px; white-space: nowrap; }
+.oobe-plugin-side-state.is-installed { color: #176b39; }
+.oobe-plugin-side-state.is-unavailable { color: #9a5b00; }
 .oobe-classisland-targets { flex: 1 0 100%; display: grid; gap: 8px; padding-top: 4px; }
 .oobe-classisland-target-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .oobe-classisland-target-heading strong { font-size: 13px; }
@@ -424,7 +434,7 @@ html.wake-mode, html.wake-mode body, body.wake-mode { min-width: 0; overflow: hi
 .oobe-plugin-state { color: #176b39; font-size: 13px; white-space: nowrap; }
 .oobe-actions { display: flex; justify-content: flex-end; gap: 8px; max-width: 760px; margin: 8px auto 0; }
 .primary-button:disabled { opacity: .55; cursor: not-allowed; }
-@media (max-width: 640px) { .oobe-plugin-heading { align-items: flex-start; flex-direction: column; } .oobe-plugin-side-actions { flex-basis: 100%; justify-content: flex-start; margin-left: 54px; } .oobe-classisland-target-heading { align-items: flex-start; flex-direction: column; } }
+@media (max-width: 640px) { .oobe-plugin-heading { align-items: flex-start; flex-direction: column; } .oobe-plugin-side-actions { width: 100%; min-width: 0; margin-left: 54px; } .oobe-plugin-side-actions-single { justify-content: flex-start; } .oobe-plugin-side-action { grid-template-columns: 92px minmax(0, 1fr); justify-content: start; } .oobe-classisland-target-heading { align-items: flex-start; flex-direction: column; } }
 @media (prefers-reduced-motion: reduce) { .oobe-page, .oobe-page-exit.oobe-page-forward, .oobe-page-exit.oobe-page-back, .oobe-page-enter.oobe-page-forward, .oobe-page-enter.oobe-page-back, .oobe-plugin-card::before, .oobe-plugin-icon.has-plugin-icon .oobe-plugin-icon-app, .oobe-plugin-icon.has-plugin-icon .oobe-plugin-icon-plugin { animation: none; } .oobe-choice, .oobe-choice-arrow { transition-duration: 0ms; } }
 .official-balance-groups { display: flex; flex-direction: column; gap: 4px; min-width: 210px; }
 .official-balance-group { display: flex; align-items: baseline; gap: 8px; font-size: 12px; color: var(--muted, #66717d); }
