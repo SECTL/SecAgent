@@ -40,9 +40,9 @@ let activeWakeShortcut: string | undefined;
 let activeWakeContext: { sessionId?: string; modelId?: string; reasoningEffort?: ReasoningEffort } = {};
 let wakeAbortController: AbortController | undefined;
 const marketplace = new MarketplaceClient();
-const classIslandInstaller = new ClassIslandInstaller();
-const secRandomInstaller = new SecRandomInstaller();
-const iccceInstaller = new IccceInstaller();
+const classIslandInstaller = new ClassIslandInstaller({ log: logMain });
+const secRandomInstaller = new SecRandomInstaller({ log: logMain });
+const iccceInstaller = new IccceInstaller({ log: logMain });
 const activeSessionRuns = new Map<string, AbortController>();
 const MARKETPLACE_UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const AUTO_START_ARG = "--autostart";
@@ -105,7 +105,9 @@ function installFileRendererAssetFallback(): void {
 function logMain(stage: string, data: unknown = {}): void {
   const logDir = path.join(DEFAULT_WORKSPACE, "logs");
   fs.mkdirSync(logDir, { recursive: true });
-  fs.appendFileSync(path.join(logDir, "electron-main.jsonl"), JSON.stringify({ at: new Date().toISOString(), stage, data }) + "\n", "utf8");
+  const line = JSON.stringify({ at: new Date().toISOString(), stage, data }) + "\n";
+  fs.appendFileSync(path.join(logDir, "electron-main.jsonl"), line, "utf8");
+  if (stage.startsWith("companion.")) fs.appendFileSync(path.join(logDir, "companion-install.jsonl"), line, "utf8");
 }
 
 async function ensureMacDockVisible(): Promise<void> {

@@ -5,7 +5,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { compareVersions, marketplaceRequestUrls } from "./marketplace.js";
-import { startCompanionProcess, writeCompanionPackage } from "./companion-package.js";
+import { startCompanionProcess, writeCompanionPackage, type CompanionLogger } from "./companion-package.js";
 
 export const SECRANDOM_PLUGIN_REPOSITORY = "SECTL/SecRandom-SecAgent-Plugin";
 export const SECRANDOM_PLUGIN_ID = "secrandom.secagent";
@@ -88,6 +88,7 @@ export interface SecRandomInstallerOptions extends SecRandomDiscoveryOptions {
   waitForPluginPollMs?: number;
   now?: () => number;
   writePackage?: (filePath: string, bytes: Buffer) => Promise<string> | string;
+  log?: CompanionLogger;
 }
 
 interface ResolvedSecRandomLayout {
@@ -604,21 +605,25 @@ export class SecRandomInstaller {
     if (!valid.length) return [...results, ...missing];
 
     const report = (phase: SecRandomInstallPhase, message?: string) => onProgress?.({ phase, targetIds, ...(message ? { message } : {}) });
+    const log = (stage: string, data: unknown = {}) => this.options.log?.(`companion.secrandom.${stage}`, data);
+    log("install.begin", { targetIds, candidates: selected.map((candidate) => ({ id: candidate.id, executablePath: candidate.executablePath, rootPath: candidate.rootPath, dataRoot: candidate.dataRoot, pluginPackagesPath: candidate.pluginPackagesPath, pluginPackagesPaths: candidate.pluginPackagesPaths, version: candidate.version, installedPluginVersion: candidate.installedPluginVersion, isRunning: candidate.isRunning, pid: candidate.pid })) });
     const packageData = await downloadLatestSecRandomPlugin(this.fetcher, this.options.now || Date.now, (phase, message) => report(phase, message));
+    log("download.success", { version: packageData.version, bytes: packageData.bytes.length, sha256: packageData.sha256 });
     const api = platformPath(this.platform);
     const groups = new Map<string, SecRandomInstallCandidate[]>();
     for (const candidate of valid) {
       const key = normalizePath(candidate.dataRoot, this.platform);
       groups.set(key, [...(groups.get(key) || []), candidate]);
     }
-    const restart = this.options.restartProcess || ((executablePath: string, args: string[]) => startCompanionProcess(executablePath, args, this.platform));
+    const restart = this.options.restartProcess || ((executablePath: string, args: string[]) => startCompanionProcess(executablePath, args, this.platform, (stage, data) => log(stage, data)));
     const isRunning = this.options.isProcessRunning || defaultIsProcessRunning;
     const requestClose = this.options.requestGracefulClose || ((pid: number) => defaultRequestGracefulClose(pid, this.platform, this.commandRunner));
     const forceTerminate = this.options.forceTerminateProcess || ((pid: number) => defaultForceTerminate(pid, this.platform, this.commandRunner));
     const exists = this.options.exists || defaultExists;
     const readFile = this.options.readFile || defaultReadFile;
-    const writePackage = this.options.writePackage || ((filePath: string, bytes: Buffer) => writeCompanionPackage(filePath, bytes, this.platform));
+    const writePackage = this.options.writePackage || ((filePath: string, bytes: Buffer) => writeCompanionPackage(filePath, bytes, this.platform, (stage, data) => log(stage, data)));
     for (const group of groups.values()) {
+      log("group.begin", { dataRoot: group[0].dataRoot, targets: group.map((candidate) => candidate.id), pluginPackagesPaths: group[0].pluginPackagesPaths || [group[0].pluginPackagesPath] });
       const alreadyInstalled = group.every((candidate) => candidate.installedPluginVersion && compareVersions(candidate.installedPluginVersion, packageData.version) >= 0);
       if (alreadyInstalled) {
         for (const candidate of group) results.push({ targetId: candidate.id, ok: true, action: "already-installed", message: `已安装 SecRandom 插件 v${packageData.version}`, version: packageData.version });
@@ -653,13 +658,17 @@ export class SecRandomInstaller {
         : [group[0].pluginPackagesPath];
       try {
         report("installing", "正在写入 SecRandom 插件包");
+        const actualPackagePaths: string[] = [];
         for (const packageDirectory of packageDirectories)
-          await writePackage(api.join(packageDirectory, SECRANDOM_PLUGIN_ASSET_NAME), packageData.bytes);
+          actualPackagePaths.push(await writePackage(api.join(packageDirectory, SECRANDOM_PLUGIN_ASSET_NAME), packageData.bytes));
+        log("package.write.result", { requestedDirectories: packageDirectories, actualPackagePaths });
         const launchCandidate = closed[0] || group[0];
         const restarting = closed.length > 0;
         report("restarting", restarting ? "正在重新启动 SecRandom" : "正在启动 SecRandom");
+        log("process.restart.begin", { executablePath: launchCandidate.executablePath, args: launchCandidate.launchArgs, wasRunning: restarting });
         let launchFailed = false;
-        try { await restart(launchCandidate.executablePath, launchCandidate.launchArgs); } catch { launchFailed = true; }
+        try { await restart(launchCandidate.executablePath, launchCandidate.launchArgs); log("process.restart.success", { executablePath: launchCandidate.executablePath }); }
+        catch (error) { launchFailed = true; log("process.restart.failed", { executablePath: launchCandidate.executablePath, error: error instanceof Error ? error.message : String(error) }); }
         const verifiedVersion = launchFailed ? undefined : await waitForInstalledPlugin(
           () => installedPluginVersionFromRoots([group[0].dataRoot, ...packageDirectories.map((item) => api.dirname(api.dirname(item)))], this.platform, exists, readFile),
           packageData.version,
@@ -667,6 +676,7 @@ export class SecRandomInstaller {
           this.options.waitForPluginPollMs
         );
         const verified = Boolean(verifiedVersion);
+        log("verification.result", { expectedVersion: packageData.version, verifiedVersion, verified, launchFailed });
         for (const candidate of group) {
           results.push({
             targetId: candidate.id,
@@ -681,6 +691,7 @@ export class SecRandomInstaller {
           });
         }
       } catch (error) {
+        log("install.failed", { error: error instanceof Error ? error.message : String(error) });
         for (const candidate of closed) await restart(candidate.executablePath, candidate.launchArgs).catch(() => undefined);
         for (const candidate of group) results.push({ targetId: candidate.id, ok: false, action: "failed", message: `写入 SecRandom 插件失败：${error instanceof Error ? error.message : String(error)}` });
       }

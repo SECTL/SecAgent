@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { startCompanionProcess, writeCompanionPackage } from "./companion-package.js";
+import { startCompanionProcess, writeCompanionPackage, type CompanionLogger } from "./companion-package.js";
 import { DEFAULT_MARKETPLACE_PROXY_URL, marketplaceRequestUrls } from "./marketplace.js";
 
 export const CLASSISLAND_PLUGIN_REPOSITORY = "SECTL/ClassIsland-SecAgent-Plugin";
@@ -85,6 +85,7 @@ export interface ClassIslandInstallerOptions extends ClassIslandDiscoveryOptions
   waitForPluginTimeoutMs?: number;
   waitForPluginPollMs?: number;
   writePackage?: (filePath: string, bytes: Buffer) => Promise<string> | string;
+  log?: CompanionLogger;
   now?: () => number;
 }
 
@@ -600,21 +601,25 @@ export class ClassIslandInstaller {
     if (!valid.length) return [...results, ...missing];
 
     const report = (phase: ClassIslandInstallPhase, message?: string) => onProgress?.({ phase, targetIds, ...(message ? { message } : {}) });
+    const log = (stage: string, data: unknown = {}) => this.options.log?.(`companion.classisland.${stage}`, data);
+    log("install.begin", { targetIds, candidates: selected.map((candidate) => ({ id: candidate.id, executablePath: candidate.executablePath, dataRoot: candidate.dataRoot, pluginPackagesPath: candidate.pluginPackagesPath, version: candidate.version, installedPluginVersion: candidate.installedPluginVersion, isRunning: candidate.isRunning, pid: candidate.pid })) });
     const packageData = await downloadLatestClassIslandPlugin(this.fetcher, this.options.now || Date.now, (phase, message) => report(phase, message));
+    log("download.success", { version: packageData.version, bytes: packageData.bytes.length, sha256: packageData.sha256 });
     const api = platformPath(this.platform);
     const groups = new Map<string, ClassIslandInstallCandidate[]>();
     for (const candidate of valid) {
       const key = normalizePath(candidate.dataRoot, this.platform);
       groups.set(key, [...(groups.get(key) || []), candidate]);
     }
-    const restart = this.options.restartProcess || ((executablePath: string, args: string[]) => startCompanionProcess(executablePath, args, this.platform));
+    const restart = this.options.restartProcess || ((executablePath: string, args: string[]) => startCompanionProcess(executablePath, args, this.platform, (stage, data) => log(stage, data)));
     const isRunning = this.options.isProcessRunning || defaultIsProcessRunning;
     const requestClose = this.options.requestGracefulClose || ((pid: number) => defaultRequestGracefulClose(pid, this.platform, this.commandRunner));
     const forceTerminate = this.options.forceTerminateProcess || ((pid: number) => defaultForceTerminate(pid, this.platform, this.commandRunner));
     const exists = this.options.exists || defaultExists;
     const readFile = this.options.readFile || defaultReadFile;
-    const writePackage = this.options.writePackage || ((filePath: string, bytes: Buffer) => writeCompanionPackage(filePath, bytes, this.platform));
+    const writePackage = this.options.writePackage || ((filePath: string, bytes: Buffer) => writeCompanionPackage(filePath, bytes, this.platform, (stage, data) => log(stage, data)));
     for (const group of groups.values()) {
+      log("group.begin", { dataRoot: group[0].dataRoot, targets: group.map((candidate) => candidate.id), pluginPackagesPath: group[0].pluginPackagesPath });
       const alreadyInstalled = group.every((candidate) => candidate.installedPluginVersion && compareClassIslandVersions(candidate.installedPluginVersion, packageData.version) >= 0);
       if (alreadyInstalled) {
         for (const candidate of group) results.push({ targetId: candidate.id, ok: true, action: "already-installed", message: `已安装 ClassIsland 插件 v${packageData.version}`, version: packageData.version });
@@ -647,12 +652,15 @@ export class ClassIslandInstaller {
       const packagePath = api.join(group[0].pluginPackagesPath, CLASSISLAND_PLUGIN_ASSET_NAME);
       try {
         report("installing", "正在写入 ClassIsland 插件包");
-        await writePackage(packagePath, packageData.bytes);
+        const actualPackagePath = await writePackage(packagePath, packageData.bytes);
+        log("package.write.result", { requestedPath: packagePath, actualPackagePath });
         const launchCandidate = closed[0] || group[0];
         const restarting = closed.length > 0;
         report("restarting", restarting ? "正在重新启动 ClassIsland" : "正在启动 ClassIsland");
+        log("process.restart.begin", { executablePath: launchCandidate.executablePath, args: launchCandidate.launchArgs, wasRunning: restarting });
         let launchFailed = false;
-        try { await restart(launchCandidate.executablePath, launchCandidate.launchArgs); } catch { launchFailed = true; }
+        try { await restart(launchCandidate.executablePath, launchCandidate.launchArgs); log("process.restart.success", { executablePath: launchCandidate.executablePath }); }
+        catch (error) { launchFailed = true; log("process.restart.failed", { executablePath: launchCandidate.executablePath, error: error instanceof Error ? error.message : String(error) }); }
         const verifiedVersion = launchFailed ? undefined : await waitForInstalledPlugin(
           () => installedPluginVersion(group[0].dataRoot, this.platform, exists, readFile),
           packageData.version,
@@ -660,6 +668,7 @@ export class ClassIslandInstaller {
           this.options.waitForPluginPollMs
         );
         const verified = Boolean(verifiedVersion);
+        log("verification.result", { expectedVersion: packageData.version, verifiedVersion, verified, launchFailed });
         for (const candidate of group) {
           results.push({
             targetId: candidate.id,
@@ -674,6 +683,7 @@ export class ClassIslandInstaller {
           });
         }
       } catch (error) {
+        log("install.failed", { error: error instanceof Error ? error.message : String(error) });
         for (const candidate of closed) await restart(candidate.executablePath, candidate.launchArgs).catch(() => undefined);
         for (const candidate of group) results.push({ targetId: candidate.id, ok: false, action: "failed", message: `写入 ClassIsland 插件失败：${error instanceof Error ? error.message : String(error)}` });
       }

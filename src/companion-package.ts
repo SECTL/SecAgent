@@ -6,7 +6,12 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 type SupportedPlatform = NodeJS.Platform;
+export type CompanionLogger = (stage: string, data?: unknown) => void;
 const execFileAsync = promisify(execFile);
+
+function writeLog(logger: CompanionLogger | undefined, stage: string, data: unknown = {}): void {
+  try { logger?.(stage, data); } catch { /* Logging must never break installation. */ }
+}
 
 function pathApi(platform: SupportedPlatform): typeof path.win32 {
   return platform === "win32" ? path.win32 : path.posix;
@@ -37,9 +42,10 @@ function likelyProtectedWindowsPath(filePath: string): boolean {
   return roots.some((root) => isPathInside(filePath, root, "win32"));
 }
 
-function writeDirect(filePath: string, bytes: Buffer, platform: SupportedPlatform): string {
+function writeDirect(filePath: string, bytes: Buffer, platform: SupportedPlatform, logger?: CompanionLogger): string {
   const api = pathApi(platform);
   const directory = api.dirname(filePath);
+  writeLog(logger, "package.write.direct.begin", { filePath, bytes: bytes.length });
   fs.mkdirSync(directory, { recursive: true });
   const temporary = api.join(directory, `.${api.basename(filePath)}.${crypto.randomUUID()}.tmp`);
   try {
@@ -47,6 +53,7 @@ function writeDirect(filePath: string, bytes: Buffer, platform: SupportedPlatfor
     try {
       fs.rmSync(filePath, { force: true });
       fs.renameSync(temporary, filePath);
+      writeLog(logger, "package.write.direct.success", { filePath });
       return filePath;
     } catch (error) {
       // ICC-CE and SecRandom both scan every package with the expected extension.
@@ -57,6 +64,7 @@ function writeDirect(filePath: string, bytes: Buffer, platform: SupportedPlatfor
       const extension = api.extname(filePath);
       const fallback = api.join(directory, `${api.basename(filePath, extension)}.${crypto.randomUUID()}${extension}`);
       fs.copyFileSync(temporary, fallback);
+      writeLog(logger, "package.write.fallback", { filePath, fallback, errorCode: code });
       return fallback;
     }
   } finally {
@@ -64,10 +72,11 @@ function writeDirect(filePath: string, bytes: Buffer, platform: SupportedPlatfor
   }
 }
 
-async function writeWithWindowsUac(filePath: string, bytes: Buffer): Promise<string> {
+async function writeWithWindowsUac(filePath: string, bytes: Buffer, logger?: CompanionLogger): Promise<string> {
   const api = path.win32;
   const directory = api.dirname(filePath);
   const source = path.join(os.tmpdir(), `secagent-companion-${crypto.randomUUID()}.bin`);
+  writeLog(logger, "package.write.uac.begin", { filePath, bytes: bytes.length });
   fs.writeFileSync(source, bytes, { flag: "wx" });
 
   const innerCommand = [
@@ -110,8 +119,11 @@ async function writeWithWindowsUac(filePath: string, bytes: Buffer): Promise<str
       maxBuffer: 2 * 1024 * 1024
     });
     const output = result.stdout.trim().split(/\r?\n/).map((line) => line.trim()).filter(Boolean).at(-1);
-    return output || filePath;
+    const actualPath = output || filePath;
+    writeLog(logger, "package.write.uac.success", { filePath, actualPath });
+    return actualPath;
   } catch (error) {
+    writeLog(logger, "package.write.uac.failed", { filePath, error: error instanceof Error ? error.message : String(error) });
     throw new Error(`需要管理员权限写入对方软件插件目录；如果取消 UAC，请重试（${error instanceof Error ? error.message : String(error)}）`);
   } finally {
     fs.rmSync(source, { force: true });
@@ -124,43 +136,50 @@ async function writeWithWindowsUac(filePath: string, bytes: Buffer): Promise<str
  * the normal UAC prompt. A locked old package is retained and a second package
  * with the same extension is submitted for the host's package scanner.
  */
-export async function writeCompanionPackage(filePath: string, bytes: Buffer, platform: SupportedPlatform = process.platform): Promise<string> {
+export async function writeCompanionPackage(filePath: string, bytes: Buffer, platform: SupportedPlatform = process.platform, logger?: CompanionLogger): Promise<string> {
+  writeLog(logger, "package.write.begin", { filePath, bytes: bytes.length, platform });
   if (platform === "win32" && likelyProtectedWindowsPath(filePath))
-    return writeWithWindowsUac(filePath, bytes);
+    return writeWithWindowsUac(filePath, bytes, logger);
 
   try {
-    return writeDirect(filePath, bytes, platform);
+    return writeDirect(filePath, bytes, platform, logger);
   } catch (error) {
-    if (platform !== "win32" || !["EACCES", "EPERM"].includes(error && typeof error === "object" && "code" in error ? String(error.code) : ""))
+    const errorCode = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+    writeLog(logger, "package.write.failed", { filePath, errorCode, error: error instanceof Error ? error.message : String(error) });
+    if (platform !== "win32" || !["EACCES", "EPERM"].includes(errorCode))
       throw error;
-    return writeWithWindowsUac(filePath, bytes);
+    return writeWithWindowsUac(filePath, bytes, logger);
   }
 }
 
 /** Starts a companion host elevated so it can unpack into a protected install directory. */
-export async function startCompanionProcess(executablePath: string, args: string[], platform: SupportedPlatform = process.platform): Promise<void> {
+export async function startCompanionProcess(executablePath: string, args: string[], platform: SupportedPlatform = process.platform, logger?: CompanionLogger): Promise<void> {
+  writeLog(logger, "process.start.begin", { executablePath, args, platform, elevated: platform === "win32" });
   if (platform !== "win32") {
     const { spawn } = await import("node:child_process");
     await new Promise<void>((resolve, reject) => {
       const child = spawn(executablePath, args, { detached: true, stdio: "ignore" });
       child.once("error", reject);
-      child.once("spawn", () => { child.unref(); resolve(); });
+      child.once("spawn", () => { child.unref(); writeLog(logger, "process.start.success", { executablePath, pid: child.pid }); resolve(); });
     });
     return;
   }
 
+  const argumentList = args.length ? ` -ArgumentList @(${args.map(quotePowerShell).join(", ")})` : "";
   const command = [
     "$ErrorActionPreference = 'Stop'",
-    `$process = Start-Process -FilePath ${quotePowerShell(executablePath)} -ArgumentList @(${args.map(quotePowerShell).join(", ")}) -Verb RunAs -PassThru`,
+    `$process = Start-Process -FilePath ${quotePowerShell(executablePath)}${argumentList} -Verb RunAs -PassThru`,
     "if ($null -eq $process) { throw '无法启动对方软件' }"
   ].join(";\n");
   try {
-    await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodePowerShell(command)], {
+    const result = await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodePowerShell(command)], {
       encoding: "utf8",
       windowsHide: true,
       maxBuffer: 2 * 1024 * 1024
     });
+    writeLog(logger, "process.start.success", { executablePath, args, stdout: result.stdout.trim(), stderr: result.stderr.trim() });
   } catch (error) {
+    writeLog(logger, "process.start.failed", { executablePath, args, error: error instanceof Error ? error.message : String(error) });
     throw new Error(`需要管理员权限启动对方软件；如果取消 UAC，请重试（${error instanceof Error ? error.message : String(error)}）`);
   }
 }
