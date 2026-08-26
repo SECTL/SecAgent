@@ -174,14 +174,14 @@ async function ensureMacDockVisible(): Promise<void> {
   await app.dock?.show();
 }
 
-function windowChromeOptions(): Electron.BrowserWindowConstructorOptions {
+function windowChromeOptions(overlayColor = "#ffffff"): Electron.BrowserWindowConstructorOptions {
   if (process.platform === "darwin") {
     return { titleBarStyle: "hidden", trafficLightPosition: { x: 16, y: 21 } };
   }
   if (process.platform === "win32") {
     return {
       titleBarStyle: "hidden",
-      titleBarOverlay: { color: "#ffffff", symbolColor: "#171717", height: 57 },
+      titleBarOverlay: { color: overlayColor, symbolColor: "#171717", height: 57 },
       autoHideMenuBar: true
     };
   }
@@ -482,7 +482,7 @@ function openSettings(oobeOrMenuItem: boolean | Electron.MenuItem = false, _wind
     title: "SecAgent设置",
     parent: windowRef && !windowRef.isDestroyed() && windowRef.isVisible() ? windowRef : undefined,
     modal: false,
-    ...windowChromeOptions(),
+    ...windowChromeOptions("#fafafa"),
     icon: appIconPath(),
     webPreferences: { preload: path.join(__dirname, "../preload/preload.cjs"), contextIsolation: true, nodeIntegration: false }
   });
