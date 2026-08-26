@@ -2,9 +2,10 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { compareVersions, marketplaceRequestUrls } from "./marketplace.js";
+import { startCompanionProcess, writeCompanionPackage } from "./companion-package.js";
 
 export const SECRANDOM_PLUGIN_REPOSITORY = "SECTL/SecRandom-SecAgent-Plugin";
 export const SECRANDOM_PLUGIN_ID = "secrandom.secagent";
@@ -29,6 +30,7 @@ export interface SecRandomInstallCandidate {
   rootPath: string;
   dataRoot: string;
   pluginPackagesPath: string;
+  pluginPackagesPaths?: string[];
   version?: string;
   installedPluginVersion?: string;
   packageType?: string;
@@ -85,12 +87,14 @@ export interface SecRandomInstallerOptions extends SecRandomDiscoveryOptions {
   waitForPluginTimeoutMs?: number;
   waitForPluginPollMs?: number;
   now?: () => number;
+  writePackage?: (filePath: string, bytes: Buffer) => Promise<string> | string;
 }
 
 interface ResolvedSecRandomLayout {
   packageRoot: string;
   dataRoot: string;
   pluginPackagesPath: string;
+  pluginPackagesPaths: string[];
   packageType?: string;
 }
 
@@ -292,7 +296,11 @@ export function resolveSecRandomLayout(executablePath: string, options: { platfo
   const marker = readPackageMarker(executablePath, platform, env, exists, readFile);
   const portable = marker.packageType?.toLowerCase() === "portable-zip";
   const dataRoot = portable ? api.join(marker.packageRoot, "data") : api.join(localAppData(platform, home, env, api), "SecRandom", "data");
-  return { packageRoot: marker.packageRoot, dataRoot, pluginPackagesPath: api.join(dataRoot, "cache", "plugin-packages"), ...(marker.packageType ? { packageType: marker.packageType } : {}) };
+  const pluginPackagesPath = api.join(dataRoot, "cache", "plugin-packages");
+  const pluginPackagesPaths = portable
+    ? [pluginPackagesPath]
+    : [...new Set([pluginPackagesPath, api.join(marker.packageRoot, "data", "cache", "plugin-packages")])];
+  return { packageRoot: marker.packageRoot, dataRoot, pluginPackagesPath, pluginPackagesPaths, ...(marker.packageType ? { packageType: marker.packageType } : {}) };
 }
 
 function installedPluginVersion(dataRoot: string, platform: SupportedPlatform, exists: (candidate: string) => boolean, readFile: (filePath: string) => string): string | undefined {
@@ -300,6 +308,14 @@ function installedPluginVersion(dataRoot: string, platform: SupportedPlatform, e
   const manifestPath = api.join(dataRoot, "plugins", SECRANDOM_PLUGIN_ID, "manifest.yml");
   if (!exists(manifestPath)) return undefined;
   try { return SECRANDOM_PLUGIN_VERSION_PATTERN.exec(readFile(manifestPath))?.[1]?.trim(); } catch { return undefined; }
+}
+
+function installedPluginVersionFromRoots(dataRoots: string[], platform: SupportedPlatform, exists: (candidate: string) => boolean, readFile: (filePath: string) => string): string | undefined {
+  for (const dataRoot of dataRoots) {
+    const version = installedPluginVersion(dataRoot, platform, exists, readFile);
+    if (version) return version;
+  }
+  return undefined;
 }
 
 async function waitForInstalledPlugin(
@@ -400,13 +416,15 @@ export async function discoverSecRandomInstallations(options: SecRandomDiscovery
     const version = processInfo?.version || await versionOf(executablePath);
     const layout = resolveSecRandomLayout(executablePath, { platform, home, env, exists, readFile });
     const compatible = isCompatibleSecRandomVersion(version);
-    const installed = installedPluginVersion(layout.dataRoot, platform, exists, readFile);
+    const dataRoots = [...new Set([layout.dataRoot, ...layout.pluginPackagesPaths.map((item) => api.dirname(api.dirname(item)))])];
+    const installed = installedPluginVersionFromRoots(dataRoots, platform, exists, readFile);
     const candidate: CachedCandidate = {
       id: hashId(executablePath, layout.dataRoot, platform),
       executablePath,
       rootPath: layout.packageRoot,
       dataRoot: layout.dataRoot,
       pluginPackagesPath: layout.pluginPackagesPath,
+      ...(layout.pluginPackagesPaths.length > 1 ? { pluginPackagesPaths: layout.pluginPackagesPaths } : {}),
       ...(version ? { version } : {}),
       ...(installed ? { installedPluginVersion: installed } : {}),
       ...(layout.packageType ? { packageType: layout.packageType } : {}),
@@ -517,20 +535,6 @@ async function downloadLatestSecRandomPlugin(fetcher: Fetcher, now: () => number
   throw new Error(`下载 SecRandom 插件失败：${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
 
-function writeAtomic(filePath: string, bytes: Buffer, platform: SupportedPlatform): void {
-  const api = platformPath(platform);
-  const directory = api.dirname(filePath);
-  fs.mkdirSync(directory, { recursive: true });
-  const temporary = api.join(directory, `.${SECRANDOM_PLUGIN_ASSET_NAME}.${crypto.randomUUID()}.tmp`);
-  try {
-    fs.writeFileSync(temporary, bytes, { flag: "wx" });
-    fs.rmSync(filePath, { force: true });
-    fs.renameSync(temporary, filePath);
-  } finally {
-    fs.rmSync(temporary, { force: true });
-  }
-}
-
 async function defaultRequestGracefulClose(pid: number, platform: SupportedPlatform, commandRunner: CommandRunner): Promise<void> {
   if (platform === "win32") {
     const script = `$process = Get-Process -Id ${pid} -ErrorAction Stop; [void]$process.CloseMainWindow()`;
@@ -551,14 +555,6 @@ async function defaultForceTerminate(pid: number, platform: SupportedPlatform, c
 
 async function defaultIsProcessRunning(pid: number): Promise<boolean> {
   try { process.kill(pid, 0); return true; } catch { return false; }
-}
-
-function defaultRestartProcess(executablePath: string, args: string[]): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(executablePath, args, { detached: true, stdio: "ignore", windowsHide: true });
-    child.once("error", reject);
-    child.once("spawn", () => { child.unref(); resolve(); });
-  });
 }
 
 async function waitForProcessExit(pid: number, isProcessRunning: (pid: number) => Promise<boolean>, timeoutMs = 10_000, pollMs = 250): Promise<boolean> {
@@ -615,12 +611,13 @@ export class SecRandomInstaller {
       const key = normalizePath(candidate.dataRoot, this.platform);
       groups.set(key, [...(groups.get(key) || []), candidate]);
     }
-    const restart = this.options.restartProcess || defaultRestartProcess;
+    const restart = this.options.restartProcess || ((executablePath: string, args: string[]) => startCompanionProcess(executablePath, args, this.platform));
     const isRunning = this.options.isProcessRunning || defaultIsProcessRunning;
     const requestClose = this.options.requestGracefulClose || ((pid: number) => defaultRequestGracefulClose(pid, this.platform, this.commandRunner));
     const forceTerminate = this.options.forceTerminateProcess || ((pid: number) => defaultForceTerminate(pid, this.platform, this.commandRunner));
     const exists = this.options.exists || defaultExists;
     const readFile = this.options.readFile || defaultReadFile;
+    const writePackage = this.options.writePackage || ((filePath: string, bytes: Buffer) => writeCompanionPackage(filePath, bytes, this.platform));
     for (const group of groups.values()) {
       const alreadyInstalled = group.every((candidate) => candidate.installedPluginVersion && compareVersions(candidate.installedPluginVersion, packageData.version) >= 0);
       if (alreadyInstalled) {
@@ -651,17 +648,20 @@ export class SecRandomInstaller {
         for (const candidate of group) results.push({ targetId: candidate.id, ok: false, action: "failed", message: "SecRandom 无法退出，强制结束也失败，未安装插件；请手动关闭后重试" });
         continue;
       }
-      const packagePath = api.join(group[0].pluginPackagesPath, SECRANDOM_PLUGIN_ASSET_NAME);
+      const packageDirectories = group[0].pluginPackagesPaths?.length
+        ? group[0].pluginPackagesPaths
+        : [group[0].pluginPackagesPath];
       try {
         report("installing", "正在写入 SecRandom 插件包");
-        writeAtomic(packagePath, packageData.bytes, this.platform);
+        for (const packageDirectory of packageDirectories)
+          await writePackage(api.join(packageDirectory, SECRANDOM_PLUGIN_ASSET_NAME), packageData.bytes);
         const launchCandidate = closed[0] || group[0];
         const restarting = closed.length > 0;
         report("restarting", restarting ? "正在重新启动 SecRandom" : "正在启动 SecRandom");
         let launchFailed = false;
         try { await restart(launchCandidate.executablePath, launchCandidate.launchArgs); } catch { launchFailed = true; }
         const verifiedVersion = launchFailed ? undefined : await waitForInstalledPlugin(
-          () => installedPluginVersion(group[0].dataRoot, this.platform, exists, readFile),
+          () => installedPluginVersionFromRoots([group[0].dataRoot, ...packageDirectories.map((item) => api.dirname(api.dirname(item)))], this.platform, exists, readFile),
           packageData.version,
           this.options.waitForPluginTimeoutMs,
           this.options.waitForPluginPollMs

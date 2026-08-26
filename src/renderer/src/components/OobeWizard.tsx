@@ -365,7 +365,7 @@ export function OobeWizard() {
     }
   };
 
-  const installClassIslandPlugin = async (_market: MarketplacePlugin | undefined, connectorReady = false): Promise<boolean> => {
+  const installClassIslandPlugin = async (_market: MarketplacePlugin | undefined): Promise<boolean> => {
     const selectedTargets = classIslandTargets.filter((target) => classIslandSelectedIds.includes(target.id));
     if (!selectedTargets.length) {
       setError("请先选择一个或多个 ClassIsland 安装目标");
@@ -373,11 +373,6 @@ export function OobeWizard() {
     }
     if (selectedTargets.some((target) => !target.compatible)) {
       setError("所选 ClassIsland 版本低于 2.1.1.0，无法安装联动插件");
-      return false;
-    }
-    const connectorInstalled = connectorReady || plugins.some((plugin) => plugin.id === "classisland-connector");
-    if (!connectorInstalled) {
-      setError("请先安装 SecAgent 侧 ClassIsland 连接器");
       return false;
     }
     setInstallingId("classisland-connector:companion");
@@ -402,7 +397,7 @@ export function OobeWizard() {
     }
   };
 
-  const installSecRandomPlugin = async (_market: MarketplacePlugin | undefined, connectorReady = false): Promise<boolean> => {
+  const installSecRandomPlugin = async (_market: MarketplacePlugin | undefined): Promise<boolean> => {
     const selectedTargets = secRandomTargets.filter((target) => secRandomSelectedIds.includes(target.id));
     if (!selectedTargets.length) {
       setError("请先选择一个或多个 SecRandom 安装目标");
@@ -410,11 +405,6 @@ export function OobeWizard() {
     }
     if (selectedTargets.some((target) => !target.compatible)) {
       setError("所选 SecRandom 版本低于 3.0.0-alpha.1，无法安装联动插件");
-      return false;
-    }
-    const connectorInstalled = connectorReady || plugins.some((plugin) => plugin.id === "secrandom");
-    if (!connectorInstalled) {
-      setError("请先安装 SecAgent 侧 SecRandom 连接器");
       return false;
     }
     setInstallingId("secrandom:companion");
@@ -439,7 +429,7 @@ export function OobeWizard() {
     }
   };
 
-  const installIcccePlugin = async (_market: MarketplacePlugin | undefined, connectorReady = false): Promise<boolean> => {
+  const installIcccePlugin = async (_market: MarketplacePlugin | undefined): Promise<boolean> => {
     const selectedTargets = iccceTargets.filter((target) => iccceSelectedIds.includes(target.id));
     if (!selectedTargets.length) {
       setError("请先选择一个或多个 ICC-CE 安装目标");
@@ -447,11 +437,6 @@ export function OobeWizard() {
     }
     if (selectedTargets.some((target) => !target.compatible)) {
       setError("所选 ICC-CE 安装目标不兼容");
-      return false;
-    }
-    const connectorInstalled = connectorReady || plugins.some((plugin) => plugin.id === "iccce-connector");
-    if (!connectorInstalled) {
-      setError("请先安装 SecAgent 侧 ICC-CE 连接器");
       return false;
     }
     setInstallingId("iccce-connector:companion");
@@ -489,12 +474,12 @@ export function OobeWizard() {
     const classIslandCompanionInstalled = selectedClassIslandTargets.length > 0 && selectedClassIslandTargets.every((target) => Boolean(target.installedPluginVersion));
     const secRandomCompanionInstalled = selectedSecRandomTargets.length > 0 && selectedSecRandomTargets.every((target) => Boolean(target.installedPluginVersion));
     const iccceCompanionInstalled = selectedIccceTargets.length > 0 && selectedIccceTargets.every((target) => Boolean(target.installedPluginVersion));
-    const installSpecial = (app: DetectedCompanionApp | undefined, pluginId: string, market: MarketplacePlugin | undefined, targetIds: string[], companionInstalled: boolean, installCompanion: (market: MarketplacePlugin | undefined, connectorReady?: boolean) => Promise<boolean>) => {
+    const installSpecial = (app: DetectedCompanionApp | undefined, pluginId: string, market: MarketplacePlugin | undefined, targetIds: string[], companionInstalled: boolean, installCompanion: (market: MarketplacePlugin | undefined) => Promise<boolean>) => {
       if (!app?.detected && !targetIds.length) return;
       tasks.push(async () => {
         let connectorReady = plugins.some((plugin) => plugin.id === pluginId);
         if (!connectorReady) connectorReady = await installPlugin(market);
-        if (connectorReady && targetIds.length && !companionInstalled) await installCompanion(market, true);
+        if (connectorReady && targetIds.length && !companionInstalled) await installCompanion(market);
       });
     };
     installSpecial(apps.find((app) => app.pluginId === "classisland-connector"), "classisland-connector", classIslandMarket, classIslandSelectedIds, classIslandCompanionInstalled, installClassIslandPlugin);
@@ -614,17 +599,17 @@ export function OobeWizard() {
           const selectedClassIslandTargets = classIslandTargets.filter((target) => classIslandSelectedIds.includes(target.id));
           const classIslandInstalledTargetCount = selectedClassIslandTargets.filter((target) => Boolean(target.installedPluginVersion)).length;
           const classIslandCompanionInstalled = selectedClassIslandTargets.length > 0 && selectedClassIslandTargets.every((target) => Boolean(target.installedPluginVersion));
-          const classIslandCanInstall = selectedClassIslandTargets.length > 0 && selectedClassIslandTargets.every((target) => target.compatible) && !classIslandCompanionInstalled && Boolean(installed);
+          const classIslandCanInstall = selectedClassIslandTargets.length > 0 && selectedClassIslandTargets.every((target) => target.compatible) && !classIslandCompanionInstalled;
           const classIslandPhaseLabel = classIslandPhase === "downloading" ? "下载中…" : classIslandPhase === "verifying" ? "校验中…" : classIslandPhase === "installing" ? "安装中…" : classIslandPhase === "restarting" ? "重启中…" : "安装 ClassIsland 端插件";
           const selectedSecRandomTargets = secRandomTargets.filter((target) => secRandomSelectedIds.includes(target.id));
           const secRandomInstalledTargetCount = selectedSecRandomTargets.filter((target) => Boolean(target.installedPluginVersion)).length;
           const secRandomCompanionInstalled = selectedSecRandomTargets.length > 0 && selectedSecRandomTargets.every((target) => Boolean(target.installedPluginVersion));
-          const secRandomCanInstall = selectedSecRandomTargets.length > 0 && selectedSecRandomTargets.every((target) => target.compatible) && !secRandomCompanionInstalled && Boolean(installed);
+          const secRandomCanInstall = selectedSecRandomTargets.length > 0 && selectedSecRandomTargets.every((target) => target.compatible) && !secRandomCompanionInstalled;
           const secRandomPhaseLabel = secRandomPhase === "downloading" ? "下载中…" : secRandomPhase === "verifying" ? "校验中…" : secRandomPhase === "installing" ? "安装中…" : secRandomPhase === "restarting" ? "重启中…" : "安装 SecRandom 端插件";
           const selectedIccceTargets = iccceTargets.filter((target) => iccceSelectedIds.includes(target.id));
           const iccceInstalledTargetCount = selectedIccceTargets.filter((target) => Boolean(target.installedPluginVersion)).length;
           const iccceCompanionInstalled = selectedIccceTargets.length > 0 && selectedIccceTargets.every((target) => Boolean(target.installedPluginVersion));
-          const iccceCanInstall = selectedIccceTargets.length > 0 && selectedIccceTargets.every((target) => target.compatible) && !iccceCompanionInstalled && Boolean(installed);
+          const iccceCanInstall = selectedIccceTargets.length > 0 && selectedIccceTargets.every((target) => target.compatible) && !iccceCompanionInstalled;
           const icccePhaseLabel = icccePhase === "downloading" ? "下载中…" : icccePhase === "verifying" ? "校验中…" : icccePhase === "installing" ? "安装中…" : icccePhase === "restarting" ? "重启中…" : "安装 ICC-CE 端插件";
           return <article className={`settings-card oobe-plugin-card${isClassIsland ? " oobe-plugin-card-classisland" : isSecRandom ? " oobe-plugin-card-secrandom" : isIccce ? " oobe-plugin-card-iccce" : ""}${installing ? " is-installing" : ""}`} aria-busy={installing} style={{ animationDelay: `${index * 70}ms` }} key={app.pluginId}>
             <div className="oobe-plugin-main">
@@ -644,9 +629,9 @@ export function OobeWizard() {
               </div>
               <div className="oobe-plugin-side-action">
                 <span className="oobe-plugin-side-label">{app.appName} 端</span>
-                {isClassIsland ? classIslandCompanionInstalled ? <span className="oobe-plugin-side-state is-installed" aria-label={`ClassIsland 端已安装 ${classIslandInstalledTargetCount}/${selectedClassIslandTargets.length}`}><Check aria-hidden="true" size={17} strokeWidth={2.5} />已安装 {classIslandInstalledTargetCount}/{selectedClassIslandTargets.length}</span> : !selectedClassIslandTargets.length ? <span className="oobe-plugin-side-state is-unavailable">未选择安装目标</span> : !installed ? <button className="secondary-button" type="button" disabled>先安装 SecAgent 端</button> : <button className="primary-button" type="button" disabled={installing || !classIslandCanInstall} onClick={() => void installClassIslandPlugin(market)}>{companionInstalling ? classIslandPhaseLabel : classIslandInstalledTargetCount ? "安装剩余 ClassIsland 端插件" : "安装 ClassIsland 端插件"}</button>
-                  : isSecRandom ? secRandomCompanionInstalled ? <span className="oobe-plugin-side-state is-installed" aria-label={`SecRandom 端已安装 ${secRandomInstalledTargetCount}/${selectedSecRandomTargets.length}`}><Check aria-hidden="true" size={17} strokeWidth={2.5} />已安装 {secRandomInstalledTargetCount}/{selectedSecRandomTargets.length}</span> : !selectedSecRandomTargets.length ? <span className="oobe-plugin-side-state is-unavailable">未选择安装目标</span> : !installed ? <button className="secondary-button" type="button" disabled>先安装 SecAgent 端</button> : <button className="primary-button" type="button" disabled={installing || !secRandomCanInstall} onClick={() => void installSecRandomPlugin(market)}>{companionInstalling ? secRandomPhaseLabel : secRandomInstalledTargetCount ? "安装剩余 SecRandom 端插件" : "安装 SecRandom 端插件"}</button>
-                    : iccceCompanionInstalled ? <span className="oobe-plugin-side-state is-installed" aria-label={`ICC-CE 端已安装 ${iccceInstalledTargetCount}/${selectedIccceTargets.length}`}><Check aria-hidden="true" size={17} strokeWidth={2.5} />已安装 {iccceInstalledTargetCount}/{selectedIccceTargets.length}</span> : !selectedIccceTargets.length ? <span className="oobe-plugin-side-state is-unavailable">未选择安装目标</span> : !installed ? <button className="secondary-button" type="button" disabled>先安装 SecAgent 端</button> : <button className="primary-button" type="button" disabled={installing || !iccceCanInstall} onClick={() => void installIcccePlugin(market)}>{companionInstalling ? icccePhaseLabel : iccceInstalledTargetCount ? "安装剩余 ICC-CE 端插件" : "安装 ICC-CE 端插件"}</button>}
+                {isClassIsland ? classIslandCompanionInstalled ? <span className="oobe-plugin-side-state is-installed" aria-label={`ClassIsland 端已安装 ${classIslandInstalledTargetCount}/${selectedClassIslandTargets.length}`}><Check aria-hidden="true" size={17} strokeWidth={2.5} />已安装 {classIslandInstalledTargetCount}/{selectedClassIslandTargets.length}</span> : !selectedClassIslandTargets.length ? <span className="oobe-plugin-side-state is-unavailable">未选择安装目标</span> : <button className="primary-button" type="button" disabled={installing || !classIslandCanInstall} onClick={() => void installClassIslandPlugin(market)}>{companionInstalling ? classIslandPhaseLabel : classIslandInstalledTargetCount ? "安装剩余 ClassIsland 端插件" : "安装 ClassIsland 端插件"}</button>
+                  : isSecRandom ? secRandomCompanionInstalled ? <span className="oobe-plugin-side-state is-installed" aria-label={`SecRandom 端已安装 ${secRandomInstalledTargetCount}/${selectedSecRandomTargets.length}`}><Check aria-hidden="true" size={17} strokeWidth={2.5} />已安装 {secRandomInstalledTargetCount}/{selectedSecRandomTargets.length}</span> : !selectedSecRandomTargets.length ? <span className="oobe-plugin-side-state is-unavailable">未选择安装目标</span> : <button className="primary-button" type="button" disabled={installing || !secRandomCanInstall} onClick={() => void installSecRandomPlugin(market)}>{companionInstalling ? secRandomPhaseLabel : secRandomInstalledTargetCount ? "安装剩余 SecRandom 端插件" : "安装 SecRandom 端插件"}</button>
+                    : iccceCompanionInstalled ? <span className="oobe-plugin-side-state is-installed" aria-label={`ICC-CE 端已安装 ${iccceInstalledTargetCount}/${selectedIccceTargets.length}`}><Check aria-hidden="true" size={17} strokeWidth={2.5} />已安装 {iccceInstalledTargetCount}/{selectedIccceTargets.length}</span> : !selectedIccceTargets.length ? <span className="oobe-plugin-side-state is-unavailable">未选择安装目标</span> : <button className="primary-button" type="button" disabled={installing || !iccceCanInstall} onClick={() => void installIcccePlugin(market)}>{companionInstalling ? icccePhaseLabel : iccceInstalledTargetCount ? "安装剩余 ICC-CE 端插件" : "安装 ICC-CE 端插件"}</button>}
               </div>
             </div> : <div className="oobe-plugin-side-actions oobe-plugin-side-actions-single">
               <span className="oobe-plugin-side-label">SecAgent 端</span>

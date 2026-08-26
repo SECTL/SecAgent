@@ -2,8 +2,9 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { startCompanionProcess, writeCompanionPackage } from "./companion-package.js";
 import { DEFAULT_MARKETPLACE_PROXY_URL, marketplaceRequestUrls } from "./marketplace.js";
 
 export const CLASSISLAND_PLUGIN_REPOSITORY = "SECTL/ClassIsland-SecAgent-Plugin";
@@ -83,6 +84,7 @@ export interface ClassIslandInstallerOptions extends ClassIslandDiscoveryOptions
   waitForExitPollMs?: number;
   waitForPluginTimeoutMs?: number;
   waitForPluginPollMs?: number;
+  writePackage?: (filePath: string, bytes: Buffer) => Promise<string> | string;
   now?: () => number;
 }
 
@@ -529,20 +531,6 @@ async function downloadLatestClassIslandPlugin(fetcher: Fetcher, now: () => numb
   throw new Error(`下载 ClassIsland 插件失败：${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
 
-function writeAtomic(filePath: string, bytes: Buffer, platform: SupportedPlatform): void {
-  const api = platformPath(platform);
-  const directory = api.dirname(filePath);
-  fs.mkdirSync(directory, { recursive: true });
-  const temporary = api.join(directory, `.${CLASSISLAND_PLUGIN_ASSET_NAME}.${crypto.randomUUID()}.tmp`);
-  try {
-    fs.writeFileSync(temporary, bytes, { flag: "wx" });
-    fs.rmSync(filePath, { force: true });
-    fs.renameSync(temporary, filePath);
-  } finally {
-    fs.rmSync(temporary, { force: true });
-  }
-}
-
 async function defaultRequestGracefulClose(pid: number, platform: SupportedPlatform, commandRunner: CommandRunner): Promise<void> {
   if (platform === "win32") {
     const script = `$process = Get-Process -Id ${pid} -ErrorAction Stop; [void]$process.CloseMainWindow()`;
@@ -563,14 +551,6 @@ async function defaultForceTerminate(pid: number, platform: SupportedPlatform, c
 
 async function defaultIsProcessRunning(pid: number): Promise<boolean> {
   try { process.kill(pid, 0); return true; } catch { return false; }
-}
-
-function defaultRestartProcess(executablePath: string, args: string[]): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(executablePath, args, { detached: true, stdio: "ignore", windowsHide: true });
-    child.once("error", reject);
-    child.once("spawn", () => { child.unref(); resolve(); });
-  });
 }
 
 async function waitForProcessExit(pid: number, isProcessRunning: (pid: number) => Promise<boolean>, timeoutMs = 10_000, pollMs = 250): Promise<boolean> {
@@ -627,12 +607,13 @@ export class ClassIslandInstaller {
       const key = normalizePath(candidate.dataRoot, this.platform);
       groups.set(key, [...(groups.get(key) || []), candidate]);
     }
-    const restart = this.options.restartProcess || defaultRestartProcess;
+    const restart = this.options.restartProcess || ((executablePath: string, args: string[]) => startCompanionProcess(executablePath, args, this.platform));
     const isRunning = this.options.isProcessRunning || defaultIsProcessRunning;
     const requestClose = this.options.requestGracefulClose || ((pid: number) => defaultRequestGracefulClose(pid, this.platform, this.commandRunner));
     const forceTerminate = this.options.forceTerminateProcess || ((pid: number) => defaultForceTerminate(pid, this.platform, this.commandRunner));
     const exists = this.options.exists || defaultExists;
     const readFile = this.options.readFile || defaultReadFile;
+    const writePackage = this.options.writePackage || ((filePath: string, bytes: Buffer) => writeCompanionPackage(filePath, bytes, this.platform));
     for (const group of groups.values()) {
       const alreadyInstalled = group.every((candidate) => candidate.installedPluginVersion && compareClassIslandVersions(candidate.installedPluginVersion, packageData.version) >= 0);
       if (alreadyInstalled) {
@@ -666,7 +647,7 @@ export class ClassIslandInstaller {
       const packagePath = api.join(group[0].pluginPackagesPath, CLASSISLAND_PLUGIN_ASSET_NAME);
       try {
         report("installing", "正在写入 ClassIsland 插件包");
-        writeAtomic(packagePath, packageData.bytes, this.platform);
+        await writePackage(packagePath, packageData.bytes);
         const launchCandidate = closed[0] || group[0];
         const restarting = closed.length > 0;
         report("restarting", restarting ? "正在重新启动 ClassIsland" : "正在启动 ClassIsland");
