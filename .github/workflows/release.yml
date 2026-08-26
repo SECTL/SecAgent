@@ -56,6 +56,10 @@ jobs:
         shell: pwsh
         run: |
           $setup = "release\inno\SecAgent-Setup-${{ steps.version.outputs.version }}.exe"
+          $defaultSetup = "release\inno\SecAgent-Setup.exe"
+          if (-not (Test-Path -LiteralPath $setup) -and (Test-Path -LiteralPath $defaultSetup)) {
+            Move-Item -LiteralPath $defaultSetup -Destination $setup
+          }
           if (-not (Test-Path -LiteralPath $setup)) { throw "Installer was not generated: $setup" }
           $hash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $(Split-Path -Leaf $setup)" | Set-Content -LiteralPath "$setup.sha256" -Encoding ascii
