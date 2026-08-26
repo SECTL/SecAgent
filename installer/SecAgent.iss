@@ -50,6 +50,10 @@ Name: "autostart"; Description: "开机时自动启动 SecAgent"; GroupDescripti
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "SecAgent"; ValueData: """{app}\SecAgent.exe"" --autostart"; Flags: uninsdeletevalue; Tasks: autostart
 
+[UninstallDelete]
+Type: files; Name: "{app}\SecAgent.files.sha256"
+Type: files; Name: "{app}\SecAgent.files.sha256.new"
+
 [Files]
 Source: "{#ManifestFile}"; DestName: "SecAgent.files.sha256"; Flags: dontcopy noencryption
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs replacesameversion; Check: ShouldInstallFile
@@ -65,6 +69,40 @@ Filename: "{app}\SecAgent.exe"; Description: "启动 SecAgent"; Flags: nowait po
 var
   HashManifest: TArrayOfString;
   HashManifestLoaded: Boolean;
+  InstalledHashManifest: TArrayOfString;
+  InstalledHashManifestLoaded: Boolean;
+
+function LoadHashManifest(const FileName: String; var Manifest: TArrayOfString): Boolean;
+var
+  Index, Separator, HashIndex: Integer;
+  Line, HashValue, ManifestPath: String;
+begin
+  Result := False;
+  if not FileExists(FileName) then
+    Exit;
+  try
+    if not LoadStringsFromFile(FileName, Manifest) or (GetArrayLength(Manifest) = 0) then
+      Exit;
+    for Index := 0 to GetArrayLength(Manifest) - 1 do begin
+      Line := Trim(Manifest[Index]);
+      Separator := Pos('  ', Line);
+      if Separator <= 0 then
+        Exit;
+      HashValue := Trim(Copy(Line, 1, Separator - 1));
+      ManifestPath := Trim(Copy(Line, Separator + 2, Length(Line)));
+      if (Length(HashValue) <> 64) or (ManifestPath = '') then
+        Exit;
+      for HashIndex := 1 to Length(HashValue) do
+        if not (((HashValue[HashIndex] >= '0') and (HashValue[HashIndex] <= '9')) or
+          ((HashValue[HashIndex] >= 'a') and (HashValue[HashIndex] <= 'f')) or
+          ((HashValue[HashIndex] >= 'A') and (HashValue[HashIndex] <= 'F'))) then
+          Exit;
+    end;
+    Result := True;
+  except
+    Result := False;
+  end;
+end;
 
 function NormalizeManifestPath(Value: String): String;
 begin
@@ -74,15 +112,15 @@ begin
   Result := LowerCase(Value);
 end;
 
-function ManifestHashForPath(const RelativePath: String): String;
+function ManifestHashForPath(const Manifest: TArrayOfString; const RelativePath: String): String;
 var
   Index, Separator: Integer;
   Line, ManifestPath: String;
 begin
   Result := '';
   ManifestPath := NormalizeManifestPath(RelativePath);
-  for Index := 0 to GetArrayLength(HashManifest) - 1 do begin
-    Line := Trim(HashManifest[Index]);
+  for Index := 0 to GetArrayLength(Manifest) - 1 do begin
+    Line := Trim(Manifest[Index]);
     Separator := Pos('  ', Line);
     if Separator <= 0 then
       Continue;
@@ -95,10 +133,10 @@ end;
 
 function ShouldInstallFile: Boolean;
 var
-  Destination, ApplicationDirectory, RelativePath, ExpectedHash, ExistingHash: String;
+  Destination, ApplicationDirectory, RelativePath, ExpectedHash, InstalledHash: String;
 begin
   Result := True;
-  if not HashManifestLoaded then
+  if not HashManifestLoaded or not InstalledHashManifestLoaded then
     Exit;
 
   Destination := ExpandConstant(CurrentFileName);
@@ -107,28 +145,55 @@ begin
     Exit;
 
   RelativePath := Copy(Destination, Length(ApplicationDirectory) + 1, Length(Destination));
-  ExpectedHash := ManifestHashForPath(RelativePath);
-  if (ExpectedHash = '') or not FileExists(Destination) then
+  ExpectedHash := ManifestHashForPath(HashManifest, RelativePath);
+  InstalledHash := ManifestHashForPath(InstalledHashManifest, RelativePath);
+  if (ExpectedHash = '') or (InstalledHash = '') or not FileExists(Destination) then
     Exit;
 
-  try
-    ExistingHash := LowerCase(GetSHA256OfFile(Destination));
-    Result := ExistingHash <> ExpectedHash;
-    if not Result then
-      Log('Skipping unchanged file: ' + RelativePath);
-  except
-    Result := True;
+  Result := InstalledHash <> ExpectedHash;
+  if not Result then begin
+    Log('Skipping unchanged file: ' + RelativePath);
   end;
 end;
 
 function InitializeSetup: Boolean;
 begin
   HashManifestLoaded := False;
+  InstalledHashManifestLoaded := False;
   try
     ExtractTemporaryFile('SecAgent.files.sha256');
-    HashManifestLoaded := LoadStringsFromFile(ExpandConstant('{tmp}\SecAgent.files.sha256'), HashManifest);
+    HashManifestLoaded := LoadHashManifest(ExpandConstant('{tmp}\SecAgent.files.sha256'), HashManifest);
   except
     Log('Unable to load the installer file hash manifest; files will be checked by Inno Setup defaults.');
   end;
   Result := True;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  InstalledManifestFile, TemporaryManifestFile, NewInstalledManifestFile: String;
+begin
+  if CurStep = ssInstall then begin
+    InstalledManifestFile := ExpandConstant('{app}\SecAgent.files.sha256');
+    InstalledHashManifestLoaded := LoadHashManifest(InstalledManifestFile, InstalledHashManifest);
+    if InstalledHashManifestLoaded then
+      Log('Loaded installed file hash manifest: ' + InstalledManifestFile)
+    else
+      Log('Installed file hash manifest is missing or invalid; all files will be installed.');
+  end else if CurStep = ssPostInstall then begin
+    if HashManifestLoaded then begin
+      TemporaryManifestFile := ExpandConstant('{tmp}\SecAgent.files.sha256');
+      InstalledManifestFile := ExpandConstant('{app}\SecAgent.files.sha256');
+      NewInstalledManifestFile := ExpandConstant('{app}\SecAgent.files.sha256.new');
+      DeleteFile(NewInstalledManifestFile);
+      if CopyFile(TemporaryManifestFile, NewInstalledManifestFile, False) then begin
+        DeleteFile(InstalledManifestFile);
+        if RenameFile(NewInstalledManifestFile, InstalledManifestFile) then
+          Log('Saved installed file hash manifest: ' + InstalledManifestFile)
+        else
+          Log('Unable to replace installed file hash manifest: ' + InstalledManifestFile);
+      end else
+        Log('Unable to stage installed file hash manifest: ' + InstalledManifestFile);
+    end;
+  end;
 end;

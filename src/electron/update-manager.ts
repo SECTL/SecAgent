@@ -80,7 +80,7 @@ export class WindowsUpdateManager {
 
   install(): UpdateState {
     if (!this.isSupported()) return this.getState();
-    if (!this.pending || !this.isPendingValid()) throw new Error("没有可安装的更新，安装包校验失败");
+    if (!this.pending || !fs.existsSync(this.pending.path)) throw new Error("没有可安装的更新");
     this.installRequested = true;
     this.state = { ...this.state, status: "installing", error: undefined };
     this.publish();
