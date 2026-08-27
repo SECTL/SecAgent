@@ -18,7 +18,7 @@ import type { ChatAttachment, ReasoningEffort, UpdateState } from "../types.js";
 import { listGoogleModels } from "../google-models.js";
 import { synthesizeSpeech } from "./tts.js";
 import { PluginManager, type SvgPreviewRequest } from "../plugin-manager.js";
-import { MarketplaceClient, type MarketplacePlugin, type MarketplaceVersion } from "../marketplace.js";
+import { MarketplaceClient, type MarketplaceVersion } from "../marketplace.js";
 import { detectCompanionApps } from "../companion-apps.js";
 import { ClassIslandInstaller } from "../classisland.js";
 import { SecRandomInstaller } from "../secrandom.js";
