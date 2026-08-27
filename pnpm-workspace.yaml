@@ -6,6 +6,7 @@ allowBuilds:
 
 onlyBuiltDependencies:
   - electron
+  - electron-winstaller
   - esbuild
 
 verifyDepsBeforeRun: warn
