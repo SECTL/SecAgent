@@ -69,6 +69,7 @@ contextBridge.exposeInMainWorld("secagent", {
   startSpeech: (hotwords?: string[]) => ipcRenderer.invoke("speech:start", hotwords),
   sendSpeechAudio: (samples: Float32Array) => ipcRenderer.send("speech:audio", samples),
   stopSpeech: () => ipcRenderer.invoke("speech:stop"),
+  cancelSpeech: () => ipcRenderer.invoke("speech:cancel"),
   startVoiceWake: (phrase: string) => ipcRenderer.invoke("voice-wake:start", phrase),
   sendVoiceWakeAudio: (samples: Float32Array) => ipcRenderer.send("voice-wake:audio", samples),
   stopVoiceWake: () => ipcRenderer.invoke("voice-wake:stop"),

@@ -92,13 +92,14 @@ interface Window {
     sendMessage(id: string, text: string, modelId?: string, reasoningEffort?: ReasoningEffort, attachments?: ChatAttachment[]): Promise<SessionData>;
     stopMessage(id: string): Promise<{ ok: true; stopped: boolean }>;
     onRuntimeEvent(listener: (event: unknown) => void): () => void;
-    startSpeech(hotwords?: string[]): Promise<{ ok: true }>;
+    startSpeech(hotwords?: string[]): Promise<{ ok: true; remote?: boolean }>;
     startVoiceWake(phrase: string): Promise<{ ok: true }>;
     sendVoiceWakeAudio(samples: Float32Array): void;
     stopVoiceWake(): Promise<{ ok: true }>;
     logVoiceWake(event: unknown): void;
     sendSpeechAudio(samples: Float32Array): void;
     stopSpeech(): Promise<{ ok: true }>;
+    cancelSpeech(): Promise<{ ok: true }>;
     synthesizeSpeech(text: string): Promise<string>;
     logWakeTts(event: unknown): void;
     setWakeContext(context: { sessionId?: string; modelId?: string; reasoningEffort?: ReasoningEffort }): void;

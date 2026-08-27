@@ -13,7 +13,7 @@ import { AuditStore } from "../audit.js";
 import { SecAgentRuntime, type TraceEvent } from "../runtime.js";
 import type { ConversationMessage } from "../model-provider.js";
 import { SessionStore, type AssistantActivity, type SessionData, type ToolCallRecord } from "../session-store.js";
-import { sendSpeechAudio, sendVoiceWakeAudio, startSpeech, startVoiceWake, stopSpeech, stopVoiceWake } from "./speech.js";
+import { cancelSpeech, sendSpeechAudio, sendVoiceWakeAudio, startSpeech, startVoiceWake, stopSpeech, stopVoiceWake } from "./speech.js";
 import type { ChatAttachment, ReasoningEffort, UpdateState } from "../types.js";
 import { listGoogleModels } from "../google-models.js";
 import { synthesizeSpeech } from "./tts.js";
@@ -1036,6 +1036,7 @@ ipcMain.handle("speech:start", (event) => {
   catch (error) { recordTelemetryFailure({ type: "speech.failed", error, context: { phase: "start" } }); throw error; }
 });
 ipcMain.handle("speech:stop", () => { stopSpeech(); return { ok: true }; });
+ipcMain.handle("speech:cancel", () => { cancelSpeech(); return { ok: true }; });
 ipcMain.handle("voice-wake:start", (event, phrase: string) => {
   try {
     return startVoiceWake(voiceWakeWindow?.webContents.id === event.sender.id ? voiceWakeWindow : undefined, phrase, () => {

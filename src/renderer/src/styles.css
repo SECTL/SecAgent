@@ -82,6 +82,22 @@ button:focus:not(:focus-visible) { outline: none; }
 .composer-icon { display: block; width: 20px; height: 20px; }
 .composer textarea { min-width: 0; flex: 1; height: 28px; resize: none; color: #171717; border: 0; outline: none; padding: 4px 0; background: transparent; font-size: 14px; }
 .composer textarea::placeholder { color: #aaa; }
+.composer { position: relative; touch-action: none; }
+.voice-recording-surface { flex: 1 1 100%; display: flex; min-width: 0; flex-direction: column; gap: 10px; user-select: none; }
+.voice-drop-zones { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 40px; }
+.voice-drop-zone { display: grid; min-height: 58px; place-items: center; align-content: center; gap: 2px; border-radius: 999px; background: #f0eeee; color: #0b0b0b; text-align: center; transition: background .15s ease, color .15s ease, transform .15s ease, box-shadow .15s ease; pointer-events: none; }
+.voice-drop-zone strong { font-size: clamp(16px, 2.2vw, 28px); font-weight: 500; line-height: 1.1; }
+.voice-drop-zone small { color: #777; font-size: 11px; }
+.voice-edit-zone { background: #bdd5fc; }
+.voice-cancel-zone.active { background: #dedede; box-shadow: 0 0 0 3px rgba(80,80,80,.12); transform: scale(1.02); }
+.voice-recording-bar { position: relative; display: grid; min-height: 90px; place-items: center; overflow: hidden; border: 1px solid #63c1fb; border-radius: 24px; background: #39a7f4; box-shadow: 0 0 18px rgba(44, 166, 246, .7), inset 0 1px 0 rgba(255,255,255,.25); }
+.voice-recording-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; clip-path: inset(50%); }
+.voice-wave { display: flex; align-items: center; justify-content: center; gap: 7px; height: 64px; }
+.voice-wave i { display: block; width: 8px; border-radius: 999px; background: #fff; animation: voice-wave-breathe .72s ease-in-out infinite alternate; }
+@keyframes voice-wave-breathe { from { transform: scaleY(.48); opacity: .72; } to { transform: scaleY(1); opacity: 1; } }
+.voice-recording-surface.cancel-hover .voice-recording-bar { background: #258fda; box-shadow: 0 0 20px rgba(37, 143, 218, .78), inset 0 1px 0 rgba(255,255,255,.2); }
+@media (prefers-reduced-motion: reduce) { .voice-wave i { animation: none; } }
+.speech-status { flex: 0 0 100%; color: #b44; font-size: 11px; }
 .model-menu { position: relative; flex: 0 0 205px; -webkit-app-region: no-drag; }
 .model-picker { display: flex; align-items: center; justify-content: space-between; width: 205px; height: 39px; overflow: hidden; padding: 0 12px; border: 1px solid #ddd; border-radius: 19px; background: #fff; color: #171717; cursor: pointer; }.model-picker:hover { background: #ededed; }.model-picker-copy { min-width: 0; display: grid; gap: 1px; text-align: left; }.model-picker-copy strong, .model-picker-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.model-picker-copy strong { font-size: 12px; font-weight: 600; }.model-picker-copy small { color: #888; font-size: 10px; }.virtual-model-menu { flex-basis: 70px; }.virtual-model-picker { width: 70px; }.virtual-model-menu .model-options { width: 70px; }.virtual-model-picker .model-picker-copy { display: flex; align-items: center; height: 100%; }.virtual-model-picker .model-picker-copy strong { display: flex; align-items: center; height: 100%; }.model-chevron { width: 12px; height: 12px; flex: 0 0 12px; margin-left: 8px; transform: rotate(180deg); transition: transform .15s ease; }.model-chevron.open { transform: rotate(0deg); }
 .model-options { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 12; width: 260px; max-height: 360px; overflow: auto; padding: 6px; border: 1px solid #ddd; border-radius: 12px; background: rgba(255,255,255,.98); box-shadow: 0 8px 22px rgba(0,0,0,.16); }

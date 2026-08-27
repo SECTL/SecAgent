@@ -1,5 +1,5 @@
 import { Fragment, FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import type { ClipboardEvent as ReactClipboardEvent, DragEvent as ReactDragEvent } from "react";
+import type { ClipboardEvent as ReactClipboardEvent, DragEvent as ReactDragEvent, PointerEvent as ReactPointerEvent } from "react";
 import { ArrowUp, LoaderCircle, Square, Volume2 } from "lucide-react";
 import { SettingsApp } from "./components/SettingsApp.js";
 import { WakeOverlay } from "./components/WakeOverlay.js";
@@ -70,6 +70,9 @@ export function App() {
   const [sending, setSending] = useState(false);
   const [finishing, setFinishing] = useState(false);
   const [recording, setRecording] = useState(false);
+  const [speechProcessing, setSpeechProcessing] = useState(false);
+  const [voiceDropZone, setVoiceDropZone] = useState<"cancel" | "edit">("edit");
+  const [betterRecognition, setBetterRecognition] = useState(false);
   const [speechStatus, setSpeechStatus] = useState("");
   const [messageMenu, setMessageMenu] = useState<{ x: number; y: number; messageId: string; text: string; role: SessionMessage["role"]; selection: string } | null>(null);
   const [quotedText, setQuotedText] = useState("");
@@ -97,10 +100,55 @@ export function App() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<{ context: AudioContext; stream: MediaStream; source: MediaStreamAudioSourceNode; processor: ScriptProcessorNode } | undefined>(undefined);
-  const speechInsert = useRef({ start: 0, end: 0 });
-  const speechAnchor = useRef(0);
+  const recordingRef = useRef(false);
+  const speechInputId = useRef(0);
+  const speechSessionRef = useRef<{
+    id: number;
+    insert: { start: number; end: number };
+    result: string;
+    optimizing: boolean;
+    stopped: boolean;
+    stopRequested: boolean;
+    canceled: boolean;
+    better: boolean;
+    resolve?: (result: { text: string; error?: string }) => void;
+    settleTimer?: number;
+    timeout?: number;
+  }>(undefined);
+  const voicePressRef = useRef<{
+    pointerId: number;
+    timer: number;
+    started: boolean;
+    released: boolean;
+    insert: { start: number; end: number };
+    startPromise?: Promise<boolean>;
+  }>(undefined);
+  const voiceCancelZoneRef = useRef<HTMLDivElement>(null);
+  const voiceEditZoneRef = useRef<HTMLDivElement>(null);
   const speechAudio = useRef<HTMLAudioElement | null>(null);
   const speechRun = useRef(0);
+
+  const setRecordingState = (value: boolean) => {
+    recordingRef.current = value;
+    setRecording(value);
+  };
+  const settleSpeechSession = (session: NonNullable<typeof speechSessionRef.current>, result: { text: string; error?: string }) => {
+    if (!session.resolve) return;
+    if (session.settleTimer !== undefined) window.clearTimeout(session.settleTimer);
+    if (session.timeout !== undefined) window.clearTimeout(session.timeout);
+    session.settleTimer = undefined;
+    session.timeout = undefined;
+    const resolve = session.resolve;
+    session.resolve = undefined;
+    resolve(result);
+  };
+  const waitForSpeechResult = (session: NonNullable<typeof speechSessionRef.current>) => new Promise<{ text: string; error?: string }>((resolve) => {
+    session.resolve = resolve;
+    session.timeout = window.setTimeout(() => settleSpeechSession(session, { text: session.result }), 10000);
+    if (session.stopped && !session.optimizing) {
+      session.settleTimer = window.setTimeout(() => settleSpeechSession(session, { text: session.result }), 250);
+    }
+  });
 
   useEffect(() => {
     if (!bridge || initializing.current) return;
@@ -121,6 +169,7 @@ export function App() {
       ]);
       const customMode = Boolean(savedSettings.customModelMode);
       setCustomModelMode(customMode);
+      setBetterRecognition(savedSettings.speech.betterRecognition === true);
       const defaultReasoning = (savedSettings.defaultReasoningEffort || "high") as ReasoningEffort;
       setDefaultEffort(defaultReasoning);
       setReasoningEffort(defaultReasoning);
@@ -143,6 +192,7 @@ export function App() {
         void bridge.getSettings().then((settings) => {
           const customMode = Boolean(settings.customModelMode);
           setCustomModelMode(customMode);
+          setBetterRecognition(settings.speech.betterRecognition === true);
           setDefaultEffort((settings.defaultReasoningEffort || "high") as ReasoningEffort);
           setSelectedModelId((current) => {
             if (models.some((model) => model.id === (settings.defaultModelId || current))) return settings.defaultModelId || current;
@@ -160,32 +210,51 @@ export function App() {
     if (!bridge) return;
     return bridge.onSpeechEvent((event) => {
       const data = event as { type?: string; text?: string; message?: string };
-      if (data.type === "ready") setSpeechStatus("正在聆听…");
-      if (data.type === "optimizing") setSpeechStatus("识别优化中…");
-      if (data.type === "partial" || data.type === "final" || data.type === "enhanced") {
-        const text = data.text || "";
-        // Capture the range before queueing the React update. The updater runs later;
-        // reading speechInsert.current inside it would otherwise see the advanced
-        // insertion point from the final-event bookkeeping and append the same text twice.
-        const insertion = data.type === "enhanced" ? { start: speechAnchor.current, end: speechInsert.current.end } : speechInsert.current;
-        setDraft((current) => {
-          const next = current.slice(0, insertion.start) + text + current.slice(insertion.end);
-          const nextPoint = insertion.start + text.length;
-          speechInsert.current = data.type === "final" || data.type === "enhanced"
-            ? { start: nextPoint, end: nextPoint }
-            : { start: insertion.start, end: nextPoint };
-          return next;
-        });
-        if (data.type === "final" || data.type === "enhanced") {
-          setSpeechStatus("正在聆听…");
-        }
+      const speechSession = speechSessionRef.current;
+      if (data.type === "ready" && recordingRef.current) setSpeechStatus("正在聆听…");
+      if (data.type === "optimizing" && speechSession) {
+        speechSession.optimizing = true;
+        if (speechSession.settleTimer !== undefined) window.clearTimeout(speechSession.settleTimer);
+        speechSession.settleTimer = undefined;
+        setSpeechStatus("识别优化中…");
+        return;
       }
-      if (data.type === "enhance_error") setSpeechStatus("增强识别失败，已使用流式结果");
+      if (data.type === "partial") return;
+      if (data.type === "final" && data.text && speechSession) {
+        // Keep recognition out of the draft while recording. The complete
+        // utterance is inserted only after the pointer is released.
+        speechSession.result += data.text;
+        return;
+      }
+      if (data.type === "enhanced" && speechSession) {
+        speechSession.result = data.text || speechSession.result;
+        settleSpeechSession(speechSession, { text: speechSession.result });
+        return;
+      }
+      if (data.type === "enhance_error" && speechSession) {
+        speechSession.optimizing = false;
+        setSpeechStatus("增强识别失败，已使用基础结果");
+        if (speechSession.stopped) speechSession.settleTimer = window.setTimeout(() => settleSpeechSession(speechSession, { text: speechSession.result }), 250);
+        return;
+      }
       if (data.type === "error") {
-        setSpeechStatus(data.message || "语音识别失败");
-        setRecording(false);
+        const message = data.message || "语音识别失败";
+        if (speechSession) {
+          speechSession.stopRequested = true;
+          settleSpeechSession(speechSession, { text: speechSession.result, error: message });
+        }
+        void closeAudioCapture();
+        setSpeechStatus(message);
+        setRecordingState(false);
+        return;
       }
-      if (data.type === "stopped") setSpeechStatus("");
+      if (data.type === "stopped" && speechSession) {
+        speechSession.stopped = true;
+        // The relay emits stopped before the optional enhanced result. Give
+        // the optimizing event a chance to arrive before committing the text.
+        if (!speechSession.optimizing && !speechSession.better) speechSession.settleTimer = window.setTimeout(() => settleSpeechSession(speechSession, { text: speechSession.result }), 250);
+        return;
+      }
     });
   }, [bridge]);
 
@@ -446,32 +515,51 @@ export function App() {
     await bridge.stopMessage(session.meta.id);
   };
 
-  const stopRecording = async () => {
+  const closeAudioCapture = async () => {
     const audio = audioRef.current;
     audioRef.current = undefined;
     audio?.processor.disconnect();
     audio?.source.disconnect();
     audio?.stream.getTracks().forEach((track) => track.stop());
-    await audio?.context.close();
-    await bridge.stopSpeech();
-    setRecording(false);
-    setSpeechStatus("");
-    requestAnimationFrame(() => textareaRef.current?.focus());
+    try { await audio?.context.close(); } catch { /* The context may already be closed by the browser. */ }
   };
 
-  const toggleRecording = async () => {
-    if (recording) { await stopRecording(); return; }
-    if (!navigator.mediaDevices?.getUserMedia) { setSpeechStatus("当前环境不支持麦克风"); return; }
+  const startVoiceInput = async (insert?: { start: number; end: number }): Promise<boolean> => {
+    if (recordingRef.current || speechProcessing || sending || !session) return false;
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setSpeechStatus("当前环境不支持麦克风");
+      return false;
+    }
+    const textArea = textareaRef.current;
+    const selection = insert || { start: textArea?.selectionStart ?? draft.length, end: textArea?.selectionEnd ?? draft.length };
+    const speechSession = {
+      id: ++speechInputId.current,
+      insert: selection,
+      result: "",
+      optimizing: false,
+      stopped: false,
+      stopRequested: false,
+      canceled: false,
+      better: false
+    };
+    speechSessionRef.current = speechSession;
+    setVoiceDropZone("edit");
+    setSpeechProcessing(false);
+    setRecordingState(true);
+    setSpeechStatus("正在启动语音识别…");
     try {
-      const textArea = textareaRef.current;
-      const start = textArea?.selectionStart ?? draft.length;
-      const end = textArea?.selectionEnd ?? start;
-      speechInsert.current = { start, end };
-      speechAnchor.current = start;
-      setRecording(true);
-      setSpeechStatus("正在启动语音识别…");
-      await bridge.startSpeech();
+      const speechStart = await bridge.startSpeech();
+      speechSession.better = betterRecognition && speechStart.remote === true;
+      if (speechSession.stopRequested) {
+        if (speechSessionRef.current === speechSession) speechSessionRef.current = undefined;
+        return false;
+      }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      if (speechSession.stopRequested) {
+        stream.getTracks().forEach((track) => track.stop());
+        if (speechSessionRef.current === speechSession) speechSessionRef.current = undefined;
+        return false;
+      }
       const context = new AudioContext({ sampleRate: 16000 });
       const source = context.createMediaStreamSource(stream);
       const processor = context.createScriptProcessor(2048, 1, 1);
@@ -479,13 +567,139 @@ export function App() {
       source.connect(processor);
       processor.connect(context.destination);
       audioRef.current = { context, stream, source, processor };
-      requestAnimationFrame(() => textareaRef.current?.focus());
+      if (speechSession.stopRequested) await closeAudioCapture();
+      return true;
     } catch (error) {
+      await closeAudioCapture();
+      if (speechSessionRef.current === speechSession) speechSessionRef.current = undefined;
+      setRecordingState(false);
+      setSpeechProcessing(false);
       setSpeechStatus(`无法打开麦克风：${error instanceof Error ? error.message : String(error)}`);
-      setRecording(false);
-      await bridge.stopSpeech();
+      try { await bridge.cancelSpeech(); } catch { /* Ignore cleanup failures. */ }
+      return false;
     }
   };
+
+  const finishVoiceInput = async (cancel: boolean) => {
+    const speechSession = speechSessionRef.current;
+    if (!speechSession || speechSession.stopRequested) return;
+    speechSession.stopRequested = true;
+    speechSession.canceled = cancel;
+    await closeAudioCapture();
+    if (cancel) {
+      try { await bridge.cancelSpeech(); } catch { /* Ignore cleanup failures. */ }
+      if (speechSessionRef.current === speechSession) speechSessionRef.current = undefined;
+      setRecordingState(false);
+      setSpeechProcessing(false);
+      setSpeechStatus("");
+      setVoiceDropZone("edit");
+      return;
+    }
+    setRecordingState(false);
+    setSpeechProcessing(true);
+    setSpeechStatus(betterRecognition ? "识别优化中…" : "正在识别…");
+    const resultPromise = waitForSpeechResult(speechSession);
+    try {
+      await bridge.stopSpeech();
+      const result = await resultPromise;
+      if (result.error) {
+        setSpeechStatus(result.error);
+      } else if (result.text.trim()) {
+        const text = result.text.trim();
+        setDraft((current) => current.slice(0, speechSession.insert.start) + text + current.slice(speechSession.insert.end));
+        requestAnimationFrame(() => {
+          const nextPoint = speechSession.insert.start + text.length;
+          textareaRef.current?.focus();
+          textareaRef.current?.setSelectionRange(nextPoint, nextPoint);
+        });
+        setSpeechStatus("");
+      } else {
+        setSpeechStatus("没有识别到语音");
+      }
+    } catch (error) {
+      setSpeechStatus(`语音识别失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      if (speechSession.timeout !== undefined) window.clearTimeout(speechSession.timeout);
+      if (speechSession.settleTimer !== undefined) window.clearTimeout(speechSession.settleTimer);
+      if (speechSessionRef.current === speechSession) speechSessionRef.current = undefined;
+      setSpeechProcessing(false);
+      setVoiceDropZone("edit");
+      requestAnimationFrame(() => textareaRef.current?.focus());
+      window.setTimeout(() => setSpeechStatus(""), 1500);
+    }
+  };
+
+  const isVoicePressTarget = (target: EventTarget | null): boolean => {
+    const element = target instanceof Element ? target : null;
+    return Boolean(element && !element.closest("button, input, select, a, [data-voice-exclude=\"true\"]"));
+  };
+  const updateVoiceDropZone = (clientX: number, clientY: number) => {
+    const cancelRect = voiceCancelZoneRef.current?.getBoundingClientRect();
+    const editRect = voiceEditZoneRef.current?.getBoundingClientRect();
+    if (cancelRect && clientX >= cancelRect.left && clientX <= cancelRect.right && clientY >= cancelRect.top && clientY <= cancelRect.bottom) {
+      setVoiceDropZone("cancel");
+    } else if (editRect && clientX >= editRect.left && clientX <= editRect.right && clientY >= editRect.top && clientY <= editRect.bottom) {
+      setVoiceDropZone("edit");
+    } else setVoiceDropZone("edit");
+  };
+  const handleComposerPointerDown = (event: ReactPointerEvent<HTMLFormElement>) => {
+    if (event.button !== 0 || !isVoicePressTarget(event.target) || speechProcessing || sending || !session) return;
+    const textArea = textareaRef.current;
+    const insert = { start: textArea?.selectionStart ?? draft.length, end: textArea?.selectionEnd ?? draft.length };
+    const press: NonNullable<typeof voicePressRef.current> = { pointerId: event.pointerId, timer: 0, started: recordingRef.current, released: false, insert };
+    voicePressRef.current = press;
+    try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* Pointer capture is not available in every test environment. */ }
+    if (press.started) return;
+    press.timer = window.setTimeout(() => {
+      if (voicePressRef.current !== press || press.released) return;
+      press.started = true;
+      press.startPromise = startVoiceInput(insert);
+    }, 700);
+  };
+  const handleComposerPointerMove = (event: ReactPointerEvent<HTMLFormElement>) => {
+    const press = voicePressRef.current;
+    if (!press || press.pointerId !== event.pointerId || !press.started) return;
+    updateVoiceDropZone(event.clientX, event.clientY);
+  };
+  const handleComposerPointerUp = (event: ReactPointerEvent<HTMLFormElement>) => {
+    const press = voicePressRef.current;
+    if (!press || press.pointerId !== event.pointerId) return;
+    window.clearTimeout(press.timer);
+    press.released = true;
+    voicePressRef.current = undefined;
+    try { event.currentTarget.releasePointerCapture(event.pointerId); } catch { /* Pointer capture is not available in every test environment. */ }
+    if (!press.started) return;
+    const cancelRect = voiceCancelZoneRef.current?.getBoundingClientRect();
+    const cancel = Boolean(cancelRect && event.clientX >= cancelRect.left && event.clientX <= cancelRect.right && event.clientY >= cancelRect.top && event.clientY <= cancelRect.bottom);
+    if (press.startPromise) void press.startPromise.then(() => finishVoiceInput(cancel));
+    else void finishVoiceInput(cancel);
+  };
+  const handleComposerPointerCancel = (event: ReactPointerEvent<HTMLFormElement>) => {
+    const press = voicePressRef.current;
+    if (!press || press.pointerId !== event.pointerId) return;
+    window.clearTimeout(press.timer);
+    press.released = true;
+    voicePressRef.current = undefined;
+    if (press.started) {
+      if (press.startPromise) void press.startPromise.then(() => finishVoiceInput(true));
+      else void finishVoiceInput(true);
+    }
+  };
+  const handleMicClick = () => {
+    if (recordingRef.current) void finishVoiceInput(false);
+    else void startVoiceInput();
+  };
+
+  useEffect(() => {
+    const cancelOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && (recordingRef.current || speechProcessing)) {
+        event.preventDefault();
+        void finishVoiceInput(true);
+      }
+    };
+    window.addEventListener("keydown", cancelOnEscape);
+    return () => window.removeEventListener("keydown", cancelOnEscape);
+  }, [recording, speechProcessing]);
 
   if (!bridge) {
     return <main className="app-shell"><section className="connection-error"><h1>SecAgent 桌面桥接未加载</h1><p>请退出应用后重新运行 <code>pnpm dev</code>。若仍出现此提示，请检查 Electron 的 preload 启动日志。</p></section></main>;
@@ -544,9 +758,12 @@ export function App() {
           {sending && !finishing && <article className="message assistant"><div className="message-content"><div className="message-meta">SecAgent · 正在生成</div><MessageActivities activities={traceActivities} elapsedSeconds={executionSeconds} isExecuting activeStepKind={activeStepKind} summaryRef={executionSummaryRef} /><div className="bubble-row"><div className="avatar"><img src="/icon.svg" alt="SecAgent" /></div><div className="bubble loading markdown-bubble">{streamingOutput ? <MarkdownContent>{stripWorkspaceFilesMarkup(streamingOutput)}</MarkdownContent> : "正在调用模型与工具…"}</div><WorkspaceFileStrip content={streamingOutput} /></div></div></article>}
           <div />
         </div>
-        <form ref={formRef} className={`composer ${composerDragging ? "dragging" : ""}`} onSubmit={send} onClick={(event) => { if ((event.target as Element).closest('.icon-button img[src="/image-icon.svg"]')) fileInputRef.current?.click(); }} onPaste={handlePaste} onDragEnter={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); setComposerDragging(true); } }} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setComposerDragging(false); }} onDrop={handleDrop}><input ref={fileInputRef} className="visually-hidden" type="file" accept="image/*" multiple onChange={(event) => { void addImageFiles(event.target.files || []); event.target.value = ""; }} />{attachments.length > 0 && <div className="composer-attachments"><AttachmentStrip attachments={attachments} removable onRemove={(id) => setAttachments((current) => current.filter((attachment) => attachment.id !== id))} /></div>}{quotedText && <div className="composer-quote"><div><strong>引用</strong><p>{quotedText}</p></div><button type="button" aria-label="取消引用" onClick={() => setQuotedText("")}>×</button></div>}{attachmentError && <div className="attachment-error">{attachmentError}</div>}
-          <div className="composer-actions"><button type="button" className="icon-button" aria-label="添加图片"><img className="composer-icon" src="/image-icon.svg" alt="" /></button><button type="button" className={`icon-button mic-button ${recording ? "recording" : ""}`} aria-label={recording ? "停止语音输入" : "语音输入"} aria-pressed={recording} onClick={() => void toggleRecording()}><img className="composer-icon" src="/mic-icon.svg" alt="" /></button></div>
-          <textarea ref={textareaRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && !event.currentTarget.readOnly) { event.preventDefault(); formRef.current?.requestSubmit(); } }} placeholder={speechStatus || "问任何问题..."} rows={1} readOnly={recording} disabled={!session || sending} />
+        <form ref={formRef} className={`composer ${composerDragging ? "dragging" : ""}`} onSubmit={send} onPointerDown={handleComposerPointerDown} onPointerMove={handleComposerPointerMove} onPointerUp={handleComposerPointerUp} onPointerCancel={handleComposerPointerCancel} onClick={(event) => { if ((event.target as Element).closest('.icon-button img[src="/image-icon.svg"]')) fileInputRef.current?.click(); }} onPaste={handlePaste} onDragEnter={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); setComposerDragging(true); } }} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setComposerDragging(false); }} onDrop={handleDrop}><input ref={fileInputRef} className="visually-hidden" type="file" accept="image/*" multiple onChange={(event) => { void addImageFiles(event.target.files || []); event.target.value = ""; }} />{attachments.length > 0 && <div className="composer-attachments"><AttachmentStrip attachments={attachments} removable onRemove={(id) => setAttachments((current) => current.filter((attachment) => attachment.id !== id))} /></div>}{quotedText && <div className="composer-quote"><div><strong>引用</strong><p>{quotedText}</p></div><button type="button" aria-label="取消引用" onClick={() => setQuotedText("")}>×</button></div>}{attachmentError && <div className="attachment-error">{attachmentError}</div>}{speechStatus && !recording && !speechProcessing && <div className="speech-status" role="status">{speechStatus}</div>}
+          {recording || speechProcessing ? <div className={`voice-recording-surface ${voiceDropZone === "cancel" ? "cancel-hover" : ""}`} aria-live="polite">
+            {!speechProcessing && <div className="voice-drop-zones"><div ref={voiceCancelZoneRef} className={`voice-drop-zone voice-cancel-zone ${voiceDropZone === "cancel" ? "active" : ""}`}><strong>拖动至此取消</strong><small>松开取消识别</small></div><div ref={voiceEditZoneRef} className="voice-drop-zone voice-edit-zone"><strong>拖动至此转文字</strong><small>松开后写入输入框</small></div></div>}
+            <div className="voice-recording-bar"><span className="voice-recording-status">{speechProcessing ? speechStatus || "正在识别…" : "松开转文字编辑"}</span><span className="voice-wave" aria-hidden="true">{[12, 22, 32, 43, 54, 42, 29, 19, 35, 49, 58, 45, 27, 18].map((height, index) => <i key={index} style={{ height: `${height}px`, animationDelay: `${index * 35}ms` }} />)}</span></div>
+          </div> : <><div className="composer-actions"><button type="button" className="icon-button" aria-label="添加图片"><img className="composer-icon" src="/image-icon.svg" alt="" /></button><button type="button" className="icon-button mic-button" aria-label="语音输入" onClick={handleMicClick}><img className="composer-icon" src="/mic-icon.svg" alt="" /></button></div>
+          <textarea ref={textareaRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && !event.currentTarget.readOnly) { event.preventDefault(); formRef.current?.requestSubmit(); } }} placeholder="输入文字或按住说话..." rows={1} readOnly={recording || speechProcessing} disabled={!session || sending} />
           <div className={`model-menu ${customModelMode ? "" : "virtual-model-menu"}`} ref={modelMenuEnd}>
             <button type="button" className={`model-picker ${customModelMode ? "" : "virtual-model-picker"}`} aria-label={customModelMode ? "选择模型和推理强度" : "选择虚拟模型"} aria-expanded={modelMenuOpen} onClick={() => { setModelMenuOpen((open) => !open); setModelSubmenu(null); }}>
               <span className="model-picker-copy"><strong>{selectedModel?.name || "未配置模型"}</strong>{customModelMode && <small>推理强度 · {reasoningEffortLabels[reasoningEffort]}</small>}</span>
@@ -563,7 +780,7 @@ export function App() {
               ))}
             </div>}
           </div>
-          {sending ? <button className="send-button stop-button" type="button" aria-label="停止生成" title="停止生成" onClick={() => void stop()}><Square aria-hidden="true" /></button> : <button className="send-button" type="submit" aria-label="发送" disabled={!session || !(draft.replace(/\u200b/g, "").trim() || quotedText || attachments.length)}><ArrowUp aria-hidden="true" /></button>}
+          {sending ? <button className="send-button stop-button" type="button" aria-label="停止生成" title="停止生成" onClick={() => void stop()}><Square aria-hidden="true" /></button> : <button className="send-button" type="submit" aria-label="发送" disabled={!session || !(draft.replace(/\u200b/g, "").trim() || quotedText || attachments.length)}><ArrowUp aria-hidden="true" /></button>}</>}
         </form>
       </section>
       <aside className="trace-panel">

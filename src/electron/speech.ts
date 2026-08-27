@@ -143,15 +143,15 @@ export function stopVoiceWake(): void {
   voiceWakeAwaitingFirstAudio = false;
 }
 
-export function startSpeech(window: BrowserWindow | undefined, options?: { betterRecognition?: boolean }): { ok: true } {
+export function startSpeech(window: BrowserWindow | undefined, options?: { betterRecognition?: boolean }): { ok: true; remote: boolean } {
   speechWindow = window;
   enhancedRecognition = options?.betterRecognition === true;
-  if (worker) return { ok: true };
+  if (worker) return { ok: true, remote: mode === "remote" };
   if (remoteSocket && (remoteSocket.readyState === WebSocket.OPEN || remoteSocket.readyState === WebSocket.CONNECTING)) {
     // The main chat window and the wake overlay share one ASR connection. If the
     // other window started it first, route subsequent events to the latest caller.
     if (remoteSocket.readyState === WebSocket.OPEN) send(speechWindow, { type: "ready" });
-    return { ok: true };
+    return { ok: true, remote: true };
   }
 
   const url = remoteAsrUrl();
@@ -208,7 +208,7 @@ export function startSpeech(window: BrowserWindow | undefined, options?: { bette
         pendingRemoteAudio = [];
         if (wasRemote) send(speechWindow, { type: "stopped" });
       };
-      return { ok: true };
+      return { ok: true, remote: true };
     } catch {
       remoteSocket = undefined;
       mode = "idle";
@@ -235,7 +235,7 @@ export function startSpeech(window: BrowserWindow | undefined, options?: { bette
     mode = "idle";
     speechWindow = undefined;
   });
-  return { ok: true };
+  return { ok: true, remote: false };
 }
 
 export function sendSpeechAudio(samples: Float32Array): void {
@@ -264,4 +264,22 @@ export function stopSpeech(): void {
   if (!worker || worker.stdin.destroyed) return;
   worker.stdin.write(JSON.stringify({ type: "stop" }) + "\n");
   worker.stdin.end();
+}
+
+/** Abort the current utterance without waiting for recognition or enhancement. */
+export function cancelSpeech(): void {
+  pendingRemoteAudio = [];
+  if (remoteSocket) {
+    const socket = remoteSocket;
+    remoteSocket = undefined;
+    mode = "idle";
+    try { socket.close(1000, "cancelled"); } catch { /* Socket may already be closed. */ }
+    return;
+  }
+  if (worker) {
+    const current = worker;
+    worker = undefined;
+    mode = "idle";
+    try { current.kill(); } catch { /* Worker may already have exited. */ }
+  }
 }
