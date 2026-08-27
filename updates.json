@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "product": "SecAgent",
+  "generatedAt": "2026-08-27T12:03:30.868Z",
+  "channels": {
+    "preview": {
+      "channel": "preview",
+      "version": "0.1.0-alpha.3",
+      "tag": "v0.1.0-alpha.3",
+      "assetName": "SecAgent-Setup-0.1.0-alpha.3.exe",
+      "assetUrl": "https://github.com/SECTL/SecAgent/releases/download/v0.1.0-alpha.3/SecAgent-Setup-0.1.0-alpha.3.exe",
+      "htmlUrl": "https://github.com/SECTL/SecAgent/releases/tag/v0.1.0-alpha.3",
+      "sha256": "8d19d66f71d8aca818bb949470e1603eab4b3173d109a19d70a30e732eb60624",
+      "size": 222755827,
+      "publishedAt": "2026-08-27T12:03:30.868Z"
+    }
+  },
+  "signature": "Nyu/aOOVtrrEY77QYM7Mwsl+AVz2kf+6hpVlW/H+TGtLqvXzpVqmJJ40qvklBloNJ61mD+9tDIy9AlZaqvpCCQ=="
+}
