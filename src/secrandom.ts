@@ -5,7 +5,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { compareVersions, marketplaceRequestUrls } from "./marketplace.js";
-import { startCompanionProcess, writeCompanionPackage, type CompanionLogger } from "./companion-package.js";
+import { startCompanionProcess, writeCompanionPackage, type CompanionExecutor, type CompanionLogger } from "./companion-package.js";
 
 export const SECRANDOM_PLUGIN_REPOSITORY = "SECTL/SecRandom-SecAgent-Plugin";
 export const SECRANDOM_PLUGIN_ID = "secrandom.secagent";
@@ -205,7 +205,7 @@ Get-CimInstance Win32_Process |
     $version = $null
     try { $version = (Get-Item -LiteralPath $_.ExecutablePath).VersionInfo.ProductVersion } catch { }
     [pscustomobject]@{
-      executablePath = $_.ExecutablePath
+      executablePath = if ($_.ExecutablePath) { [string]$_.ExecutablePath } else { [string]$_.Name }
       pid = [int]$_.ProcessId
       commandLine = $_.CommandLine
       version = $version
@@ -410,10 +410,11 @@ export async function discoverSecRandomInstallations(options: SecRandomDiscovery
   ].flatMap((item) => executableCandidates(item, platform));
   const candidates = new Map<string, CachedCandidate>();
   const runningByPath = new Map(running.map((item) => [normalizePath(item.executablePath, platform), item]));
+  const runningByName = new Map(running.filter((item) => !/[\\/]/.test(item.executablePath)).map((item) => [api.basename(item.executablePath).toLowerCase(), item]));
   const versionOf = options.versionOf || ((executablePath: string) => defaultVersionOf(executablePath, platform, commandRunner));
   for (const executablePath of [...new Set(inputPaths.map((item) => api.normalize(item)))]) {
     if (!exists(executablePath)) continue;
-    const processInfo = runningByPath.get(normalizePath(executablePath, platform));
+    const processInfo = runningByPath.get(normalizePath(executablePath, platform)) || runningByName.get(api.basename(executablePath).toLowerCase());
     const version = processInfo?.version || await versionOf(executablePath);
     const layout = resolveSecRandomLayout(executablePath, { platform, home, env, exists, readFile });
     const compatible = isCompatibleSecRandomVersion(version);
@@ -594,7 +595,7 @@ export class SecRandomInstaller {
     return candidate;
   }
 
-  async install(targetIds: string[], onProgress?: (progress: SecRandomInstallProgress) => void): Promise<SecRandomInstallResult[]> {
+  async install(targetIds: string[], onProgress?: (progress: SecRandomInstallProgress) => void, executor?: CompanionExecutor): Promise<SecRandomInstallResult[]> {
     const latestCandidates = await this.detect();
     const selected = latestCandidates.filter((candidate) => targetIds.includes(candidate.id));
     const missing = targetIds.filter((id) => !selected.some((candidate) => candidate.id === id)).map((targetId) => ({ targetId, ok: false, action: "failed" as const, message: "找不到 SecRandom 安装目标，请重新检测" }));
@@ -615,13 +616,17 @@ export class SecRandomInstaller {
       const key = normalizePath(candidate.dataRoot, this.platform);
       groups.set(key, [...(groups.get(key) || []), candidate]);
     }
-    const restart = this.options.restartProcess || ((executablePath: string, args: string[]) => startCompanionProcess(executablePath, args, this.platform, (stage, data) => log(stage, data)));
-    const isRunning = this.options.isProcessRunning || defaultIsProcessRunning;
-    const requestClose = this.options.requestGracefulClose || ((pid: number) => defaultRequestGracefulClose(pid, this.platform, this.commandRunner));
-    const forceTerminate = this.options.forceTerminateProcess || ((pid: number) => defaultForceTerminate(pid, this.platform, this.commandRunner));
+    const restart = this.options.restartProcess || ((executablePath: string, args: string[]) => executor
+      ? executor.startProcess(executablePath, args, (stage, data) => log(stage, data))
+      : startCompanionProcess(executablePath, args, this.platform, (stage, data) => log(stage, data)));
+    const isRunning = this.options.isProcessRunning || ((pid: number) => executor ? executor.isProcessRunning(pid, (stage, data) => log(stage, data)) : defaultIsProcessRunning(pid));
+    const requestClose = this.options.requestGracefulClose || ((pid: number) => executor ? executor.requestGracefulClose(pid, (stage, data) => log(stage, data)) : defaultRequestGracefulClose(pid, this.platform, this.commandRunner));
+    const forceTerminate = this.options.forceTerminateProcess || ((pid: number) => executor ? executor.forceTerminate(pid, (stage, data) => log(stage, data)) : defaultForceTerminate(pid, this.platform, this.commandRunner));
     const exists = this.options.exists || defaultExists;
     const readFile = this.options.readFile || defaultReadFile;
-    const writePackage = this.options.writePackage || ((filePath: string, bytes: Buffer) => writeCompanionPackage(filePath, bytes, this.platform, (stage, data) => log(stage, data)));
+    const writePackage = this.options.writePackage || ((filePath: string, bytes: Buffer) => executor
+      ? executor.writePackage(filePath, bytes, (stage, data) => log(stage, data))
+      : writeCompanionPackage(filePath, bytes, this.platform, (stage, data) => log(stage, data)));
     for (const group of groups.values()) {
       log("group.begin", { dataRoot: group[0].dataRoot, targets: group.map((candidate) => candidate.id), pluginPackagesPaths: group[0].pluginPackagesPaths || [group[0].pluginPackagesPath] });
       const alreadyInstalled = group.every((candidate) => candidate.installedPluginVersion && compareVersions(candidate.installedPluginVersion, packageData.version) >= 0);

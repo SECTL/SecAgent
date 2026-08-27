@@ -78,6 +78,7 @@ interface Window {
     detectIccceInstallations(): Promise<IccceInstallCandidate[]>;
     pickIccceExecutable(): Promise<IccceInstallCandidate | undefined>;
     installIccceCompanion(targetIds: string[]): Promise<IccceInstallResult[]>;
+    installAllCompanions(payload: { classIsland?: string[]; secRandom?: string[]; iccce?: string[] }): Promise<{ classIsland: ClassIslandInstallResult[]; secRandom: SecRandomInstallResult[]; iccce: IccceInstallResult[] }>;
     onIccceProgress(listener: (progress: IccceInstallProgress) => void): () => void;
     getOobeProgress(): Promise<OobeProgress | undefined>;
     saveOobeProgress(progress: OobeProgress): Promise<OobeProgress | undefined>;

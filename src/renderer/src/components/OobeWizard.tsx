@@ -453,6 +453,7 @@ export function OobeWizard() {
     if (installingId) return;
     setError("");
     const tasks: Array<() => Promise<void>> = [];
+    const batchTargets: { classIsland?: string[]; secRandom?: string[]; iccce?: string[] } = {};
     const classIslandMarket = marketPlugins.find((plugin) => plugin.id === "classisland-connector");
     const secRandomMarket = marketPlugins.find((plugin) => plugin.id === "secrandom");
     const iccceMarket = marketPlugins.find((plugin) => plugin.id === "iccce-connector");
@@ -462,17 +463,21 @@ export function OobeWizard() {
     const classIslandCompanionInstalled = selectedClassIslandTargets.length > 0 && selectedClassIslandTargets.every((target) => Boolean(target.installedPluginVersion));
     const secRandomCompanionInstalled = selectedSecRandomTargets.length > 0 && selectedSecRandomTargets.every((target) => Boolean(target.installedPluginVersion));
     const iccceCompanionInstalled = selectedIccceTargets.length > 0 && selectedIccceTargets.every((target) => Boolean(target.installedPluginVersion));
-    const installSpecial = (app: DetectedCompanionApp | undefined, pluginId: string, market: MarketplacePlugin | undefined, targetIds: string[], companionInstalled: boolean, installCompanion: (market: MarketplacePlugin | undefined) => Promise<boolean>) => {
+    const installSpecial = (app: DetectedCompanionApp | undefined, pluginId: string, market: MarketplacePlugin | undefined, targetIds: string[], companionInstalled: boolean) => {
       if (!app?.detected && !targetIds.length) return;
       tasks.push(async () => {
         let connectorReady = plugins.some((plugin) => plugin.id === pluginId);
         if (!connectorReady) connectorReady = await installPlugin(market);
-        if (connectorReady && targetIds.length && !companionInstalled) await installCompanion(market);
+        if (connectorReady && targetIds.length && !companionInstalled) {
+          if (pluginId === "classisland-connector") batchTargets.classIsland = targetIds;
+          if (pluginId === "secrandom") batchTargets.secRandom = targetIds;
+          if (pluginId === "iccce-connector") batchTargets.iccce = targetIds;
+        }
       });
     };
-    installSpecial(apps.find((app) => app.pluginId === "classisland-connector"), "classisland-connector", classIslandMarket, classIslandSelectedIds, classIslandCompanionInstalled, installClassIslandPlugin);
-    installSpecial(apps.find((app) => app.pluginId === "secrandom"), "secrandom", secRandomMarket, secRandomSelectedIds, secRandomCompanionInstalled, installSecRandomPlugin);
-    installSpecial(apps.find((app) => app.pluginId === "iccce-connector"), "iccce-connector", iccceMarket, iccceSelectedIds, iccceCompanionInstalled, installIcccePlugin);
+    installSpecial(apps.find((app) => app.pluginId === "classisland-connector"), "classisland-connector", classIslandMarket, classIslandSelectedIds, classIslandCompanionInstalled);
+    installSpecial(apps.find((app) => app.pluginId === "secrandom"), "secrandom", secRandomMarket, secRandomSelectedIds, secRandomCompanionInstalled);
+    installSpecial(apps.find((app) => app.pluginId === "iccce-connector"), "iccce-connector", iccceMarket, iccceSelectedIds, iccceCompanionInstalled);
     for (const app of apps.filter((item) => item.detected)) {
       if (app.pluginId === "classisland-connector" || app.pluginId === "secrandom" || app.pluginId === "iccce-connector") continue;
       if (plugins.some((plugin) => plugin.id === app.pluginId)) continue;
@@ -483,6 +488,44 @@ export function OobeWizard() {
       return;
     }
     for (const task of tasks) await task();
+    if (!Object.values(batchTargets).some((targetIds) => targetIds?.length)) return;
+    setInstallingId("companions:batch");
+    setClassIslandPhase(batchTargets.classIsland ? "downloading" : "idle");
+    setSecRandomPhase(batchTargets.secRandom ? "downloading" : "idle");
+    setIcccePhase(batchTargets.iccce ? "downloading" : "idle");
+    try {
+      const result = await bridge.installAllCompanions(batchTargets);
+      const applyResults = <T extends { targetId: string }>(
+        results: T[],
+        setResults: (value: (current: Record<string, T>) => Record<string, T>) => void
+      ) => {
+        setResults((current) => ({ ...current, ...Object.fromEntries(results.map((item) => [item.targetId, item])) }));
+      };
+      applyResults(result.classIsland, setClassIslandResults);
+      applyResults(result.secRandom, setSecRandomResults);
+      applyResults(result.iccce, setIccceResults);
+      setClassIslandTargets((current) => current.map((target) => {
+        const item = result.classIsland.find((candidate) => candidate.targetId === target.id);
+        return item?.ok && item.version ? { ...target, installedPluginVersion: item.version } : target;
+      }));
+      setSecRandomTargets((current) => current.map((target) => {
+        const item = result.secRandom.find((candidate) => candidate.targetId === target.id);
+        return item?.ok && item.version ? { ...target, installedPluginVersion: item.version } : target;
+      }));
+      setIccceTargets((current) => current.map((target) => {
+        const item = result.iccce.find((candidate) => candidate.targetId === target.id);
+        return item?.ok && item.version ? { ...target, installedPluginVersion: item.version } : target;
+      }));
+      const failures = [...result.classIsland, ...result.secRandom, ...result.iccce].filter((item) => !item.ok);
+      if (failures.length) setError(failures.map((item) => item.message).join("；"));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setInstallingId("");
+      setClassIslandPhase("idle");
+      setSecRandomPhase("idle");
+      setIcccePhase("idle");
+    }
   };
 
   const recommended = useMemo(() => apps.filter((app) => app.detected || app.pluginId === "classisland-connector" || app.pluginId === "secrandom" || app.pluginId === "iccce-connector"), [apps]);

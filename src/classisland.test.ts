@@ -253,7 +253,7 @@ test("restarts a running ClassIsland and starts an idle instance after installin
     const [runningResult] = await runningInstaller.install([runningTarget.id]);
     assert.equal(runningResult.ok, true);
     assert.match(runningResult.message, /自动重启/);
-    assert.deepEqual(launches, [{ executablePath: exe, args: ["--profile", "school"] }]);
+    assert.deepEqual(launches, [{ executablePath: exe, args: ["--profile", "school", "--waitMutex"] }]);
 
     fs.rmSync(path.win32.join(root, "data", "Plugins", "classisland.secagent"), { recursive: true, force: true });
     launches.length = 0;
@@ -270,7 +270,7 @@ test("restarts a running ClassIsland and starts an idle instance after installin
     const [idleResult] = await idleInstaller.install([idleTarget.id]);
     assert.equal(idleResult.ok, true);
     assert.match(idleResult.message, /自动启动/);
-    assert.deepEqual(launches, [{ executablePath: exe, args: [] }]);
+    assert.deepEqual(launches, [{ executablePath: exe, args: ["--waitMutex"] }]);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -23,6 +23,7 @@ import { detectCompanionApps } from "../companion-apps.js";
 import { ClassIslandInstaller } from "../classisland.js";
 import { SecRandomInstaller } from "../secrandom.js";
 import { IccceInstaller } from "../iccce.js";
+import { WindowsCompanionExecutor } from "../companion-package.js";
 import { SecAgentHttpServer } from "../secagent-http.js";
 import { Models } from "@opencode-ai/models";
 import { DEFAULT_WAKE_HOTKEY, normalizeWakeHotkey } from "../wake-hotkey.js";
@@ -913,9 +914,14 @@ ipcMain.handle("classisland:pick", async () => {
 });
 ipcMain.handle("classisland:install", async (event, targetIds: unknown) => {
   if (!Array.isArray(targetIds) || targetIds.some((item) => typeof item !== "string")) throw new Error("ClassIsland 安装目标无效");
-  return classIslandInstaller.install(targetIds, (progress) => {
-    if (!event.sender.isDestroyed()) event.sender.send("classisland:progress", progress);
-  });
+  const executor = process.platform === "win32" ? new WindowsCompanionExecutor(logMain) : undefined;
+  try {
+    return await classIslandInstaller.install(targetIds, (progress) => {
+      if (!event.sender.isDestroyed()) event.sender.send("classisland:progress", progress);
+    }, executor);
+  } finally {
+    await executor?.close();
+  }
 });
 ipcMain.handle("secrandom:detect", () => secRandomInstaller.detect());
 ipcMain.handle("secrandom:pick", async () => {
@@ -928,9 +934,14 @@ ipcMain.handle("secrandom:pick", async () => {
 });
 ipcMain.handle("secrandom:install", async (event, targetIds: unknown) => {
   if (!Array.isArray(targetIds) || targetIds.some((item) => typeof item !== "string")) throw new Error("SecRandom 安装目标无效");
-  return secRandomInstaller.install(targetIds, (progress) => {
-    if (!event.sender.isDestroyed()) event.sender.send("secrandom:progress", progress);
-  });
+  const executor = process.platform === "win32" ? new WindowsCompanionExecutor(logMain) : undefined;
+  try {
+    return await secRandomInstaller.install(targetIds, (progress) => {
+      if (!event.sender.isDestroyed()) event.sender.send("secrandom:progress", progress);
+    }, executor);
+  } finally {
+    await executor?.close();
+  }
 });
 ipcMain.handle("iccce:detect", () => iccceInstaller.detect());
 ipcMain.handle("iccce:pick", async () => {
@@ -943,9 +954,60 @@ ipcMain.handle("iccce:pick", async () => {
 });
 ipcMain.handle("iccce:install", async (event, targetIds: unknown) => {
   if (!Array.isArray(targetIds) || targetIds.some((item) => typeof item !== "string")) throw new Error("ICC-CE 安装目标无效");
-  return iccceInstaller.install(targetIds, (progress) => {
-    if (!event.sender.isDestroyed()) event.sender.send("iccce:progress", progress);
-  });
+  const executor = process.platform === "win32" ? new WindowsCompanionExecutor(logMain) : undefined;
+  try {
+    return await iccceInstaller.install(targetIds, (progress) => {
+      if (!event.sender.isDestroyed()) event.sender.send("iccce:progress", progress);
+    }, executor);
+  } finally {
+    await executor?.close();
+  }
+});
+ipcMain.handle("companions:install-all", async (event, payload: unknown) => {
+  if (!payload || typeof payload !== "object") throw new Error("联动插件安装目标无效");
+  const input = payload as Record<string, unknown>;
+  const readIds = (key: string): string[] => {
+    const value = input[key];
+    if (value === undefined) return [];
+    if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) throw new Error(`${key} 安装目标无效`);
+    return value;
+  };
+  const classIslandIds = readIds("classIsland");
+  const secRandomIds = readIds("secRandom");
+  const iccceIds = readIds("iccce");
+  const sendProgress = (channel: string) => (progress: unknown) => {
+    if (!event.sender.isDestroyed()) event.sender.send(channel, progress);
+  };
+  const failureResults = (targetIds: string[], error: unknown) => targetIds.map((targetId) => ({
+    targetId,
+    ok: false,
+    action: "failed" as const,
+    message: error instanceof Error ? error.message : String(error)
+  }));
+  const executor = process.platform === "win32" ? new WindowsCompanionExecutor(logMain) : undefined;
+  logMain("companion.batch.begin", { classIslandIds, secRandomIds, iccceIds, elevatedExecutor: Boolean(executor) });
+  try {
+    let classIsland: unknown[] = [];
+    let secRandom: unknown[] = [];
+    let iccce: unknown[] = [];
+    if (classIslandIds.length) {
+      try { classIsland = await classIslandInstaller.install(classIslandIds, sendProgress("classisland:progress"), executor); }
+      catch (error) { logMain("companion.batch.classisland.failed", { error: error instanceof Error ? error.message : String(error) }); classIsland = failureResults(classIslandIds, error); }
+    }
+    if (secRandomIds.length) {
+      try { secRandom = await secRandomInstaller.install(secRandomIds, sendProgress("secrandom:progress"), executor); }
+      catch (error) { logMain("companion.batch.secrandom.failed", { error: error instanceof Error ? error.message : String(error) }); secRandom = failureResults(secRandomIds, error); }
+    }
+    if (iccceIds.length) {
+      try { iccce = await iccceInstaller.install(iccceIds, sendProgress("iccce:progress"), executor); }
+      catch (error) { logMain("companion.batch.iccce.failed", { error: error instanceof Error ? error.message : String(error) }); iccce = failureResults(iccceIds, error); }
+    }
+    logMain("companion.batch.success", { classIsland: classIsland.length, secRandom: secRandom.length, iccce: iccce.length });
+    return { classIsland, secRandom, iccce };
+  } finally {
+    await executor?.close();
+    logMain("companion.batch.end", { classIslandIds, secRandomIds, iccceIds });
+  }
 });
 ipcMain.handle("oobe:progress:get", () => readOobeProgress(DEFAULT_WORKSPACE));
 ipcMain.handle("oobe:progress:save", (_event, progress: OobeProgress) => {
