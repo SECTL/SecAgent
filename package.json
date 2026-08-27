@@ -18,7 +18,7 @@
     "package": "npm run build && electron-builder --publish never",
     "package:windows": "npm run build && electron-builder --win dir --publish never",
     "build:cli": "tsc -p tsconfig.json",
-    "dev": "electron-vite dev",
+    "dev": "node scripts/dev-electron-vite.mjs",
     "dev:cli": "tsx src/index.ts",
     "start": "node scripts/dev-launcher.mjs",
     "test": "node --test dist/**/*.test.js"

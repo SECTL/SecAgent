@@ -14,5 +14,8 @@ const mainEntry = mainEntries.find((entry) => fs.existsSync(entry)) || mainEntri
 if (!fs.existsSync(electronPath)) throw new Error(`找不到 Electron：${electronPath}。请先运行 pnpm install，并在 pnpm approve-builds 中允许 electron。`);
 if (!fs.existsSync(mainEntry)) throw new Error(`找不到已构建入口：${mainEntry}。请先运行 pnpm build。`);
 
-const child = spawn(electronPath, [mainEntry], { cwd: projectRoot, stdio: "inherit", env: { ...process.env, SECAGENT_DEV_LAUNCHER: "1" } });
+const environment = { ...process.env, SECAGENT_DEV_LAUNCHER: "1" };
+delete environment.ELECTRON_RUN_AS_NODE;
+
+const child = spawn(electronPath, [mainEntry], { cwd: projectRoot, stdio: "inherit", env: environment });
 child.on("exit", (code, signal) => { if (signal) process.kill(process.pid, signal); else process.exit(code ?? 0); });
