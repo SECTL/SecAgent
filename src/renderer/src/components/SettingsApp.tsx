@@ -77,7 +77,10 @@ export function SettingsApp() {
   }, [bridge]);
   useEffect(() => {
     void bridge.getUpdateState().then(setUpdateState).catch(() => undefined);
-    return bridge.onUpdateState(setUpdateState);
+    return bridge.onUpdateState((next) => {
+      setUpdateState(next);
+      if (next.status === "error") setError(next.error || "更新失败，请查看诊断日志。");
+    });
   }, [bridge]);
   useEffect(() => {
     if (isOobe) return;
@@ -204,18 +207,44 @@ export function SettingsApp() {
   const officialLogout = async () => { await bridge.officialLogout(); setOfficialLoggedIn(false); setOfficialExpired(false); setOfficialPoints(null); setOfficialPointBalances([]); setSettings((current) => current && { ...current, providers: current.providers.filter((provider) => provider.id !== "sectl-official") }); };
   const checkForUpdate = async () => {
     setError("");
-    try { setUpdateState(await bridge.checkForUpdate()); }
+    try {
+      const next = await bridge.checkForUpdate();
+      setUpdateState(next);
+      if (next.status === "error") setError(next.error || "更新检查失败，请查看诊断日志。");
+    }
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
   };
   const downloadUpdate = async () => {
     setError("");
-    try { setUpdateState(await bridge.downloadUpdate()); }
+    try {
+      const next = await bridge.downloadUpdate();
+      setUpdateState(next);
+      if (next.status === "error") setError(next.error || "更新下载失败，请查看诊断日志。");
+    }
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
   };
   const installUpdate = async () => {
     setError("");
-    try { setUpdateState(await bridge.installUpdate()); }
+    try {
+      const next = await bridge.installUpdate();
+      setUpdateState(next);
+      if (next.status === "error") setError(next.error || "更新安装失败，请查看诊断日志。");
+    }
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+  };
+  const openUpdateLogs = async () => {
+    setError("");
+    try {
+      const directory = await bridge.openDiagnosticLogs();
+      setSuccess(`日志目录已打开：${directory}`);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+  };
+  const exportUpdateLogs = async () => {
+    setError("");
+    try {
+      const result = await bridge.exportDiagnosticLogs();
+      if (!result.canceled && result.path) setSuccess(`诊断日志已导出：${result.path}`);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
   };
   const uploadDiagnostic = async () => {
     if (!diagnosticSessionId || !settings.telemetry.enabled) return;
@@ -247,8 +276,11 @@ export function SettingsApp() {
     <section id="settings-updates" className={`settings-section ${activePage === "settings-updates" ? "settings-section-active" : ""}`}><div className="section-title"><div><h2>更新</h2><p>从 GitHub Release 获取 SecAgent 更新。当前仅支持 Windows 安装包更新。</p></div></div>
       <article className="settings-card update-settings-card">
         {!updateSupported ? <p className="settings-help">当前平台暂不支持应用内更新。</p> : <>
+          {updateState?.status === "unsupported" && <div className="settings-help update-warning"><strong>暂不支持应用内更新</strong><span>{updateState.supportReason || updateState.error || "当前环境不支持应用内更新。"}</span></div>}
+          {updateState?.status === "error" && <div className="settings-error update-error"><strong>更新检查失败</strong><span>{updateState.error || "请查看诊断日志。"}</span><button type="button" className="text-button" onClick={() => void checkForUpdate()}>重试</button></div>}
           <div className="update-version-row"><div><span className="settings-help">当前版本</span><strong>{updateState?.currentVersion || "读取中…"}</strong></div><button type="button" className="secondary-button" disabled={updateState?.status === "checking"} onClick={() => void checkForUpdate()}>{updateState?.status === "checking" ? "检查中…" : "检查更新"}</button></div>
           <div className="form-grid update-channel-grid"><label>更新通道<select value={settings.updates.channel} onChange={(event) => setSettings((current) => current && { ...current, updates: { ...current.updates, channel: event.target.value as UpdateChannel } })}><option value="stable">普通版</option><option value="preview">预览版</option></select></label></div>
+          <div className="update-diagnostic-actions"><button type="button" className="secondary-button" onClick={() => void openUpdateLogs()}>打开日志目录</button><button type="button" className="secondary-button" onClick={() => void exportUpdateLogs()}>导出诊断日志</button></div>
           <label className="toggle-row"><span className="toggle-copy"><strong>自动检查更新</strong><small>启动后及每 6 小时检查一次 GitHub Release。</small></span><input type="checkbox" checked={settings.updates.autoCheck} onChange={(event) => setSettings((current) => current && { ...current, updates: { ...current.updates, autoCheck: event.target.checked } })} /></label>
           <label className="toggle-row"><span className="toggle-copy"><strong>自动下载更新</strong><small>自动检查发现新版本后，后台下载完整 Windows 安装包。</small></span><input type="checkbox" checked={settings.updates.autoDownload} onChange={(event) => setSettings((current) => current && { ...current, updates: { ...current.updates, autoDownload: event.target.checked } })} /></label>
           <label className="toggle-row"><span className="toggle-copy"><strong>退出应用后自动安装</strong><small>已有下载完成的更新时，在应用退出过程中静默运行安装程序。</small></span><input type="checkbox" checked={settings.updates.autoInstallOnQuit} onChange={(event) => setSettings((current) => current && { ...current, updates: { ...current.updates, autoInstallOnQuit: event.target.checked } })} /></label>

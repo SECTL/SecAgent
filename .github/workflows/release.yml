@@ -11,6 +11,8 @@ permissions:
 jobs:
   release:
     runs-on: windows-latest
+    env:
+      SECAGENT_UPDATE_PRIVATE_KEY: ${{ secrets.SECAGENT_UPDATE_PRIVATE_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -63,6 +65,36 @@ jobs:
           if (-not (Test-Path -LiteralPath $setup)) { throw "Installer was not generated: $setup" }
           $hash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $(Split-Path -Leaf $setup)" | Set-Content -LiteralPath "$setup.sha256" -Encoding ascii
+
+      - name: Checkout metadata branch
+        if: ${{ env.SECAGENT_UPDATE_PRIVATE_KEY != '' }}
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          path: metadata-repo
+          fetch-depth: 1
+
+      - name: Generate and publish signed channel metadata
+        if: ${{ env.SECAGENT_UPDATE_PRIVATE_KEY != '' }}
+        shell: pwsh
+        run: |
+          node scripts/create-update-metadata.mjs `
+            metadata-repo/updates.json `
+            "${{ steps.version.outputs.version }}" `
+            "${{ github.ref_name }}" `
+            "release/inno/SecAgent-Setup-${{ steps.version.outputs.version }}.exe"
+          git -C metadata-repo config user.name "github-actions[bot]"
+          git -C metadata-repo config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C metadata-repo add updates.json
+          git -C metadata-repo diff --cached --quiet
+          if ($LASTEXITCODE -ne 0) {
+            git -C metadata-repo commit -m "chore: update signed update metadata for ${{ github.ref_name }} [skip ci]"
+            git -C metadata-repo push origin HEAD:master
+          }
+
+      - name: Report unsigned metadata fallback
+        if: ${{ env.SECAGENT_UPDATE_PRIVATE_KEY == '' }}
+        run: echo "SECAGENT_UPDATE_PRIVATE_KEY is not configured; clients will use the GitHub Releases API fallback."
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2

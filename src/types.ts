@@ -63,6 +63,18 @@ export interface TelemetrySettings {
 
 export type UpdateStatus = "unsupported" | "idle" | "checking" | "up-to-date" | "available" | "downloading" | "downloaded" | "installing" | "error";
 
+export interface UpdateRequestAttempt {
+  phase: "metadata" | "release-api" | "checksum" | "asset";
+  route: "proxy" | "direct";
+  url: string;
+  ok: boolean;
+  status?: number;
+  contentType?: string;
+  responseBytes?: number;
+  durationMs: number;
+  error?: string;
+}
+
 export interface UpdateRelease {
   version: string;
   tag: string;
@@ -88,6 +100,9 @@ export interface UpdateState {
   totalBytes?: number;
   checkedAt?: string;
   error?: string;
+  operationId?: string;
+  attempts?: UpdateRequestAttempt[];
+  supportReason?: string;
 }
 
 /** An image selected in the desktop composer, persisted with the user message. */

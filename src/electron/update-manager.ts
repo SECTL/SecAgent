@@ -2,8 +2,8 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
 import { compareVersions } from "../marketplace.js";
-import { clearPendingUpdate, downloadUpdate, findLatestUpdate, pendingUpdateFile, readPendingUpdate, writePendingUpdate, type PendingUpdate } from "../update.js";
-import type { UpdatePreferences, UpdateState } from "../types.js";
+import { clearPendingUpdate, downloadUpdate, findLatestUpdate, pendingUpdateFile, readPendingUpdate, writePendingUpdate, type PendingUpdate, type UpdateRequestHooks } from "../update.js";
+import type { UpdatePreferences, UpdateRequestAttempt, UpdateState } from "../types.js";
 
 export interface WindowsUpdateManagerOptions {
   currentVersion: string;
@@ -34,17 +34,23 @@ export class WindowsUpdateManager {
     this.preferences = { ...options.preferences };
     this.cacheDirectory = path.join(options.storageDirectory, "updates");
     this.pendingFile = pendingUpdateFile(this.cacheDirectory);
+    const supportReason = this.isSupported() ? undefined : this.unsupportedReason();
     this.state = {
       currentVersion: options.currentVersion,
       channel: this.preferences.channel,
       status: this.isSupported() ? "idle" : "unsupported",
-      downloadedBytes: 0
+      downloadedBytes: 0,
+      ...(supportReason ? { error: supportReason, supportReason } : {})
     };
     this.loadPending();
   }
 
   getState(): UpdateState {
-    return { ...this.state, ...(this.state.release ? { release: { ...this.state.release } } : {}) };
+    return {
+      ...this.state,
+      ...(this.state.release ? { release: { ...this.state.release } } : {}),
+      ...(this.state.attempts ? { attempts: this.state.attempts.map((attempt) => ({ ...attempt })) } : {})
+    };
   }
 
   setPreferences(preferences: UpdatePreferences): void {
@@ -55,7 +61,8 @@ export class WindowsUpdateManager {
         clearPendingUpdate(this.pendingFile, this.pending);
         this.pending = undefined;
       }
-      this.state = { currentVersion: this.state.currentVersion, channel: this.preferences.channel, status: this.isSupported() ? "idle" : "unsupported", downloadedBytes: 0 };
+      const supportReason = this.isSupported() ? undefined : this.unsupportedReason();
+      this.state = { currentVersion: this.state.currentVersion, channel: this.preferences.channel, status: this.isSupported() ? "idle" : "unsupported", downloadedBytes: 0, ...(supportReason ? { error: supportReason, supportReason } : {}) };
     } else {
       this.state.channel = this.preferences.channel;
     }
@@ -63,7 +70,13 @@ export class WindowsUpdateManager {
   }
 
   async check(automatic = false): Promise<UpdateState> {
-    if (!this.isSupported()) return this.getState();
+    if (!this.isSupported()) {
+      const reason = this.unsupportedReason();
+      this.state = { ...this.state, status: "unsupported", error: reason, supportReason: reason };
+      this.options.log("updates.check.unsupported", { platform: this.options.platform, isPackaged: this.options.isPackaged, reason });
+      this.publish();
+      return this.getState();
+    }
     if (automatic && !this.preferences.autoCheck) return this.getState();
     if (this.checkPromise) return this.checkPromise;
     this.checkPromise = this.performCheck(automatic).finally(() => { this.checkPromise = undefined; });
@@ -111,26 +124,41 @@ export class WindowsUpdateManager {
   }
 
   private async performCheck(automatic: boolean): Promise<UpdateState> {
-    this.state = { ...this.state, status: "checking", error: undefined, downloadedBytes: 0 };
+    const operationId = crypto.randomUUID();
+    this.state = { ...this.state, status: "checking", error: undefined, supportReason: undefined, downloadedBytes: 0, operationId, attempts: [] };
     this.publish();
+    this.options.log("updates.check.started", {
+      operationId,
+      automatic,
+      currentVersion: this.state.currentVersion,
+      channel: this.preferences.channel,
+      platform: this.options.platform,
+      arch: process.arch,
+      isPackaged: this.options.isPackaged
+    });
+    const hooks: UpdateRequestHooks = {
+      onAttempt: (attempt) => this.recordAttempt(operationId, attempt),
+      onEvent: (event) => this.options.log(`updates.${event.name}`, { operationId, ...(event.data || {}) })
+    };
     try {
-      const release = await findLatestUpdate(this.preferences.channel, this.state.currentVersion);
+      const release = await findLatestUpdate(this.preferences.channel, this.state.currentVersion, undefined, hooks);
       const checkedAt = new Date().toISOString();
       if (!release) {
         this.state = { ...this.state, release: undefined, status: this.pending ? "downloaded" : "up-to-date", downloadedVersion: this.pending?.version, checkedAt, error: undefined };
         this.publish();
-        this.options.log("updates.checked", { channel: this.preferences.channel, available: false });
+        this.options.log("updates.checked", { operationId, channel: this.preferences.channel, available: false, attempts: this.state.attempts?.length || 0 });
         return this.getState();
       }
       this.state = { ...this.state, status: this.pending?.version === release.version ? "downloaded" : "available", release, checkedAt, downloadedVersion: this.pending?.version, error: undefined, downloadedBytes: 0 };
       this.publish();
-      this.options.log("updates.checked", { channel: this.preferences.channel, version: release.version, automatic });
+      this.options.log("updates.checked", { operationId, channel: this.preferences.channel, version: release.version, automatic, attempts: this.state.attempts?.length || 0 });
       if (automatic && this.preferences.autoDownload && this.state.status === "available") return this.download();
       return this.getState();
     } catch (error) {
-      this.state = { ...this.state, status: "error", error: error instanceof Error ? error.message : String(error) };
+      const message = this.formatCheckError(error);
+      this.state = { ...this.state, status: "error", error: message };
       this.publish();
-      this.options.log("updates.check.failed", { error: this.state.error });
+      this.options.log("updates.check.failed", { operationId, error: message, attempts: this.state.attempts?.length || 0 });
       return this.getState();
     }
   }
@@ -138,13 +166,19 @@ export class WindowsUpdateManager {
   private async performDownload(): Promise<UpdateState> {
     const release = this.state.release;
     if (!release) throw new Error("请先检查更新");
-    this.state = { ...this.state, status: "downloading", downloadedBytes: 0, totalBytes: release.size, error: undefined };
+    const operationId = this.state.operationId || crypto.randomUUID();
+    this.state = { ...this.state, status: "downloading", downloadedBytes: 0, totalBytes: release.size, error: undefined, operationId, attempts: [] };
     this.publish();
+    this.options.log("updates.download.started", { operationId, version: release.version, channel: release.channel, assetName: release.assetName });
+    const hooks: UpdateRequestHooks = {
+      onAttempt: (attempt) => this.recordAttempt(operationId, attempt),
+      onEvent: (event) => this.options.log(`updates.${event.name}`, { operationId, ...(event.data || {}) })
+    };
     try {
       const result = await downloadUpdate(release, this.cacheDirectory, undefined, (progress) => {
         this.state = { ...this.state, status: "downloading", downloadedBytes: progress.downloadedBytes, ...(progress.totalBytes ? { totalBytes: progress.totalBytes } : {}) };
         this.publish();
-      });
+      }, hooks);
       this.pending = result.pending;
       writePendingUpdate(this.pendingFile, this.pending);
       this.state = { ...this.state, status: "downloaded", downloadedVersion: release.version, downloadedBytes: result.bytes, totalBytes: result.bytes, error: undefined };
@@ -157,6 +191,27 @@ export class WindowsUpdateManager {
       this.options.log("updates.download.failed", { error: this.state.error });
       return this.getState();
     }
+  }
+
+  private recordAttempt(operationId: string, attempt: UpdateRequestAttempt): void {
+    const attempts = [...(this.state.attempts || []), attempt];
+    this.state = { ...this.state, operationId, attempts };
+    this.options.log("updates.request.attempt", { operationId, ...attempt });
+    this.publish();
+  }
+
+  private unsupportedReason(): string {
+    if (this.options.platform !== "win32") return "应用内更新目前仅支持 Windows。";
+    if (!this.options.isPackaged) return "当前运行的是开发版本，打包安装版才支持应用内更新。";
+    return "当前环境不支持应用内更新。";
+  }
+
+  private formatCheckError(error: unknown): string {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/HTTP 403/.test(message)) return "GitHub 暂时拒绝了更新检查（HTTP 403），请稍后重试或检查网络。";
+    if (/HTTP 404/.test(message)) return "没有找到更新清单或 Release，请稍后重试。";
+    if (/timeout|timed out|abort/i.test(message)) return "更新检查超时，请检查网络后重试。";
+    return message || "更新检查失败，请查看诊断日志。";
   }
 
   private loadPending(): void {

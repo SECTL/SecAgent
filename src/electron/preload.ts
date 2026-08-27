@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld("secagent", {
   checkForUpdate: () => ipcRenderer.invoke("updates:check"),
   downloadUpdate: () => ipcRenderer.invoke("updates:download"),
   installUpdate: () => ipcRenderer.invoke("updates:install"),
+  openDiagnosticLogs: () => ipcRenderer.invoke("diagnostics:open-logs"),
+  exportDiagnosticLogs: () => ipcRenderer.invoke("diagnostics:export-logs"),
   officialStatus: () => ipcRenderer.invoke("official:status"),
   officialBalance: () => ipcRenderer.invoke("official:balance"),
   officialOAuthLogin: () => ipcRenderer.invoke("official:oauth-login"),

@@ -29,6 +29,7 @@ import { DEFAULT_WAKE_HOTKEY, normalizeWakeHotkey } from "../wake-hotkey.js";
 import { generateSessionTitle } from "../session-title.js";
 import { normalizeReasoningEffort } from "../reasoning.js";
 import { WindowsUpdateManager } from "./update-manager.js";
+import { diagnosticLogDirectory, exportDiagnosticLogs } from "./diagnostic-logs.js";
 import { TelemetryClient, hashIdentifier, normalizeMessage, sanitizeStack, type TelemetryFailure } from "../telemetry.js";
 
 const SENTRY_DSN = process.env.SENTRY_DSN?.trim() || "";
@@ -725,6 +726,31 @@ ipcMain.handle("updates:download", async () => {
 ipcMain.handle("updates:install", () => {
   if (!updateManager) throw new Error("更新服务尚未启动");
   return updateManager.install();
+});
+ipcMain.handle("diagnostics:open-logs", async () => {
+  const directory = diagnosticLogDirectory(DEFAULT_WORKSPACE);
+  fs.mkdirSync(directory, { recursive: true });
+  const error = await shell.openPath(directory);
+  if (error) throw new Error(error);
+  logMain("diagnostics.logs.opened");
+  return directory;
+});
+ipcMain.handle("diagnostics:export-logs", async () => {
+  const defaultPath = path.join(app.getPath("documents"), `SecAgent-diagnostics-${new Date().toISOString().replace(/[:.]/g, "-")}.zip`);
+  const result = await dialog.showSaveDialog({
+    title: "导出 SecAgent 诊断日志",
+    defaultPath,
+    filters: [{ name: "ZIP 压缩包", extensions: ["zip"] }]
+  });
+  if (result.canceled || !result.filePath) return { canceled: true as const };
+  const archivePath = exportDiagnosticLogs(DEFAULT_WORKSPACE, result.filePath, {
+    appVersion: app.getVersion(),
+    platform: process.platform,
+    arch: process.arch,
+    isPackaged: app.isPackaged
+  });
+  logMain("diagnostics.logs.exported", { path: archivePath });
+  return { canceled: false as const, path: archivePath };
 });
 ipcMain.handle("settings:skills", () => {
   const { config } = loadConfig(DEFAULT_WORKSPACE);

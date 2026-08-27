@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { downloadUpdate, findLatestUpdate, normalizeReleaseVersion, readPendingUpdate, releaseAssetName, writePendingUpdate } from "./update.js";
+import { canonicalizeUpdateJson, downloadUpdate, findLatestUpdate, normalizeReleaseVersion, readPendingUpdate, releaseAssetName, writePendingUpdate } from "./update.js";
 
 test("normalizes release versions and labels alpha/beta versions", () => {
   assert.equal(normalizeReleaseVersion("v1.2.3"), "1.2.3");
@@ -78,5 +78,56 @@ test("falls back from the GitHub proxy to direct access", async () => {
   const release = await findLatestUpdate("stable", "1.0.0", fetcher);
   assert.equal(release?.version, "1.1.0");
   assert.match(calls[0], /ghproxy\.sectl\.cn/);
-  assert.match(calls[1], /api\.github\.com/);
+  assert.equal(calls.some((url) => url.includes("api.github.com")), true);
+});
+
+test("prefers a signed channel metadata document over the GitHub releases API", async () => {
+  const keyPair = crypto.generateKeyPairSync("ed25519");
+  const unsigned = {
+    schemaVersion: 1,
+    product: "SecAgent",
+    generatedAt: "2026-08-27T00:00:00.000Z",
+    channels: {
+      preview: {
+        channel: "preview",
+        version: "1.2.0-alpha.1",
+        tag: "v1.2.0-alpha.1",
+        assetName: releaseAssetName("1.2.0-alpha.1"),
+        assetUrl: "https://github.com/SECTL/SecAgent/releases/download/v1.2.0-alpha.1/SecAgent-Setup-1.2.0-alpha.1.exe",
+        htmlUrl: "https://github.com/SECTL/SecAgent/releases/tag/v1.2.0-alpha.1",
+        sha256: "a".repeat(64),
+        size: 123
+      }
+    }
+  } as const;
+  const metadata = {
+    ...unsigned,
+    signature: crypto.sign(null, Buffer.from(canonicalizeUpdateJson(unsigned), "utf8"), keyPair.privateKey).toString("base64")
+  };
+  const calls: string[] = [];
+  const fetcher = async (input: string | URL): Promise<Response> => {
+    const url = String(input);
+    calls.push(url);
+    if (url.includes("updates.json")) return new Response(JSON.stringify(metadata), { status: 200 });
+    throw new Error(`unexpected URL ${url}`);
+  };
+  const publicKey = keyPair.publicKey.export({ type: "spki", format: "pem" }).toString();
+  const release = await findLatestUpdate("preview", "1.0.0", fetcher, { publicKey });
+  assert.equal(release?.version, "1.2.0-alpha.1");
+  assert.equal(calls.every((url) => url.includes("updates.json")), true);
+});
+
+test("records both update routes when the metadata and releases API are unavailable", async () => {
+  const attempts: Array<{ phase: string; route: string; status?: number }> = [];
+  const fetcher = async (): Promise<Response> => new Response("unavailable", { status: 503 });
+  await assert.rejects(
+    findLatestUpdate("stable", "1.0.0", fetcher, { onAttempt: (attempt) => attempts.push(attempt) }),
+    /无法访问 GitHub 更新服务/
+  );
+  assert.deepEqual(attempts.map((attempt) => `${attempt.phase}:${attempt.route}:${attempt.status}`), [
+    "metadata:proxy:503",
+    "metadata:direct:503",
+    "release-api:proxy:503",
+    "release-api:direct:503"
+  ]);
 });

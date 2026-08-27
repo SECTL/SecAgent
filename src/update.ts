@@ -1,11 +1,14 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { compareVersions, marketplaceRequestUrls } from "./marketplace.js";
-import type { UpdateChannel, UpdateRelease } from "./types.js";
+import { compareVersions, marketplaceRequestUrls, DEFAULT_MARKETPLACE_PROXY_URL } from "./marketplace.js";
+import { OFFICIAL_UPDATE_PUBLIC_KEY as EMBEDDED_UPDATE_PUBLIC_KEY } from "./update-public-key.js";
+import type { UpdateChannel, UpdateRelease, UpdateRequestAttempt } from "./types.js";
 
 export const UPDATE_REPOSITORY = "SECTL/SecAgent";
 export const UPDATE_API_URL = `https://api.github.com/repos/${UPDATE_REPOSITORY}/releases?per_page=100`;
+export const UPDATE_METADATA_URL = `https://raw.githubusercontent.com/${UPDATE_REPOSITORY}/refs/heads/master/updates.json`;
+export const UPDATE_METADATA_SCHEMA_VERSION = 1;
 
 type Fetcher = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
@@ -24,6 +27,51 @@ interface GitHubRelease {
   draft?: unknown;
   prerelease?: unknown;
   assets?: unknown;
+}
+
+interface UpdateMetadataEntry {
+  channel: UpdateChannel;
+  version: string;
+  tag: string;
+  assetName: string;
+  assetUrl: string;
+  htmlUrl: string;
+  sha256: string;
+  size?: number;
+  body?: string;
+  publishedAt?: string;
+}
+
+interface UpdateMetadata {
+  schemaVersion: typeof UPDATE_METADATA_SCHEMA_VERSION;
+  product: "SecAgent";
+  generatedAt: string;
+  channels: Partial<Record<UpdateChannel, UpdateMetadataEntry>>;
+  signature: string;
+}
+
+export interface UpdateRequestHooks {
+  onAttempt?: (attempt: UpdateRequestAttempt) => void;
+  onEvent?: (event: { name: string; data?: Record<string, unknown> }) => void;
+  publicKey?: string;
+}
+
+export class UpdateRequestError extends Error {
+  constructor(
+    message: string,
+    public readonly attempts: UpdateRequestAttempt[],
+    public readonly lastStatus?: number
+  ) {
+    super(message);
+    this.name = "UpdateRequestError";
+  }
+}
+
+class UpdateMetadataSignatureError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UpdateMetadataSignatureError";
+  }
 }
 
 export interface PendingUpdate {
@@ -83,10 +131,30 @@ export function clearPendingUpdate(filePath: string, pending?: PendingUpdate): v
   fs.rmSync(filePath, { force: true });
 }
 
-export async function findLatestUpdate(channel: UpdateChannel, currentVersion: string, fetcher: Fetcher = fetch): Promise<UpdateRelease | undefined> {
+export async function findLatestUpdate(
+  channel: UpdateChannel,
+  currentVersion: string,
+  fetcher: Fetcher = fetch,
+  hooks: UpdateRequestHooks = {}
+): Promise<UpdateRelease | undefined> {
+  try {
+    const response = await requestGitHub(appendCacheBust(UPDATE_METADATA_URL), fetcher, {
+      headers: { Accept: "application/json", "Cache-Control": "no-cache", "User-Agent": "SecAgent" }
+    }, "metadata", hooks);
+    const metadata = verifyUpdateMetadata(await response.text(), hooks.publicKey || EMBEDDED_UPDATE_PUBLIC_KEY);
+    const entry = metadata.channels[channel];
+    if (!entry) throw new Error(`更新清单缺少 ${channel} 通道`);
+    const release = metadataEntryToRelease(entry, channel);
+    hooks.onEvent?.({ name: "metadata.accepted", data: { channel, version: release.version, tag: release.tag } });
+    return compareVersions(release.version, currentVersion) > 0 ? release : undefined;
+  } catch (error) {
+    if (error instanceof UpdateMetadataSignatureError) throw error;
+    hooks.onEvent?.({ name: "metadata.fallback", data: { error: errorMessage(error) } });
+  }
+
   const response = await requestGitHub(appendCacheBust(UPDATE_API_URL), fetcher, {
     headers: { Accept: "application/vnd.github+json", "User-Agent": "SecAgent" }
-  });
+  }, "release-api", hooks);
   const payload = await response.json() as unknown;
   if (!Array.isArray(payload)) throw new Error("GitHub Release 列表格式无效");
   const candidates = payload
@@ -97,10 +165,16 @@ export async function findLatestUpdate(channel: UpdateChannel, currentVersion: s
   return candidates[0];
 }
 
-export async function downloadUpdate(release: UpdateRelease, storageDirectory: string, fetcher: Fetcher = fetch, onProgress?: (progress: DownloadProgress) => void): Promise<DownloadedUpdate> {
-  const expectedSha = await expectedSha256(release, fetcher);
+export async function downloadUpdate(
+  release: UpdateRelease,
+  storageDirectory: string,
+  fetcher: Fetcher = fetch,
+  onProgress?: (progress: DownloadProgress) => void,
+  hooks: UpdateRequestHooks = {}
+): Promise<DownloadedUpdate> {
+  const expectedSha = await expectedSha256(release, fetcher, hooks);
   if (!expectedSha) throw new Error("GitHub Release 缺少有效的 SHA-256 校验值");
-  const response = await requestGitHub(release.assetUrl, fetcher, { headers: { "User-Agent": "SecAgent" } });
+  const response = await requestGitHub(release.assetUrl, fetcher, { headers: { "User-Agent": "SecAgent" } }, "asset", hooks);
   const bytes = await readResponseBytes(response, onProgress);
   const actualSha = crypto.createHash("sha256").update(bytes).digest("hex");
   if (actualSha.toLowerCase() !== expectedSha.toLowerCase()) throw new Error("更新安装包 SHA-256 校验失败");
@@ -124,14 +198,89 @@ export async function downloadUpdate(release: UpdateRelease, storageDirectory: s
   };
 }
 
-async function expectedSha256(release: UpdateRelease, fetcher: Fetcher): Promise<string | undefined> {
+function verifyUpdateMetadata(value: string, publicKey: string): UpdateMetadata {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value.replace(/^\uFEFF/, ""));
+  } catch {
+    throw new Error("SecAgent 更新清单不是有效 JSON");
+  }
+  if (!isRecord(parsed) || parsed.schemaVersion !== UPDATE_METADATA_SCHEMA_VERSION || parsed.product !== "SecAgent" || typeof parsed.generatedAt !== "string" || !isRecord(parsed.channels) || typeof parsed.signature !== "string") {
+    throw new Error("SecAgent 更新清单格式无效");
+  }
+  let signature: Buffer;
+  try {
+    signature = Buffer.from(parsed.signature, "base64");
+  } catch {
+    throw new UpdateMetadataSignatureError("SecAgent 更新清单签名编码无效");
+  }
+  const unsigned = { schemaVersion: parsed.schemaVersion, product: parsed.product, generatedAt: parsed.generatedAt, channels: parsed.channels };
+  let valid = false;
+  try {
+    valid = crypto.verify(null, Buffer.from(canonicalizeUpdateJson(unsigned), "utf8"), publicKey, signature);
+  } catch {
+    valid = false;
+  }
+  if (!valid) throw new UpdateMetadataSignatureError("SecAgent 更新清单签名校验失败");
+
+  const channels: Partial<Record<UpdateChannel, UpdateMetadataEntry>> = {};
+  for (const channel of ["stable", "preview"] as const) {
+    const entry = parsed.channels[channel];
+    if (entry === undefined) continue;
+    channels[channel] = validateMetadataEntry(entry, channel);
+  }
+  return { schemaVersion: UPDATE_METADATA_SCHEMA_VERSION, product: "SecAgent", generatedAt: parsed.generatedAt, channels, signature: parsed.signature };
+}
+
+function validateMetadataEntry(value: unknown, channel: UpdateChannel): UpdateMetadataEntry {
+  if (!isRecord(value) || value.channel !== channel || typeof value.version !== "string" || typeof value.tag !== "string" || typeof value.assetName !== "string" || typeof value.assetUrl !== "string" || typeof value.htmlUrl !== "string" || typeof value.sha256 !== "string" || !SHA256_PATTERN.test(value.sha256) || !isGitHubUrl(value.assetUrl) || !isGitHubUrl(value.htmlUrl)) {
+    throw new Error(`SecAgent ${channel} 更新清单内容无效`);
+  }
+  const version = normalizeReleaseVersion(value.version);
+  const tagVersion = normalizeReleaseVersion(value.tag);
+  if (!version || !tagVersion || version !== tagVersion || value.assetName !== releaseAssetName(version)) throw new Error(`SecAgent ${channel} 更新清单版本信息不一致`);
+  if (typeof value.size !== "undefined" && (typeof value.size !== "number" || !Number.isSafeInteger(value.size) || value.size <= 0)) throw new Error(`SecAgent ${channel} 更新清单文件大小无效`);
+  if (typeof value.body !== "undefined" && typeof value.body !== "string") throw new Error(`SecAgent ${channel} 更新清单更新说明无效`);
+  if (typeof value.publishedAt !== "undefined" && typeof value.publishedAt !== "string") throw new Error(`SecAgent ${channel} 更新清单发布时间无效`);
+  return {
+    channel,
+    version,
+    tag: value.tag,
+    assetName: value.assetName,
+    assetUrl: value.assetUrl,
+    htmlUrl: value.htmlUrl,
+    sha256: value.sha256.toLowerCase(),
+    ...(typeof value.size === "number" ? { size: value.size } : {}),
+    ...(typeof value.body === "string" ? { body: value.body } : {}),
+    ...(typeof value.publishedAt === "string" ? { publishedAt: value.publishedAt } : {})
+  };
+}
+
+function metadataEntryToRelease(entry: UpdateMetadataEntry, channel: UpdateChannel): UpdateRelease {
+  const releaseType = releaseTypeFromVersion(entry.version);
+  return {
+    version: entry.version,
+    tag: entry.tag,
+    ...(releaseType ? { releaseType } : {}),
+    channel,
+    htmlUrl: entry.htmlUrl,
+    body: entry.body || "",
+    ...(entry.publishedAt ? { publishedAt: entry.publishedAt } : {}),
+    assetName: entry.assetName,
+    assetUrl: entry.assetUrl,
+    sha256: entry.sha256,
+    ...(entry.size !== undefined ? { size: entry.size } : {})
+  };
+}
+
+async function expectedSha256(release: UpdateRelease, fetcher: Fetcher, hooks: UpdateRequestHooks): Promise<string | undefined> {
   const digest = release.sha256 && SHA256_PATTERN.test(release.sha256) ? release.sha256.toLowerCase() : undefined;
   let sidecarDigest: string | undefined;
   if (release.checksumUrl) {
-    const response = await requestGitHub(release.checksumUrl, fetcher, { headers: { "User-Agent": "SecAgent" } });
+    const response = await requestGitHub(release.checksumUrl, fetcher, { headers: { "User-Agent": "SecAgent" } }, "checksum", hooks);
     sidecarDigest = parseChecksum(await response.text());
   }
-  if (digest && sidecarDigest && digest !== sidecarDigest) throw new Error("Release SHA-256 校验文件与资产摘要不一致");
+  if (digest && sidecarDigest && digest !== sidecarDigest) throw new Error("Release SHA-256 校验文件与资源摘要不一致");
   return digest || sidecarDigest;
 }
 
@@ -145,10 +294,11 @@ function toUpdateRelease(raw: GitHubRelease, channel: UpdateChannel): UpdateRele
   if (!asset || !isGitHubUrl(asset.browser_download_url as string)) return undefined;
   const checksum = assets.find((item) => item.name === `${assetName}.sha256` && typeof item.browser_download_url === "string" && isGitHubUrl(item.browser_download_url as string));
   const digest = typeof asset.digest === "string" ? asset.digest.match(/^sha256:([a-f0-9]{64})$/i)?.[1].toLowerCase() : undefined;
+  const releaseType = releaseTypeFromVersion(version);
   return {
     version,
     tag: raw.tag_name,
-    ...(releaseTypeFromVersion(version) ? { releaseType: releaseTypeFromVersion(version) } : {}),
+    ...(releaseType ? { releaseType } : {}),
     channel,
     htmlUrl: typeof raw.html_url === "string" ? raw.html_url : `https://github.com/${UPDATE_REPOSITORY}/releases/tag/${encodeURIComponent(raw.tag_name)}`,
     body: typeof raw.body === "string" ? raw.body : "",
@@ -167,18 +317,46 @@ function releaseTypeFromVersion(version: string): "alpha" | "beta" | undefined {
   return undefined;
 }
 
-async function requestGitHub(url: string, fetcher: Fetcher, init: RequestInit): Promise<Response> {
+async function requestGitHub(url: string, fetcher: Fetcher, init: RequestInit, phase: UpdateRequestAttempt["phase"], hooks: UpdateRequestHooks): Promise<Response> {
+  const attempts: UpdateRequestAttempt[] = [];
   let lastError: unknown;
+  let lastStatus: number | undefined;
   for (const candidate of marketplaceRequestUrls(url)) {
+    const startedAt = Date.now();
+    const route = candidate.startsWith(`${DEFAULT_MARKETPLACE_PROXY_URL}/`) ? "proxy" : "direct";
     try {
       const response = await fetcher(candidate, { ...init, signal: AbortSignal.timeout(12_000) });
+      const attempt: UpdateRequestAttempt = {
+        phase,
+        route,
+        url: redactUrl(candidate),
+        ok: response.ok,
+        status: response.status,
+        contentType: response.headers.get("content-type") || undefined,
+        responseBytes: parseContentLength(response.headers.get("content-length")),
+        durationMs: Date.now() - startedAt,
+        ...(response.ok ? {} : { error: `HTTP ${response.status}` })
+      };
+      attempts.push(attempt);
+      hooks.onAttempt?.(attempt);
       if (response.ok) return response;
+      lastStatus = response.status;
       lastError = new Error(`HTTP ${response.status}`);
     } catch (error) {
+      const attempt: UpdateRequestAttempt = {
+        phase,
+        route,
+        url: redactUrl(candidate),
+        ok: false,
+        durationMs: Date.now() - startedAt,
+        error: errorMessage(error)
+      };
+      attempts.push(attempt);
+      hooks.onAttempt?.(attempt);
       lastError = error;
     }
   }
-  throw new Error(`无法访问 GitHub Release：${lastError instanceof Error ? lastError.message : String(lastError)}`);
+  throw new UpdateRequestError(`无法访问 GitHub 更新服务：${errorMessage(lastError)}`, attempts, lastStatus);
 }
 
 async function readResponseBytes(response: Response, onProgress?: (progress: DownloadProgress) => void): Promise<Buffer> {
@@ -209,13 +387,52 @@ function parseChecksum(value: string): string | undefined {
 }
 
 function appendCacheBust(url: string): string {
-  return `${url}&secagent_cache=${Date.now()}`;
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}secagent_cache=${Date.now()}`;
+}
+
+export function canonicalizeUpdateJson(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalizeUpdateJson(item)).join(",")}]`;
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right));
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalizeUpdateJson(item)}`).join(",")}}`;
+  }
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) throw new Error("无法规范化未定义 JSON 值");
+  return serialized;
+}
+
+function parseContentLength(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+function redactUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return "<invalid-url>";
+  }
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function isGitHubUrl(value: string): boolean {
   try {
     const url = new URL(value);
-    return url.protocol === "https:" && (url.hostname === "github.com" || url.hostname === "api.github.com");
+    return url.protocol === "https:" && (url.hostname === "github.com" || url.hostname === "api.github.com" || url.hostname === "raw.githubusercontent.com");
   } catch {
     return false;
   }

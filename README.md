@@ -150,3 +150,11 @@ description: 处理学生查询、积分加减分和撤销。
 ```
 
 隐藏 MCP 工具的声明方式、通用调用入口，以及 Skill/MCP 开发者约定见 [`docs/skill-mcp-convention.md`](docs/skill-mcp-convention.md)。
+
+## 更新检查与诊断日志
+
+SecAgent 会优先读取签名的 `updates.json` 通道清单；清单暂不可用时回退到 GitHub Releases API，并依次尝试代理和直连。安装包下载后必须通过 SHA-256 校验。
+
+更新设置页面中的“打开日志目录”可直接打开工作区的 `logs` 目录；“导出诊断日志”会生成脱敏 ZIP，适合提交故障信息。日志通常位于 `%USERPROFILE%\SecAgentWorkspace\logs`。
+
+发布者如需启用签名清单，应将与 `src/update-public-key.ts` 匹配的私钥配置为 GitHub Actions Secret：`SECAGENT_UPDATE_PRIVATE_KEY`。私钥不得提交到仓库。

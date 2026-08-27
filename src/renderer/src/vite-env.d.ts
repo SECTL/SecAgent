@@ -10,7 +10,8 @@ type UpdateChannel = "stable" | "preview";
 type UpdateStatus = "unsupported" | "idle" | "checking" | "up-to-date" | "available" | "downloading" | "downloaded" | "installing" | "error";
 interface UpdatePreferences { channel: UpdateChannel; autoCheck: boolean; autoDownload: boolean; autoInstallOnQuit: boolean }
 interface UpdateRelease { version: string; tag: string; releaseType?: "alpha" | "beta"; channel: UpdateChannel; htmlUrl: string; body: string; publishedAt?: string; assetName: string; assetUrl: string; checksumUrl?: string; sha256?: string; size?: number }
-interface UpdateState { currentVersion: string; channel: UpdateChannel; status: UpdateStatus; release?: UpdateRelease; downloadedVersion?: string; downloadedBytes: number; totalBytes?: number; checkedAt?: string; error?: string }
+interface UpdateRequestAttempt { phase: "metadata" | "release-api" | "checksum" | "asset"; route: "proxy" | "direct"; url: string; ok: boolean; status?: number; contentType?: string; responseBytes?: number; durationMs: number; error?: string }
+interface UpdateState { currentVersion: string; channel: UpdateChannel; status: UpdateStatus; release?: UpdateRelease; downloadedVersion?: string; downloadedBytes: number; totalBytes?: number; checkedAt?: string; error?: string; operationId?: string; attempts?: UpdateRequestAttempt[]; supportReason?: string }
 interface ModelOption { id: string; name: string; model: string; provider: string; virtual?: boolean }
 interface ModelProfile { id: string; name?: string; enabled?: boolean; provider: "openai-compatible" | "openai-responses" | "anthropic" | "google"; model: string; apiKeyEnv: string; apiKey?: string; apiKeyConfigured?: boolean; baseUrl: string; endpoint?: string; anthropicVersion?: string; maxTokens?: number }
 interface McpServerConfig { transport: "stdio" | "http"; command?: string; args?: string[]; url?: string; enabled: boolean }
@@ -48,6 +49,8 @@ interface Window {
     checkForUpdate(): Promise<UpdateState>;
     downloadUpdate(): Promise<UpdateState>;
     installUpdate(): Promise<UpdateState>;
+    openDiagnosticLogs(): Promise<string>;
+    exportDiagnosticLogs(): Promise<{ canceled: boolean; path?: string }>;
     officialStatus(): Promise<{ loggedIn: boolean; email: string }>;
     officialBalance(): Promise<{ points: number | null; balances: Array<{ points: number; expiresAt: string | null }>; expired: boolean }>;
     officialOAuthLogin(): Promise<SettingsPayload>;
