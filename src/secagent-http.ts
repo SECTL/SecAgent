@@ -70,18 +70,16 @@ export class SecAgentHttpServer {
   private async install(body: Record<string, unknown>): Promise<PluginInstallResponse> {
     if (this.installPromise) return this.installPromise;
     const pluginId = body.pluginId === undefined ? "classisland-connector" : body.pluginId;
-    if (typeof pluginId !== "string" || !/^[a-z][a-z0-9-]*$/.test(pluginId)) throw new Error("pluginId 无效");
-    const requestedVersion = body.version;
-    if (requestedVersion !== undefined && (typeof requestedVersion !== "string" || !/^[0-9A-Za-z.+-]+$/.test(requestedVersion))) throw new Error("version 无效");
-    this.installPromise = this.installFromMarketplace(pluginId, requestedVersion as string | undefined);
+    if (typeof pluginId !== "string" || !/^[a-z][a-z0-9.-]*$/.test(pluginId)) throw new Error("pluginId 无效");
+    this.installPromise = this.installFromMarketplace(pluginId);
     try { return await this.installPromise; }
     finally { this.installPromise = undefined; }
   }
 
-  private async installFromMarketplace(pluginId: string, requestedVersion?: string): Promise<PluginInstallResponse> {
+  private async installFromMarketplace(pluginId: string): Promise<PluginInstallResponse> {
     const plugin = (await this.marketplace.list()).find((candidate) => candidate.id === pluginId);
     if (!plugin) throw new Error(`插件市场中不存在：${pluginId}`);
-    const version = chooseVersion(plugin, requestedVersion);
+    const version = chooseLatestVersion(plugin);
     await this.marketplace.install(this.plugins, version);
     return { plugin: this.plugins.list().find((item) => item.id === pluginId) || null, version: version.version };
   }
@@ -106,16 +104,13 @@ export class SecAgentHttpServer {
     response.end(JSON.stringify(value));
   }
 }
-
 export interface PluginInstallResponse {
   plugin: ReturnType<PluginManager["list"]>[number] | null;
   version: string;
 }
 
-function chooseVersion(plugin: MarketplacePlugin, requestedVersion?: string): MarketplaceVersion {
-  const version = requestedVersion
-    ? plugin.versions.find((candidate) => candidate.version === requestedVersion)
-    : plugin.versions.at(-1);
-  if (!version) throw new Error(requestedVersion ? `插件版本不存在：${requestedVersion}` : "插件没有可安装版本");
+function chooseLatestVersion(plugin: MarketplacePlugin): MarketplaceVersion {
+  const version = plugin.latest;
+  if (!version) throw new Error(plugin.releaseError ? `插件暂不可用：${plugin.releaseError}` : "插件没有可安装版本");
   return version;
 }

@@ -9,21 +9,9 @@ type OobePageDirection = "forward" | "back";
 
 const OOBE_STEP_ORDER: OobeStep[] = ["source", "config", "plugins"];
 
-function compareMarketVersions(left: string, right: string): number {
-  const parse = (value: string) => value.replace(/^v/i, "").split(/[.+-]/).map((part) => Number(part) || 0);
-  const a = parse(left);
-  const b = parse(right);
-  for (let index = 0; index < Math.max(a.length, b.length); index++) {
-    if ((a[index] || 0) !== (b[index] || 0)) return (a[index] || 0) - (b[index] || 0);
-  }
-  return 0;
-}
-
 function latestCompatibleVersion(plugin: MarketplacePlugin | undefined, platform: NodeJS.Platform): MarketplaceVersion | undefined {
-  return plugin?.versions
-    .filter((version) => version.minHostApiVersion <= 1 && version.platforms.includes(platform))
-    .slice()
-    .sort((left, right) => compareMarketVersions(right.version, left.version))[0];
+  const latest = plugin?.latest;
+  return latest && latest.minHostApiVersion <= 1 && latest.platforms.includes(platform) ? latest : undefined;
 }
 
 export function OobeWizard() {
@@ -625,7 +613,7 @@ export function OobeWizard() {
             {(isClassIsland || isSecRandom || isIccce) ? <div className="oobe-plugin-side-actions oobe-plugin-side-actions-dual">
               <div className="oobe-plugin-side-action">
                 <span className="oobe-plugin-side-label">SecAgent 端</span>
-                {installed ? <span className="oobe-plugin-side-state is-installed" aria-label={`SecAgent 端已安装 v${installed.version}`} title={`SecAgent 端已安装 v${installed.version}`}><Check aria-hidden="true" size={17} strokeWidth={2.5} />已安装{installed.version ? ` v${installed.version}` : ""}</span> : market && version ? <button className="primary-button" type="button" disabled={installing} onClick={() => void installPlugin(market)}>{saInstalling ? "安装中…" : "安装 SecAgent 端插件"}</button> : <span className="oobe-plugin-side-state is-unavailable">暂无可用版本</span>}
+                {installed ? <span className="oobe-plugin-side-state is-installed" aria-label={`SecAgent 端已安装 v${installed.version}`} title={`SecAgent 端已安装 v${installed.version}`}><Check aria-hidden="true" size={17} strokeWidth={2.5} />已安装{installed.version ? ` v${installed.version}` : ""}</span> : market && version ? <button className="primary-button" type="button" disabled={installing} onClick={() => void installPlugin(market)}>{saInstalling ? "安装中…" : "安装 SecAgent 端插件"}</button> : <span className="oobe-plugin-side-state is-unavailable">{market?.releaseError ? "暂不可用" : "暂无可用版本"}</span>}
               </div>
               <div className="oobe-plugin-side-action">
                 <span className="oobe-plugin-side-label">{app.appName} 端</span>
@@ -635,7 +623,7 @@ export function OobeWizard() {
               </div>
             </div> : <div className="oobe-plugin-side-actions oobe-plugin-side-actions-single">
               <span className="oobe-plugin-side-label">SecAgent 端</span>
-              {installed ? <span className="oobe-plugin-side-state is-installed" aria-label={`SecAgent 端已安装 v${installed.version}`} title={`SecAgent 端已安装 v${installed.version}`}><Check aria-hidden="true" size={17} strokeWidth={2.5} />已安装{installed.version ? ` v${installed.version}` : ""}</span> : market && version ? <button className="primary-button" type="button" disabled={installing} onClick={() => void installPlugin(market)}>{saInstalling ? "安装中…" : "安装 SecAgent 端插件"}</button> : <span className="oobe-plugin-side-state is-unavailable">暂无可用版本</span>}
+              {installed ? <span className="oobe-plugin-side-state is-installed" aria-label={`SecAgent 端已安装 v${installed.version}`} title={`SecAgent 端已安装 v${installed.version}`}><Check aria-hidden="true" size={17} strokeWidth={2.5} />已安装{installed.version ? ` v${installed.version}` : ""}</span> : market && version ? <button className="primary-button" type="button" disabled={installing} onClick={() => void installPlugin(market)}>{saInstalling ? "安装中…" : "安装 SecAgent 端插件"}</button> : <span className="oobe-plugin-side-state is-unavailable">{market?.releaseError ? "暂不可用" : "暂无可用版本"}</span>}
             </div>}
             {isClassIsland && <div className="oobe-classisland-targets">
               <div className="oobe-classisland-target-heading"><strong>选择 ClassIsland 安装目标</strong><button className="secondary-button" type="button" disabled={installing} onClick={() => void pickClassIslandExecutable()}>选择 ClassIsland.exe</button></div>

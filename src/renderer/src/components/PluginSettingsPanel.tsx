@@ -4,18 +4,8 @@ import remarkGfm from "remark-gfm";
 import { CircleAlert, CircleCheck, Download, ExternalLink, MoreHorizontal, PackageOpen, Power, RefreshCw, Search, Trash2 } from "lucide-react";
 import { pluginStateLabel } from "../utils.js";
 
-function compareMarketVersions(left: string, right: string): number {
-  const parse = (value: string) => value.replace(/^v/i, "").split(/[.+-]/).map((part) => Number(part) || 0);
-  const a = parse(left);
-  const b = parse(right);
-  for (let index = 0; index < Math.max(a.length, b.length); index++) {
-    if ((a[index] || 0) !== (b[index] || 0)) return (a[index] || 0) - (b[index] || 0);
-  }
-  return 0;
-}
-
 function latestMarketVersion(plugin?: MarketplacePlugin): MarketplaceVersion | undefined {
-  return plugin?.versions.slice().sort((left, right) => compareMarketVersions(right.version, left.version))[0];
+  return plugin?.latest;
 }
 
 export function PluginSettingsPanel({
@@ -133,8 +123,10 @@ export function PluginSettingsPanel({
         <div className="plugin-list" role="listbox" aria-label={category === "installed" ? "已安装插件" : "插件市场"}>
           {visiblePlugins.map((plugin) => {
             const local = plugins.find((item) => item.id === plugin.id);
-            const version = "versions" in plugin ? latestMarketVersion(plugin)?.version : plugin.version;
-            const state = local ? pluginStateLabel(local) : version ? `v${version}` : "未安装";
+            const marketPlugin = category === "market" ? plugin as MarketplacePlugin : undefined;
+            const installedPlugin = category === "installed" ? plugin as PluginStatus : undefined;
+            const version = marketPlugin?.latest?.version || installedPlugin?.version;
+            const state = local ? pluginStateLabel(local) : marketPlugin?.releaseError ? "暂不可用" : version ? `v${version}` : "未安装";
             return <button type="button" role="option" aria-selected={selectedId === plugin.id} className={`plugin-list-item ${selectedId === plugin.id ? "selected" : ""}`} key={plugin.id} onClick={() => setSelectedId(plugin.id)}>
               <span className="plugin-list-icon">{plugin.icon ? <img src={plugin.icon} alt="" /> : plugin.name.slice(0, 1).toUpperCase()}</span>
               <span className="plugin-list-copy"><strong>{plugin.name}</strong><small>{plugin.description || plugin.id}</small></span>
@@ -158,6 +150,7 @@ export function PluginSettingsPanel({
             {installed ? <><button className="primary-button" type="button" onClick={() => void toggleEnabled()} disabled={operationId === installed.id}><Power size={15} />{installed.enabled ? "禁用" : "启用"}</button><button className="secondary-button" type="button" onClick={() => void reload()} disabled={operationId === installed.id}><RefreshCw size={15} />重新加载</button><button className="secondary-button danger-button" type="button" onClick={() => void uninstall()} disabled={operationId === installed.id}><Trash2 size={15} />卸载</button></> : <button className="primary-button" type="button" onClick={() => void installMarket()} disabled={!selectedVersion || operationId === market?.id}><Download size={15} />{operationId === market?.id ? "安装中…" : `安装 v${selectedVersion?.version || "—"}`}</button>}
             {(installed?.repository || market?.repository) && <a className="secondary-button link-button" href={installed?.repository || market?.repository} target="_blank" rel="noreferrer"><ExternalLink size={15} />项目主页</a>}
           </div>
+          {market?.releaseError && <div className="plugin-detail-message error"><CircleAlert size={16} />暂不可用：{market.releaseError}</div>}
           {installed?.message && <div className={`plugin-detail-message ${installed.state}`}><CircleAlert size={16} />{installed.message}</div>}
           <div className="plugin-detail-tabs" role="tablist">
             <button type="button" className={detailTab === "readme" ? "active" : ""} onClick={() => setDetailTab("readme")}>概览</button>
