@@ -1,9 +1,10 @@
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, screen, session, shell, Tray } from "electron";
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, Notification, screen, session, shell, Tray } from "electron";
 import * as Sentry from "@sentry/electron/main";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { DEFAULT_WORKSPACE } from "../paths.js";
@@ -120,13 +121,27 @@ function recordTelemetryFailure(failure: TelemetryFailure): void {
 }
 
 function isAutostartLaunch(): boolean {
-  return process.platform === "win32" && process.argv.includes(AUTO_START_ARG);
+  return process.argv.includes(AUTO_START_ARG);
 }
 
-function readWindowsAutostart(): boolean {
-  if (process.platform !== "win32") return false;
+const LINUX_AUTOSTART_DESKTOP_FILE = "secagent-autostart.desktop";
+
+function autostartExecutablePath(): string {
+  // Inside an AppImage, process.execPath is the transient /tmp/.mount_* mount;
+  // APPIMAGE points at the durable file the user actually launched.
+  if (process.platform === "linux" && process.env.APPIMAGE) return process.env.APPIMAGE;
+  return process.execPath;
+}
+
+function linuxAutostartFilePath(): string {
+  const configHome = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
+  return path.join(configHome, "autostart", LINUX_AUTOSTART_DESKTOP_FILE);
+}
+
+function readAutostart(): boolean {
   try {
-    const loginItem = app.getLoginItemSettings({ path: process.execPath, args: AUTO_START_ARGS });
+    if (process.platform === "linux") return fs.existsSync(linuxAutostartFilePath());
+    const loginItem = app.getLoginItemSettings({ path: autostartExecutablePath(), args: AUTO_START_ARGS });
     // executableWillLaunchAtLogin also recognizes entries created by older
     // installers that did not include the current argument list.
     return loginItem.openAtLogin || loginItem.executableWillLaunchAtLogin;
@@ -136,9 +151,17 @@ function readWindowsAutostart(): boolean {
   }
 }
 
-function writeWindowsAutostart(enabled: boolean): void {
-  if (process.platform !== "win32") return;
-  app.setLoginItemSettings({ openAtLogin: enabled, path: process.execPath, args: AUTO_START_ARGS });
+function writeAutostart(enabled: boolean): void {
+  if (process.platform === "linux") {
+    // Write the XDG autostart entry directly: Electron's Linux login-item
+    // helper records process.execPath, which is a transient path for AppImages.
+    const entry = linuxAutostartFilePath();
+    if (!enabled) { fs.rmSync(entry, { force: true }); return; }
+    fs.mkdirSync(path.dirname(entry), { recursive: true });
+    fs.writeFileSync(entry, `[Desktop Entry]\nType=Application\nName=SecAgent\nExec=${JSON.stringify(autostartExecutablePath())} ${AUTO_START_ARG}\nTerminal=false\n`, "utf8");
+    return;
+  }
+  app.setLoginItemSettings({ openAtLogin: enabled, path: autostartExecutablePath(), args: AUTO_START_ARGS });
 }
 
 function launchWindowsInstaller(installerPath: string): void {
@@ -246,14 +269,13 @@ function windowChromeOptions(overlayColor = "#ffffff"): Electron.BrowserWindowCo
   if (process.platform === "darwin") {
     return { titleBarStyle: "hidden", trafficLightPosition: { x: 16, y: 21 } };
   }
-  if (process.platform === "win32") {
-    return {
-      titleBarStyle: "hidden",
-      titleBarOverlay: { color: overlayColor, symbolColor: "#171717", height: 57 },
-      autoHideMenuBar: true
-    };
-  }
-  return {};
+  // Windows and Linux share the Window Controls Overlay. A native frame on
+  // Linux would stack the system title bar on top of the in-app draggable topbar.
+  return {
+    titleBarStyle: "hidden",
+    titleBarOverlay: { color: overlayColor, symbolColor: "#171717", height: 57 },
+    autoHideMenuBar: true
+  };
 }
 
 function configureWindowChrome(window: BrowserWindow): void {
@@ -500,6 +522,7 @@ function createWindow(visible = true): void {
     if (isQuitting) return;
     event.preventDefault();
     windowRef?.hide();
+    notifyHiddenMainWindow();
   });
   windowRef.on("closed", () => {
     windowRef = undefined;
@@ -582,6 +605,21 @@ function showMainWindow(): void {
   windowRef.show();
   windowRef.focus();
   void ensureMacDockVisible();
+}
+
+let linuxHiddenNoticeShown = false;
+/** GNOME ships no legacy system tray, so a window hidden on close would have no tray icon to restore it. */
+function notifyHiddenMainWindow(): void {
+  if (process.platform !== "linux" || linuxHiddenNoticeShown || !Notification.isSupported()) return;
+  linuxHiddenNoticeShown = true;
+  try {
+    const hotkey = activeWakeShortcut || DEFAULT_WAKE_HOTKEY;
+    const notice = new Notification({ title: "SecAgent 已在后台运行", body: `点击此通知重新打开主窗口，或按 ${hotkey} 唤起。` });
+    notice.on("click", () => showMainWindow());
+    notice.show();
+  } catch (error) {
+    logMain("main-window.hidden-notify.failed", { error: error instanceof Error ? error.message : String(error) });
+  }
 }
 
 function restartApplication(): void {
@@ -744,7 +782,7 @@ ipcMain.handle("providers:list", async () => {
 });
 ipcMain.handle("settings:get", () => {
   const settings = readSettings(DEFAULT_WORKSPACE);
-  return process.platform === "win32" ? { ...settings, autostart: readWindowsAutostart() } : settings;
+  return { ...settings, autostart: readAutostart() };
 });
 ipcMain.on("telemetry:dsn", (event) => { event.returnValue = SENTRY_DSN; });
 ipcMain.on("telemetry:enabled", (event) => {
@@ -1148,15 +1186,15 @@ ipcMain.handle("settings:save", (_event, payload: SettingsPayload) => {
     }
   }
   let saved: SettingsPayload;
-  const previousAutostart = readWindowsAutostart();
-  const nextAutostart = process.platform === "win32" && payload.autostart === true;
+  const previousAutostart = readAutostart();
+  const nextAutostart = payload.autostart === true;
   const autostartChanged = previousAutostart !== nextAutostart;
   try {
-    if (autostartChanged) writeWindowsAutostart(nextAutostart);
+    if (autostartChanged) writeAutostart(nextAutostart);
     saved = saveSettings(DEFAULT_WORKSPACE, { ...payload, providers, autostart: nextAutostart, wake: { hotkey: nextWakeHotkey, ...(payload.wake?.modelId ? { modelId: payload.wake.modelId } : {}), voiceEnabled: payload.wake?.voiceEnabled === true, voicePhrase: payload.wake?.voicePhrase } });
   } catch (error) {
     if (autostartChanged) {
-      try { writeWindowsAutostart(previousAutostart); } catch { /* Keep the original save error visible. */ }
+      try { writeAutostart(previousAutostart); } catch { /* Keep the original save error visible. */ }
     }
     if (registeredNewShortcut) globalShortcut.unregister(nextWakeHotkey);
     throw error;
@@ -1350,7 +1388,12 @@ ipcMain.handle("sessions:send", async (_event, id: string, text: string, modelId
   }
 });
 
+// A second launch focuses the running instance instead of competing for the
+// wake shortcut, the tray, and the local HTTP server port.
+if (!app.requestSingleInstanceLock()) app.quit();
+app.on("second-instance", () => showMainWindow());
 app.whenReady().then(async () => {
+  if (!app.hasSingleInstanceLock()) return;
   const needsOnboarding = !fs.existsSync(configPath(DEFAULT_WORKSPACE)) || !isOnboardingComplete(DEFAULT_WORKSPACE);
   initializeWorkspace(DEFAULT_WORKSPACE);
   const initialSettings = readSettings(DEFAULT_WORKSPACE);

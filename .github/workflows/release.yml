@@ -1,4 +1,4 @@
-name: Publish Windows Release
+name: Publish Release
 
 on:
   push:
@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   release:
+    name: windows
     runs-on: windows-latest
     env:
       SECAGENT_UPDATE_PRIVATE_KEY: ${{ secrets.SECAGENT_UPDATE_PRIVATE_KEY }}
@@ -104,3 +105,67 @@ jobs:
             release/inno/SecAgent-Setup-${{ steps.version.outputs.version }}.exe.sha256
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
+
+  # Linux and macOS packages are appended to the release created by the
+  # Windows job; `needs` keeps the two asset uploads from racing each other.
+  release-desktop:
+    needs: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Older LTS baseline so the packages stay installable on older
+          # glibc distributions.
+          - name: linux
+            os: ubuntu-22.04
+          - name: macos
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build:cli
+      - run: npm test
+      - run: npm run package
+
+      - name: Generate Linux checksums
+        if: matrix.name == 'linux'
+        run: |
+          cd release
+          for file in *.AppImage *.deb *.rpm; do
+            [ -e "$file" ] && sha256sum "$file" > "$file.sha256"
+          done
+
+      - name: Generate macOS checksums
+        if: matrix.name == 'macos'
+        run: |
+          cd release
+          for file in *.dmg; do
+            [ -e "$file" ] && shasum -a 256 "$file" > "$file.sha256"
+          done
+
+      - name: Publish Linux assets
+        if: matrix.name == 'linux'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*.AppImage
+            release/*.deb
+            release/*.rpm
+            release/*.sha256
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+      - name: Publish macOS assets
+        if: matrix.name == 'macos'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*.dmg
+            release/*.sha256
+          prerelease: ${{ contains(github.ref_name, '-') }}

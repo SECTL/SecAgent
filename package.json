@@ -21,7 +21,7 @@
     "dev": "node scripts/dev-electron-vite.mjs",
     "dev:cli": "tsx src/index.ts",
     "start": "node scripts/dev-launcher.mjs",
-    "test": "node --test dist/**/*.test.js"
+    "test": "node --test \"dist/**/*.test.js\""
   },
   "dependencies": {
     "@andresaya/edge-tts": "^1.8.0",
@@ -95,15 +95,27 @@
     },
     "linux": {
       "target": [
-        "AppImage"
+        "AppImage",
+        "deb",
+        "rpm"
       ],
       "icon": "src/renderer/public/icon.png",
       "category": "Utility"
     },
     "mac": {
       "target": [
-        "dmg"
-      ]
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "src/renderer/public/icon.png",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "SecAgent 使用麦克风进行语音唤醒和语音输入识别。"
+      }
     }
   }
 }

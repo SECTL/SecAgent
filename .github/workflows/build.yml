@@ -16,8 +16,10 @@ jobs:
         include:
           - name: windows
             os: windows-latest
+          # Keep the Linux build on the older LTS baseline so the produced
+          # packages stay installable on older glibc distributions.
           - name: linux
-            os: ubuntu-latest
+            os: ubuntu-22.04
           - name: macos
             os: macos-latest
 
@@ -30,6 +32,9 @@ jobs:
           cache: npm
 
       - run: npm ci
+      # Compile before testing: dist/ is gitignored, and `node --test` exits 0
+      # on an unmatched glob, so testing before building silently ran nothing.
+      - run: npm run build:cli
       - run: npm test
       - name: Package Windows application directory
         if: matrix.name == 'windows'

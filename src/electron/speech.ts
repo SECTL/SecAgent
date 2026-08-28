@@ -1,17 +1,17 @@
-import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import readline from "node:readline";
 import { app, BrowserWindow } from "electron";
-import { createKws } from "sherpa-onnx";
+import { createKws, createOnlineRecognizer } from "sherpa-onnx";
 import { pinyin } from "pinyin-pro";
 
 const modelName = "sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23";
-let worker: ChildProcessWithoutNullStreams | undefined;
+/** Local offline ASR via the bundled WASM build; the model stays loaded for the app lifetime. */
+let localRecognizer: ReturnType<typeof createOnlineRecognizer> | undefined;
+let localStream: ReturnType<NonNullable<typeof localRecognizer>["createStream"]> | undefined;
 let remoteSocket: WebSocket | undefined;
 let speechWindow: BrowserWindow | undefined;
 let pendingRemoteAudio: ArrayBuffer[] = [];
-/** "remote" = backend relay /asr/ws; "local" = bundled sherpa-onnx worker; "idle" = none. */
+/** "remote" = backend relay /asr/ws; "local" = bundled sherpa-onnx WASM recognizer; "idle" = none. */
 let mode: "remote" | "local" | "idle" = "idle";
 let enhancedRecognition = false;
 let voiceWakeKws: ReturnType<typeof createKws> | undefined;
@@ -58,6 +58,34 @@ function remoteAsrLogTarget(url: string): string {
   } catch {
     return "<invalid-url>";
   }
+}
+
+/** Load the bundled streaming transducer once and give each utterance a fresh stream. */
+function startLocalRecognizer(): void {
+  if (localRecognizer) {
+    // A stream that has seen inputFinished() cannot accept more audio.
+    localStream?.free();
+    localStream = localRecognizer.createStream();
+    return;
+  }
+  const model = projectPath("models", modelName);
+  localRecognizer = createOnlineRecognizer({
+    featConfig: { sampleRate: 16000, featureDim: 80 },
+    modelConfig: {
+      transducer: {
+        encoder: path.join(model, "encoder-epoch-99-avg-1.int8.onnx"),
+        decoder: path.join(model, "decoder-epoch-99-avg-1.onnx"),
+        joiner: path.join(model, "joiner-epoch-99-avg-1.int8.onnx")
+      },
+      tokens: path.join(model, "tokens.txt"), provider: "cpu", numThreads: 1
+    },
+    enableEndpoint: 1,
+    rule1MinTrailingSilence: 2.4,
+    rule2MinTrailingSilence: 1.2,
+    rule3MinUtteranceLength: 20
+  });
+  localStream = localRecognizer.createStream();
+  console.info(`[speech] local WASM recognizer ready model=${modelName}`);
 }
 
 function keywordTokens(phrase: string): string {
@@ -146,7 +174,7 @@ export function stopVoiceWake(): void {
 export function startSpeech(window: BrowserWindow | undefined, options?: { betterRecognition?: boolean }): { ok: true; remote: boolean } {
   speechWindow = window;
   enhancedRecognition = options?.betterRecognition === true;
-  if (worker) return { ok: true, remote: mode === "remote" };
+  if (mode === "local" && localRecognizer) return { ok: true, remote: false };
   if (remoteSocket && (remoteSocket.readyState === WebSocket.OPEN || remoteSocket.readyState === WebSocket.CONNECTING)) {
     // The main chat window and the wake overlay share one ASR connection. If the
     // other window started it first, route subsequent events to the latest caller.
@@ -216,25 +244,14 @@ export function startSpeech(window: BrowserWindow | undefined, options?: { bette
   }
 
   mode = "local";
-  const model = projectPath("models", modelName);
-  const script = projectPath("speech-worker.py");
-  worker = spawn(process.env.PYTHON || "python3", [
-    script,
-    "--tokens", path.join(model, "tokens.txt"),
-    "--encoder", path.join(model, "encoder-epoch-99-avg-1.int8.onnx"),
-    "--decoder", path.join(model, "decoder-epoch-99-avg-1.onnx"),
-    "--joiner", path.join(model, "joiner-epoch-99-avg-1.int8.onnx")
-  ], { stdio: "pipe" });
-  const output = readline.createInterface({ input: worker.stdout });
-  output.on("line", (line) => { try { send(speechWindow, JSON.parse(line)); } catch { /* Ignore malformed worker output. */ } });
-  worker.stderr.on("data", (chunk) => send(speechWindow, { type: "log", message: String(chunk) }));
-  worker.on("error", (error) => send(speechWindow, { type: "error", message: error.message }));
-  worker.on("exit", (code) => {
-    if (worker) send(speechWindow, { type: "stopped", code });
-    worker = undefined;
+  try {
+    startLocalRecognizer();
+  } catch (error) {
     mode = "idle";
-    speechWindow = undefined;
-  });
+    send(speechWindow, { type: "error", message: error instanceof Error ? error.message : String(error) });
+    return { ok: true, remote: false };
+  }
+  send(speechWindow, { type: "ready" });
   return { ok: true, remote: false };
 }
 
@@ -249,8 +266,22 @@ export function sendSpeechAudio(samples: Float32Array): void {
     pendingRemoteAudio.push(pcm);
     return;
   }
-  if (!worker || worker.stdin.destroyed) return;
-  worker.stdin.write(JSON.stringify({ type: "audio", pcm: Buffer.from(pcm).toString("base64") }) + "\n");
+  const recognizer = localRecognizer;
+  const stream = localStream;
+  if (!recognizer || !stream) return;
+  try {
+    stream.acceptWaveform(16000, samples);
+    while (recognizer.isReady(stream)) recognizer.decode(stream);
+    const text = (recognizer.getResult(stream).text || "").trim();
+    if (text) send(speechWindow, { type: "partial", text });
+    if (recognizer.isEndpoint(stream)) {
+      // The endpoint fires with the segment's full text; reset starts a new segment.
+      recognizer.reset(stream);
+      if (text) send(speechWindow, { type: "final", text });
+    }
+  } catch (error) {
+    send(speechWindow, { type: "error", message: error instanceof Error ? error.message : String(error) });
+  }
 }
 
 export function stopSpeech(): void {
@@ -261,9 +292,24 @@ export function stopSpeech(): void {
     } else if (remoteSocket.readyState === WebSocket.CONNECTING) remoteSocket.close();
     return;
   }
-  if (!worker || worker.stdin.destroyed) return;
-  worker.stdin.write(JSON.stringify({ type: "stop" }) + "\n");
-  worker.stdin.end();
+  const recognizer = localRecognizer;
+  const stream = localStream;
+  if (!recognizer || !stream) return;
+  try {
+    // Flush the tail of the utterance so the last segment is not lost.
+    stream.inputFinished();
+    while (recognizer.isReady(stream)) recognizer.decode(stream);
+    const text = (recognizer.getResult(stream).text || "").trim();
+    if (text) send(speechWindow, { type: "final", text });
+  } catch (error) {
+    send(speechWindow, { type: "error", message: error instanceof Error ? error.message : String(error) });
+  }
+  // A stream that has seen inputFinished() cannot be reused.
+  stream.free();
+  localStream = recognizer.createStream();
+  mode = "idle";
+  send(speechWindow, { type: "stopped" });
+  speechWindow = undefined;
 }
 
 /** Abort the current utterance without waiting for recognition or enhancement. */
@@ -276,10 +322,9 @@ export function cancelSpeech(): void {
     try { socket.close(1000, "cancelled"); } catch { /* Socket may already be closed. */ }
     return;
   }
-  if (worker) {
-    const current = worker;
-    worker = undefined;
+  if (localRecognizer) {
+    try { localStream?.free(); } catch { /* Stream may already be freed. */ }
+    localStream = undefined;
     mode = "idle";
-    try { current.kill(); } catch { /* Worker may already have exited. */ }
   }
 }
