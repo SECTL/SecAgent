@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { installCompanionPackage, startCompanionProcess, type CompanionExecutor, type CompanionLogger, type CompanionPackageSpec } from "./companion-package.js";
+import { installCompanionPackage, startCompanionProcessUnelevated, type CompanionExecutor, type CompanionLogger, type CompanionPackageSpec } from "./companion-package.js";
 import { DEFAULT_MARKETPLACE_PROXY_URL, marketplaceRequestUrls } from "./marketplace.js";
 
 export const CLASSISLAND_PLUGIN_REPOSITORY = "SECTL/ClassIsland-SecAgent-Plugin";
@@ -652,9 +652,12 @@ export class ClassIslandInstaller {
       const key = normalizePath(candidate.dataRoot, this.platform);
       groups.set(key, [...(groups.get(key) || []), candidate]);
     }
-    const restart = this.options.restartProcess || ((executablePath: string, args: string[]) => executor
-      ? executor.startProcess(executablePath, args, (stage, data) => log(stage, data))
-      : startCompanionProcess(executablePath, args, this.platform, (stage, data) => log(stage, data)));
+    // The elevated executor is intentionally limited to writing protected
+    // plugin files. Starting ClassIsland as Administrator changes its profile
+    // and can make the process exit before the plugin host becomes available.
+    // Launch it again as the interactive user, without PowerShell/UAC.
+    const restart = this.options.restartProcess || ((executablePath: string, args: string[]) =>
+      startCompanionProcessUnelevated(executablePath, args, this.platform, (stage, data) => log(stage, data)));
     const isRunning = this.options.isProcessRunning || ((pid: number) => executor ? executor.isProcessRunning(pid, (stage, data) => log(stage, data)) : defaultIsProcessRunning(pid));
     const requestClose = this.options.requestGracefulClose || ((pid: number) => executor ? executor.requestGracefulClose(pid, (stage, data) => log(stage, data)) : defaultRequestGracefulClose(pid, this.platform, this.commandRunner));
     const forceTerminate = this.options.forceTerminateProcess || ((pid: number) => executor ? executor.forceTerminate(pid, (stage, data) => log(stage, data)) : defaultForceTerminate(pid, this.platform, this.commandRunner));

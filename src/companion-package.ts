@@ -554,6 +554,38 @@ export async function installCompanionPackage(
   }
 }
 
+/**
+ * Starts a companion host as the current user without invoking PowerShell or
+ * another UAC prompt. The installer may still have used an elevated executor
+ * to write the plugin files, but the host itself should keep its normal user
+ * context and profile.
+ */
+export async function startCompanionProcessUnelevated(executablePath: string, args: string[], platform: SupportedPlatform = process.platform, logger?: CompanionLogger): Promise<void> {
+  writeLog(logger, "process.start.begin", { executablePath, args, platform, elevated: false });
+  const { spawn } = await import("node:child_process");
+  const workingDirectory = platform === "win32" ? path.win32.dirname(executablePath) : path.dirname(executablePath);
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(executablePath, args, {
+      cwd: workingDirectory,
+      detached: true,
+      stdio: "ignore",
+      windowsHide: platform === "win32"
+    });
+    child.once("error", (error) => {
+      writeLog(logger, "process.start.failed", { executablePath, args, workingDirectory, elevated: false, error: error instanceof Error ? error.message : String(error) });
+      reject(error);
+    });
+    child.once("spawn", () => {
+      child.unref();
+      writeLog(logger, "process.start.success", { executablePath, args, workingDirectory, elevated: false, ...(child.pid ? { pid: child.pid } : {}) });
+      resolve();
+    });
+    child.once("exit", (code, signal) => {
+      writeLog(logger, "process.exit", { executablePath, args, elevated: false, code, signal });
+    });
+  });
+}
+
 /** Starts a companion host elevated so it can unpack into a protected install directory. */
 export async function startCompanionProcess(executablePath: string, args: string[], platform: SupportedPlatform = process.platform, logger?: CompanionLogger): Promise<void> {
   writeLog(logger, "process.start.begin", { executablePath, args, platform, elevated: platform === "win32" });

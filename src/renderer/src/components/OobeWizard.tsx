@@ -39,6 +39,7 @@ export function OobeWizard() {
   const [officialEmail, setOfficialEmail] = useState("");
   const [officialBusy, setOfficialBusy] = useState(false);
   const [apps, setApps] = useState<DetectedCompanionApp[]>([]);
+  const [companionDetectionReady, setCompanionDetectionReady] = useState(false);
   const [plugins, setPlugins] = useState<PluginStatus[]>([]);
   const [marketPlugins, setMarketPlugins] = useState<MarketplacePlugin[]>([]);
   const [marketError, setMarketError] = useState("");
@@ -95,48 +96,50 @@ export function OobeWizard() {
 
   useEffect(() => {
     let disposed = false;
-    void bridge.detectInstalledApps().then((detectedApps) => {
-      if (!disposed) setApps(detectedApps);
-    }).catch(() => undefined);
-    void bridge.detectClassIslandInstallations().then((targets) => {
+    // Keep the plugin list hidden until every local-app probe has settled.
+    // Each probe has a safe empty fallback so one unavailable detector cannot
+    // leave the OOBE spinner running forever.
+    void Promise.all([
+      bridge.detectInstalledApps().catch(() => [] as DetectedCompanionApp[]),
+      bridge.detectClassIslandInstallations().catch(() => [] as ClassIslandInstallCandidate[]),
+      bridge.detectSecRandomInstallations().catch(() => [] as SecRandomInstallCandidate[]),
+      bridge.detectIccceInstallations().catch(() => [] as IccceInstallCandidate[])
+    ]).then(([detectedApps, classIslandTargets, secRandomTargets, iccceTargets]) => {
       if (disposed) return;
-      setClassIslandTargets(targets);
-      setClassIslandTargetsExpanded(targets.length !== 1);
+      setApps(detectedApps);
+      setClassIslandTargets(classIslandTargets);
+      setClassIslandTargetsExpanded(classIslandTargets.length !== 1);
       setClassIslandSelectedIds((current) => {
-        const validCurrent = current.filter((id) => targets.some((target) => target.id === id && target.compatible));
+        const validCurrent = current.filter((id) => classIslandTargets.some((target) => target.id === id && target.compatible));
         if (validCurrent.length) return validCurrent;
-        const running = targets.filter((target) => target.compatible && target.isRunning).map((target) => target.id);
+        const running = classIslandTargets.filter((target) => target.compatible && target.isRunning).map((target) => target.id);
         if (running.length) return running;
-        const compatible = targets.filter((target) => target.compatible);
+        const compatible = classIslandTargets.filter((target) => target.compatible);
         return compatible.length === 1 ? [compatible[0].id] : [];
       });
-    }).catch(() => undefined);
-    void bridge.detectSecRandomInstallations().then((targets) => {
-      if (disposed) return;
-      setSecRandomTargets(targets);
-      setSecRandomTargetsExpanded(targets.length !== 1);
+      setSecRandomTargets(secRandomTargets);
+      setSecRandomTargetsExpanded(secRandomTargets.length !== 1);
       setSecRandomSelectedIds((current) => {
-        const validCurrent = current.filter((id) => targets.some((target) => target.id === id && target.compatible));
+        const validCurrent = current.filter((id) => secRandomTargets.some((target) => target.id === id && target.compatible));
         if (validCurrent.length) return validCurrent;
-        const running = targets.filter((target) => target.compatible && target.isRunning).map((target) => target.id);
+        const running = secRandomTargets.filter((target) => target.compatible && target.isRunning).map((target) => target.id);
         if (running.length) return running;
-        const compatible = targets.filter((target) => target.compatible);
+        const compatible = secRandomTargets.filter((target) => target.compatible);
         return compatible.length === 1 ? [compatible[0].id] : [];
       });
-    }).catch(() => undefined);
-    void bridge.detectIccceInstallations().then((targets) => {
-      if (disposed) return;
-      setIccceTargets(targets);
-      setIccceTargetsExpanded(targets.length !== 1);
+      setIccceTargets(iccceTargets);
+      setIccceTargetsExpanded(iccceTargets.length !== 1);
       setIccceSelectedIds((current) => {
-        const validCurrent = current.filter((id) => targets.some((target) => target.id === id && target.compatible));
+        const validCurrent = current.filter((id) => iccceTargets.some((target) => target.id === id && target.compatible));
         if (validCurrent.length) return validCurrent;
-        const running = targets.filter((target) => target.compatible && target.isRunning).map((target) => target.id);
+        const running = iccceTargets.filter((target) => target.compatible && target.isRunning).map((target) => target.id);
         if (running.length) return running;
-        const compatible = targets.filter((target) => target.compatible);
+        const compatible = iccceTargets.filter((target) => target.compatible);
         return compatible.length === 1 ? [compatible[0].id] : [];
       });
-    }).catch(() => undefined);
+    }).finally(() => {
+      if (!disposed) setCompanionDetectionReady(true);
+    });
     void Promise.all([
       bridge.getSettings(),
       bridge.listProviders(),
@@ -491,7 +494,7 @@ export function OobeWizard() {
   };
 
   const installAllPlugins = async () => {
-    if (installingId || allDetectedCompanionsInstalled) return;
+    if (!companionDetectionReady || installingId || allDetectedCompanionsInstalled) return;
     setError("");
     const tasks: Array<() => Promise<void>> = [];
     const batchTargets: { classIsland?: string[]; secRandom?: string[]; iccce?: string[] } = {};
@@ -611,7 +614,7 @@ export function OobeWizard() {
         {OOBE_STEP_ORDER.map((item, index) => <span className={`oobe-progress-segment ${index <= OOBE_STEP_ORDER.indexOf(step) ? "is-active" : ""}`} key={item} />)}
       </div>
       <p className="oobe-step-label">第 {step === "source" ? "1" : step === "config" ? "2" : "3"} / 3 步</p>
-      {step === "plugins" ? <div className="oobe-plugin-heading"><h1>安装课堂联动插件</h1><button className="secondary-button oobe-install-all-button" type="button" disabled={Boolean(installingId) || busy || allDetectedCompanionsInstalled} onClick={() => void installAllPlugins()}>{allDetectedCompanionsInstalled ? <><Check aria-hidden="true" size={16} strokeWidth={2.5} />已安装所有</> : "一键安装所有"}</button></div> : <h1>{step === "source" ? "选择模型服务" : "配置模型服务"}</h1>}
+      {step === "plugins" ? <div className="oobe-plugin-heading"><h1>安装课堂联动插件</h1><button className="secondary-button oobe-install-all-button" type="button" disabled={!companionDetectionReady || Boolean(installingId) || busy || allDetectedCompanionsInstalled} onClick={() => void installAllPlugins()}>{!companionDetectionReady ? "检测本机应用中…" : allDetectedCompanionsInstalled ? <><Check aria-hidden="true" size={16} strokeWidth={2.5} />已安装所有</> : "一键安装所有"}</button></div> : <h1>{step === "source" ? "选择模型服务" : "配置模型服务"}</h1>}
       {step !== "plugins" && <p>{step === "source"
         ? "先选择使用 SECTL 官方模型服务，还是接入自己的模型提供商。"
         : step === "config"
@@ -680,7 +683,10 @@ export function OobeWizard() {
 
     {step === "plugins" && <>
       {marketError && <div className="settings-error">{marketError}</div>}
-      <section className="oobe-plugin-list">
+      {!companionDetectionReady ? <div className="oobe-plugin-detection-loading" role="status" aria-live="polite">
+        <span className="oobe-plugin-detection-spinner" aria-hidden="true" />
+        <span className="visually-hidden">正在检测本机课堂软件…</span>
+      </div> : <section className="oobe-plugin-list">
         <h2>本机已检测到</h2>
         {!apps.some((app) => app.detected) && <p className="empty-list">没有自动检测到已适配的课堂应用。你可以在 ClassIsland 卡片中手动选择安装位置，或稍后在设置里处理。</p>}
         {recommended.map((app, index) => {
@@ -784,7 +790,7 @@ export function OobeWizard() {
             </div>}
           </article>;
         })}
-      </section>
+      </section>}
       <div className="oobe-actions">
         <button className="secondary-button" type="button" onClick={() => void saveProgress({ step: "config", source: source || undefined, ...(source === "custom" ? { provider } : {}) }).then(() => goToStep("config")).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))}>上一步</button>
         <button className="secondary-button" type="button" disabled={busy} onClick={() => void finish()}>暂时跳过</button>

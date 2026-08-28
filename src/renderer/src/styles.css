@@ -403,6 +403,9 @@ html.wake-mode, html.wake-mode body, body.wake-mode { min-width: 0; overflow: hi
 .oobe-panel > p { margin: 0 0 16px; }
 .oobe-model-add { display: flex; gap: 8px; align-items: center; }
 .oobe-model-add input { width: 180px; padding: 7px 9px; border: 1px solid #d8d8d8; border-radius: 7px; }
+.oobe-plugin-detection-loading { display: grid; place-items: center; min-height: 320px; margin: 0 auto 22px; color: #2389ec; }
+.oobe-plugin-detection-spinner { display: block; width: 34px; height: 34px; border: 3px solid #d7e9fa; border-top-color: #2389ec; border-radius: 50%; animation: oobe-plugin-detection-spin .8s linear infinite; }
+@keyframes oobe-plugin-detection-spin { to { transform: rotate(360deg); } }
 .oobe-plugin-list { max-width: 760px; margin: 0 auto 22px; }
 .oobe-plugin-list h2 { margin: 0 0 10px; font-size: 15px; }
 .oobe-plugin-card { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; position: relative; overflow: hidden; border-radius: 0; box-shadow: none; }
