@@ -647,11 +647,6 @@ export class ClassIslandInstaller {
     const packageData = await downloadLatestClassIslandPlugin(this.fetcher, this.options.now || Date.now, (phase, message) => report(phase, message));
     log("download.success", { version: packageData.version, bytes: packageData.bytes.length, sha256: packageData.sha256 });
     const api = platformPath(this.platform);
-    const groups = new Map<string, ClassIslandInstallCandidate[]>();
-    for (const candidate of valid) {
-      const key = normalizePath(candidate.dataRoot, this.platform);
-      groups.set(key, [...(groups.get(key) || []), candidate]);
-    }
     // The elevated executor is intentionally limited to writing protected
     // plugin files. Starting ClassIsland as Administrator changes its profile
     // and can make the process exit before the plugin host becomes available.
@@ -665,6 +660,24 @@ export class ClassIslandInstaller {
     const readFile = this.options.readFile || defaultReadFile;
     const installPackage = this.options.installPackage || ((destinationPath: string, bytes: Buffer, spec: CompanionPackageSpec) =>
       installCompanionPackage(destinationPath, bytes, spec, this.platform, executor, (stage, data) => log(stage, data)));
+    // The first detection can be several seconds old after downloading the
+    // package. Refresh immediately before touching the plugin directory so a
+    // ClassIsland instance started during the download is also closed
+    // automatically instead of racing the package replacement.
+    let currentValid = valid;
+    try {
+      const refreshed = await this.detect();
+      const refreshedById = new Map(refreshed.map((candidate) => [candidate.id, candidate]));
+      currentValid = valid.map((candidate) => refreshedById.get(candidate.id) || candidate);
+      log("process.refresh.result", { candidates: currentValid.map((candidate) => ({ id: candidate.id, executablePath: candidate.executablePath, isRunning: candidate.isRunning, pid: candidate.pid })) });
+    } catch (error) {
+      log("process.refresh.failed", { error: error instanceof Error ? error.message : String(error) });
+    }
+    const groups = new Map<string, ClassIslandInstallCandidate[]>();
+    for (const candidate of currentValid) {
+      const key = normalizePath(candidate.dataRoot, this.platform);
+      groups.set(key, [...(groups.get(key) || []), candidate]);
+    }
     for (const group of groups.values()) {
       log("group.begin", { dataRoot: group[0].dataRoot, targets: group.map((candidate) => candidate.id), pluginPackagesPath: group[0].pluginPackagesPath });
       const alreadyInstalled = group.every((candidate) => isClassIslandPluginReady(candidate) && compareClassIslandVersions(candidate.installedPluginVersion!, packageData.version) >= 0);
