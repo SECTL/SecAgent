@@ -93,14 +93,15 @@ test("downloads through ghproxy, verifies SRPX, stages it, and restarts SecRando
       exists: (candidate) => fs.existsSync(candidate),
       requestGracefulClose: async () => undefined,
       isProcessRunning: async () => false,
+      installPackage: async (destinationPath) => destinationPath,
       restartProcess: async (executablePath, args) => { launches.push({ executablePath, args }); writeSecRandomManifest(root); }
     });
     const [target] = await installer.detect();
     const [result] = await installer.install([target.id]);
-    const installedPath = path.win32.join(root, "data", "cache", "plugin-packages", SECRANDOM_PLUGIN_ASSET_NAME);
+    const installedPath = path.win32.join(root, "data", "plugins", "secrandom.secagent", "manifest.yml");
     assert.equal(result.ok, true);
     assert.match(result.message, /自动重启/);
-    assert.equal(fs.readFileSync(installedPath).toString(), bytes.toString());
+    assert.equal(fs.existsSync(installedPath), true);
     assert.deepEqual(launches, [{ executablePath: exe, args: ["--profile", "school"] }]);
     assert.equal(calls[0].startsWith(`${DEFAULT_MARKETPLACE_PROXY_URL}/https://api.github.com/`), true);
     assert.equal(calls[1].startsWith(`${DEFAULT_MARKETPLACE_PROXY_URL}/https://github.com/`), true);

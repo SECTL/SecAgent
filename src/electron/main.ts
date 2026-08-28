@@ -896,7 +896,23 @@ ipcMain.handle("plugins:install", async () => {
   try { await pluginManager?.install(result.filePaths[0]); return pluginManager?.list() || []; }
   catch (error) { recordTelemetryFailure({ type: "plugin.start.failed", error, context: { phase: "install" } }); throw error; }
 });
-ipcMain.handle("marketplace:list", () => marketplace.list());
+ipcMain.handle("marketplace:list", async () => {
+  const operationId = crypto.randomUUID();
+  logMain("marketplace.list.started", { operationId });
+  try {
+    const entries = await marketplace.list();
+    logMain("marketplace.list.completed", {
+      operationId,
+      count: entries.length,
+      available: entries.filter((entry) => Boolean(entry.latest)).map((entry) => ({ id: entry.id, version: entry.latest?.version })),
+      unavailable: entries.filter((entry) => !entry.latest).map((entry) => ({ id: entry.id, error: entry.releaseError }))
+    });
+    return entries;
+  } catch (error) {
+    logMain("marketplace.list.failed", { operationId, error: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
+});
 ipcMain.handle("marketplace:install", async (_event, version: MarketplaceVersion) => {
   if (!pluginManager) throw new Error("插件管理器尚未启动");
   try { await marketplace.install(pluginManager, version); return pluginManager.list(); }

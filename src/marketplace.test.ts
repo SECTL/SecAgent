@@ -52,6 +52,32 @@ test("marketplace verifies a signed v2 index, resolves latest Release and merges
   assert.equal(calls.some((url) => url.includes("plugins/example.json")), true);
 });
 
+test("marketplace uses resolved Release metadata from the signed index without GitHub API", async () => {
+  const fixture = createFixture();
+  const resolved = {
+    version: "1.0.0",
+    minHostApiVersion: 1,
+    assetUrl: "https://github.com/example/example/releases/download/v1.0.0/example-1.0.0.zip",
+    sha256: sha256(fixture.archive),
+    permissions: ["agent.tools"],
+    platforms: [process.platform]
+  };
+  const unsigned = {
+    schemaVersion: fixture.index.schemaVersion,
+    generatedAt: fixture.index.generatedAt,
+    plugins: fixture.index.plugins.map((reference) => ({ ...reference, latest: resolved }))
+  } as MarketplaceIndex;
+  let releaseApiCalled = false;
+  const signedIndex = signIndex(unsigned);
+  const fetcher = createFetcher({ ...fixture, index: signedIndex }, (url) => {
+    if (url.includes("/releases/latest")) releaseApiCalled = true;
+  });
+  const [plugin] = await new MarketplaceClient("http://127.0.0.1/index.json", publicKey, fetcher).list();
+  assert.equal(plugin.latest?.version, "1.0.0");
+  assert.equal(plugin.latest?.sha256, resolved.sha256);
+  assert.equal(releaseApiCalled, false);
+});
+
 test("marketplace falls back to a .sha256 sidecar when GitHub has no digest", async () => {
   const archive = Buffer.from("sidecar plugin zip");
   const fixture = createFixture({

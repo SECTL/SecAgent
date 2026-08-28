@@ -119,14 +119,15 @@ test("downloads through ghproxy first, verifies the asset, and installs to the s
       versionOf: () => "2.1.1.0",
       fetcher,
       exists: (candidate) => fs.existsSync(candidate),
+      installPackage: async (destinationPath) => destinationPath,
       restartProcess: async () => { writeClassIslandManifest(root); },
       now: () => 123
     });
     const [target] = await installer.detect();
     const [result] = await installer.install([target.id]);
-    const installedPath = path.win32.join(root, "data", "Cache", "PluginPackages", CLASSISLAND_PLUGIN_ASSET_NAME);
+    const installedPath = path.win32.join(root, "data", "Plugins", "classisland.secagent", "manifest.yml");
     assert.equal(result.ok, true);
-    assert.equal(fs.readFileSync(installedPath).toString(), bytes.toString());
+    assert.equal(fs.existsSync(installedPath), true);
     assert.equal(calls[0].startsWith(`${DEFAULT_MARKETPLACE_PROXY_URL}/https://api.github.com/`), true);
     assert.equal(calls[1].startsWith(`${DEFAULT_MARKETPLACE_PROXY_URL}/https://github.com/`), true);
   } finally {
@@ -151,7 +152,7 @@ test("falls back from the proxy to direct GitHub for both release metadata and t
       if (url.includes("api.github.com")) return new Response(JSON.stringify({ tag_name: "0.1.0.1", assets: [{ name: CLASSISLAND_PLUGIN_ASSET_NAME, browser_download_url: "https://github.com/SECTL/ClassIsland-SecAgent-Plugin/releases/download/0.1.0.1/ClassIsland.SecAgent.Plugin.cipx", digest: `sha256:${digest}`, size: bytes.length }] }), { status: 200 });
       return new Response(bytes, { status: 200 });
     };
-    const installer = new ClassIslandInstaller({ platform: "win32", executablePaths: [exe], runningProcesses: [], versionOf: () => "2.1.1.0", fetcher, exists: (candidate) => fs.existsSync(candidate), restartProcess: async () => { writeClassIslandManifest(root); } });
+    const installer = new ClassIslandInstaller({ platform: "win32", executablePaths: [exe], runningProcesses: [], versionOf: () => "2.1.1.0", fetcher, exists: (candidate) => fs.existsSync(candidate), installPackage: async (destinationPath) => destinationPath, restartProcess: async () => { writeClassIslandManifest(root); } });
     const [target] = await installer.detect();
     const [result] = await installer.install([target.id]);
     assert.equal(result.ok, true);
@@ -183,12 +184,12 @@ test("uses the GitHub release page digest when the REST API is rate limited", as
       if (url.includes("expanded_assets")) return new Response(`<li><a href="/SECTL/ClassIsland-SecAgent-Plugin/releases/download/0.1.0.1/${CLASSISLAND_PLUGIN_ASSET_NAME}"><span>${CLASSISLAND_PLUGIN_ASSET_NAME}</span></a><span>sha256:${digest}</span></li>`, { status: 200 });
       return new Response(bytes, { status: 200 });
     };
-    const installer = new ClassIslandInstaller({ platform: "win32", executablePaths: [exe], runningProcesses: [], versionOf: () => "2.1.1.0", fetcher, exists: (candidate) => fs.existsSync(candidate), restartProcess: async () => { writeClassIslandManifest(root); } });
+    const installer = new ClassIslandInstaller({ platform: "win32", executablePaths: [exe], runningProcesses: [], versionOf: () => "2.1.1.0", fetcher, exists: (candidate) => fs.existsSync(candidate), installPackage: async (destinationPath) => destinationPath, restartProcess: async () => { writeClassIslandManifest(root); } });
     const [target] = await installer.detect();
     const [result] = await installer.install([target.id]);
     assert.equal(result.ok, true);
     assert.equal(calls.some((url) => url.includes("releases/expanded_assets/0.1.0.1")), true);
-    assert.equal(fs.existsSync(path.win32.join(root, "data", "Cache", "PluginPackages", CLASSISLAND_PLUGIN_ASSET_NAME)), true);
+    assert.equal(fs.existsSync(path.win32.join(root, "data", "Plugins", "classisland.secagent", "manifest.yml")), true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -247,6 +248,7 @@ test("restarts a running ClassIsland and starts an idle instance after installin
       exists: (candidate) => fs.existsSync(candidate),
       requestGracefulClose: async () => undefined,
       isProcessRunning: async () => false,
+      installPackage: async (destinationPath) => destinationPath,
       restartProcess: async (executablePath, args) => { launches.push({ executablePath, args }); writeClassIslandManifest(root); }
     });
     const [runningTarget] = await runningInstaller.detect();
@@ -264,6 +266,7 @@ test("restarts a running ClassIsland and starts an idle instance after installin
       versionOf: () => "2.1.1.0",
       fetcher,
       exists: (candidate) => fs.existsSync(candidate),
+      installPackage: async (destinationPath) => destinationPath,
       restartProcess: async (executablePath, args) => { launches.push({ executablePath, args }); writeClassIslandManifest(root); }
     });
     const [idleTarget] = await idleInstaller.detect();
@@ -294,6 +297,7 @@ test("force-terminates ClassIsland when graceful close fails", async () => {
       requestGracefulClose: async () => { throw new Error("still running"); },
       forceTerminateProcess: async () => { forceKilled = true; running = false; },
       isProcessRunning: async () => running,
+      installPackage: async (destinationPath) => destinationPath,
       restartProcess: async () => { writeClassIslandManifest(root); },
       fetcher: async (input: string | URL) => String(input).includes("api.github.com")
         ? new Response(JSON.stringify({ tag_name: "0.1.0.1", assets: [{ name: CLASSISLAND_PLUGIN_ASSET_NAME, browser_download_url: "https://github.com/example/plugin.cipx", digest: `sha256:${digest}`, size: bytes.length }] }), { status: 200 })
@@ -303,7 +307,7 @@ test("force-terminates ClassIsland when graceful close fails", async () => {
     const [result] = await installer.install([target.id]);
     assert.equal(forceKilled, true);
     assert.equal(result.ok, true);
-    assert.equal(fs.existsSync(path.win32.join(root, "data", "Cache", "PluginPackages", CLASSISLAND_PLUGIN_ASSET_NAME)), true);
+    assert.equal(fs.existsSync(path.win32.join(root, "data", "Plugins", "classisland.secagent", "manifest.yml")), true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

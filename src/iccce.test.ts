@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   ICCCE_PLUGIN_ASSET_NAME,
+  ICCCE_PLUGIN_ID,
   IccceInstaller,
   discoverIccceInstallations,
   resolveIccceLayout
@@ -84,15 +85,16 @@ test("downloads ICC-CE icpx through ghproxy, verifies it, and restarts the selec
       exists: (candidate) => fs.existsSync(candidate),
       requestGracefulClose: async () => undefined,
       isProcessRunning: async () => false,
+      installPackage: async (destinationPath) => destinationPath,
       restartProcess: async (executablePath, args) => { launches.push({ executablePath, args }); writeIccceManifest(root); }
     });
     const [target] = await installer.detect();
     const [result] = await installer.install([target.id]);
-    const installedPath = path.win32.join(root, "PluginPackages", ICCCE_PLUGIN_ASSET_NAME);
+    const installedPath = path.win32.join(root, "Plugins", ICCCE_PLUGIN_ID, "manifest.json");
     assert.equal(result.ok, true);
     assert.equal(result.version, "0.3.2");
     assert.match(result.message, /自动重启/);
-    assert.equal(fs.readFileSync(installedPath).toString(), bytes.toString());
+    assert.equal(fs.existsSync(installedPath), true);
     assert.deepEqual(launches, [{ executablePath: exe, args: ["--profile", "classroom"] }]);
     assert.equal(calls[0].startsWith(`${DEFAULT_MARKETPLACE_PROXY_URL}/https://api.github.com/`), true);
     assert.equal(calls[1].startsWith(`${DEFAULT_MARKETPLACE_PROXY_URL}/https://github.com/`), true);

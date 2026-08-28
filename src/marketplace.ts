@@ -29,6 +29,8 @@ export interface MarketplacePluginReference {
   id: string;
   path: string;
   sha256: string;
+  /** Release metadata resolved by the signed marketplace generator. */
+  latest?: MarketplaceVersion;
 }
 
 export interface MarketplaceIndex {
@@ -110,10 +112,13 @@ export class MarketplaceClient {
 
     const index = await fetchMarketplaceIndex(this.indexUrl, this.fetcher);
     this.verifyIndex(index);
-    const metadata = await Promise.all(index.plugins.map((reference) => this.fetchPluginMetadata(reference)));
-    const compatible = metadata.filter((plugin) => isCompatibleMetadata(plugin));
+    const metadata = await Promise.all(index.plugins.map(async (reference) => ({
+      reference,
+      plugin: await this.fetchPluginMetadata(reference)
+    })));
+    const compatible = metadata.filter(({ plugin }) => isCompatibleMetadata(plugin));
 
-    return Promise.all(compatible.map(async (plugin) => {
+    return Promise.all(compatible.map(async ({ reference, plugin }) => {
       const base: MarketplacePlugin = {
         id: plugin.id,
         format: plugin.format,
@@ -125,7 +130,12 @@ export class MarketplaceClient {
       };
 
       try {
-        const latest = await this.resolveRelease(plugin);
+        // New indexes carry the resolved release inside the signed index. This keeps
+        // normal clients independent from GitHub's unauthenticated API quota. Keep
+        // the old resolver as a compatibility fallback for older indexes.
+        const latest = reference.latest
+          ? validateMarketplaceVersion(reference.latest)
+          : await this.resolveRelease(plugin);
         return latest ? { ...base, latest } : { ...base, releaseError: "暂无可用 Release" };
       } catch (error) {
         return { ...base, releaseError: error instanceof Error ? error.message : String(error) };
@@ -416,7 +426,31 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isMarketplaceIndex(value: unknown): value is MarketplaceIndex {
   if (!isRecord(value) || value.schemaVersion !== 2 || typeof value.generatedAt !== "string" || typeof value.signature !== "string" || !Array.isArray(value.plugins)) return false;
-  return value.plugins.every((plugin) => isRecord(plugin) && typeof plugin.id === "string" && typeof plugin.path === "string" && typeof plugin.sha256 === "string" && /^[a-fA-F0-9]{64}$/.test(plugin.sha256));
+  return value.plugins.every((plugin) => isRecord(plugin)
+    && typeof plugin.id === "string"
+    && typeof plugin.path === "string"
+    && typeof plugin.sha256 === "string"
+    && /^[a-fA-F0-9]{64}$/.test(plugin.sha256)
+    && (plugin.latest === undefined || isMarketplaceVersion(plugin.latest)));
+}
+
+function isMarketplaceVersion(value: unknown): value is MarketplaceVersion {
+  return isRecord(value)
+    && typeof value.version === "string"
+    && typeof value.minHostApiVersion === "number"
+    && typeof value.assetUrl === "string"
+    && isAllowedMarketUrl(value.assetUrl)
+    && typeof value.sha256 === "string"
+    && /^[a-fA-F0-9]{64}$/.test(value.sha256)
+    && Array.isArray(value.permissions)
+    && value.permissions.every((permission) => typeof permission === "string")
+    && Array.isArray(value.platforms)
+    && value.platforms.every((platform) => typeof platform === "string");
+}
+
+function validateMarketplaceVersion(value: MarketplaceVersion): MarketplaceVersion {
+  if (!isMarketplaceVersion(value)) throw new Error("甯傚満绱㈠紩涓殑 Release 鏁版嵁鏃犳晥");
+  return value;
 }
 
 function isMarketplacePluginMetadata(value: unknown): value is MarketplacePluginMetadata {

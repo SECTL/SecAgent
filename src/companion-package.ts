@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import AdmZip from "adm-zip";
 
 type SupportedPlatform = NodeJS.Platform;
 export type CompanionLogger = (stage: string, data?: unknown) => void;
@@ -11,11 +12,17 @@ const execFileAsync = promisify(execFile);
 
 export interface CompanionExecutor {
   writePackage(filePath: string, bytes: Buffer, logger?: CompanionLogger): Promise<string>;
+  installPackage(destinationPath: string, bytes: Buffer, spec: CompanionPackageSpec, logger?: CompanionLogger): Promise<string>;
   requestGracefulClose(pid: number, logger?: CompanionLogger): Promise<void>;
   forceTerminate(pid: number, logger?: CompanionLogger): Promise<void>;
   isProcessRunning(pid: number, logger?: CompanionLogger): Promise<boolean>;
   startProcess(executablePath: string, args: string[], logger?: CompanionLogger): Promise<void>;
   close(): Promise<void>;
+}
+
+export interface CompanionPackageSpec {
+  pluginId: string;
+  manifestFileName: string;
 }
 
 function writeLog(logger: CompanionLogger | undefined, stage: string, data: unknown = {}): void {
@@ -62,6 +69,82 @@ function likelyProtectedWindowsPath(filePath: string): boolean {
     process.env.SystemRoot
   ].filter((value): value is string => Boolean(value));
   return roots.some((root) => isPathInside(filePath, root, "win32"));
+}
+
+function manifestValue(text: string, key: string): string | undefined {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return text.match(new RegExp(`^\\s*${escaped}\\s*:\\s*["']?([^"'\\r\\n#]+)`, "im"))?.[1]?.trim();
+}
+
+function validateCompanionPackage(bytes: Buffer, spec: CompanionPackageSpec): AdmZip {
+  if (!spec.pluginId || /[\\/]/.test(spec.pluginId) || spec.pluginId === "." || spec.pluginId === "..")
+    throw new Error("插件 ID 无效");
+  const zip = new AdmZip(bytes);
+  const entries = zip.getEntries();
+  if (!entries.length) throw new Error("插件包为空");
+  for (const entry of entries) {
+    const name = entry.entryName.replaceAll("\\", "/");
+    if (name.startsWith("/") || /^[A-Za-z]:/.test(name) || name.split("/").includes(".."))
+      throw new Error(`插件包包含不安全路径: ${entry.entryName}`);
+  }
+  const manifestEntry = zip.getEntry(spec.manifestFileName);
+  if (!manifestEntry) throw new Error(`插件包缺少 ${spec.manifestFileName}`);
+  const manifestText = manifestEntry.getData().toString("utf8");
+  let id: string | undefined;
+  let entranceAssembly: string | undefined;
+  if (spec.manifestFileName.toLowerCase().endsWith(".json")) {
+    const parsed = JSON.parse(manifestText) as Record<string, unknown>;
+    const readString = (...keys: string[]) => keys.map((key) => parsed[key]).find((value): value is string => typeof value === "string")?.trim();
+    id = readString("Id", "id");
+    entranceAssembly = readString("EntranceAssembly", "entranceAssembly");
+  } else {
+    id = manifestValue(manifestText, "id");
+    entranceAssembly = manifestValue(manifestText, "entranceAssembly");
+  }
+  if (!id || id.toLowerCase() !== spec.pluginId.toLowerCase()) throw new Error(`插件包清单 ID 不匹配: ${id || "缺失"}`);
+  if (!entranceAssembly) throw new Error("插件包清单缺少入口程序集");
+  const normalizedEntrance = entranceAssembly.replaceAll("\\", "/");
+  if (!entries.some((entry) => entry.entryName.replaceAll("\\", "/") === normalizedEntrance))
+    throw new Error(`插件包缺少入口程序集: ${entranceAssembly}`);
+  return zip;
+}
+
+function installDirectPackage(destinationPath: string, bytes: Buffer, spec: CompanionPackageSpec, platform: SupportedPlatform, logger?: CompanionLogger): string {
+  const api = pathApi(platform);
+  const destination = api.resolve(destinationPath);
+  const parent = api.dirname(destination);
+  const staging = api.join(parent, `.${api.basename(destination)}.${crypto.randomUUID()}.installing`);
+  const backup = api.join(parent, `.${api.basename(destination)}.${crypto.randomUUID()}.backup`);
+  const zip = validateCompanionPackage(bytes, spec);
+  let movedExisting = false;
+  writeLog(logger, "package.install.direct.begin", { destination, pluginId: spec.pluginId, bytes: bytes.length });
+  try {
+    fs.mkdirSync(parent, { recursive: true });
+    zip.extractAllTo(staging, true);
+    const disabledPath = api.join(destination, ".disabled");
+    const wasDisabled = fs.existsSync(disabledPath);
+    if (fs.existsSync(destination)) {
+      fs.renameSync(destination, backup);
+      movedExisting = true;
+    }
+    fs.renameSync(staging, destination);
+    if (wasDisabled) fs.writeFileSync(api.join(destination, ".disabled"), "", "utf8");
+    if (movedExisting) fs.rmSync(backup, { recursive: true, force: true });
+    writeLog(logger, "package.install.direct.success", { destination, pluginId: spec.pluginId });
+    return destination;
+  } catch (error) {
+    try {
+      if (fs.existsSync(destination) && movedExisting) fs.rmSync(destination, { recursive: true, force: true });
+      if (movedExisting && fs.existsSync(backup)) fs.renameSync(backup, destination);
+    } catch (restoreError) {
+      writeLog(logger, "package.install.direct.restore.failed", { destination, error: restoreError instanceof Error ? restoreError.message : String(restoreError) });
+    }
+    writeLog(logger, "package.install.direct.failed", { destination, pluginId: spec.pluginId, error: error instanceof Error ? error.message : String(error) });
+    throw error;
+  } finally {
+    fs.rmSync(staging, { recursive: true, force: true });
+    if (movedExisting && fs.existsSync(backup)) fs.rmSync(backup, { recursive: true, force: true });
+  }
 }
 
 function writeDirect(filePath: string, bytes: Buffer, platform: SupportedPlatform, logger?: CompanionLogger): string {
@@ -156,6 +239,45 @@ while ($true) {
           }
           if ([System.IO.File]::Exists($staged)) { [System.IO.File]::Delete($staged) }
         }
+        'install-package' {
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $source = [string]$body.data.source
+          $destination = [System.IO.Path]::GetFullPath([string]$body.data.destination)
+          $manifestName = [string]$body.data.manifestFileName
+          $directory = [System.IO.Path]::GetDirectoryName($destination)
+          if ([string]::IsNullOrWhiteSpace($directory)) { throw '目标插件目录无效' }
+          [System.IO.Directory]::CreateDirectory($directory) | Out-Null
+          $staged = [System.IO.Path]::Combine($directory, '.' + [System.IO.Path]::GetFileName($destination) + '.' + [guid]::NewGuid().ToString('N') + '.installing')
+          $backup = [System.IO.Path]::Combine($directory, '.' + [System.IO.Path]::GetFileName($destination) + '.' + [guid]::NewGuid().ToString('N') + '.backup')
+          $movedExisting = $false
+          try {
+            [System.IO.Directory]::CreateDirectory($staged) | Out-Null
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($source, $staged)
+            $manifestPath = [System.IO.Path]::Combine($staged, $manifestName)
+            if (-not [System.IO.File]::Exists($manifestPath)) { throw "插件包缺少 $manifestName" }
+            $disabledPath = [System.IO.Path]::Combine($destination, '.disabled')
+            $wasDisabled = [System.IO.File]::Exists($disabledPath)
+            if ([System.IO.Directory]::Exists($destination)) {
+              [System.IO.Directory]::Move($destination, $backup)
+              $movedExisting = $true
+            } elseif ([System.IO.File]::Exists($destination)) {
+              throw '插件目标路径不是目录'
+            }
+            [System.IO.Directory]::Move($staged, $destination)
+            if ($wasDisabled) { [System.IO.File]::WriteAllText([System.IO.Path]::Combine($destination, '.disabled'), '') }
+            if ($movedExisting -and [System.IO.Directory]::Exists($backup)) { [System.IO.Directory]::Delete($backup, $true) }
+            $response = @{ ok = $true; actualPath = $destination }
+          } catch {
+            try {
+              if ([System.IO.Directory]::Exists($destination) -and $movedExisting) { [System.IO.Directory]::Delete($destination, $true) }
+              if ($movedExisting -and [System.IO.Directory]::Exists($backup)) { [System.IO.Directory]::Move($backup, $destination) }
+            } catch { }
+            throw
+          } finally {
+            if ([System.IO.Directory]::Exists($staged)) { [System.IO.Directory]::Delete($staged, $true) }
+            if ($movedExisting -and [System.IO.Directory]::Exists($backup)) { [System.IO.Directory]::Delete($backup, $true) }
+          }
+        }
         'close' {
           $process = Get-Process -Id ([int]$body.data.pid) -ErrorAction Stop
           $response = @{ ok = $true; accepted = [bool]$process.CloseMainWindow() }
@@ -178,9 +300,25 @@ while ($true) {
           } else {
             Start-Process -FilePath $executablePath -WorkingDirectory $workingDirectory -PassThru -ErrorAction Stop
           }
-          Start-Sleep -Milliseconds 250
-          $running = $true
-          try { Get-Process -Id $process.Id -ErrorAction Stop | Out-Null } catch { $running = $false }
+          # GUI applications may take several seconds to replace a launcher
+          # process or acquire their single-instance mutex. Do not report a
+          # startup failure after the old 250ms probe; wait for either the
+          # original process or a same-path replacement to appear.
+          $running = $false
+          $deadline = [DateTime]::UtcNow.AddSeconds(12)
+          while ([DateTime]::UtcNow -lt $deadline) {
+            try {
+              Get-Process -Id $process.Id -ErrorAction Stop | Out-Null
+              $running = $true
+              break
+            } catch {
+              try {
+                $samePath = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath -and ([string]$_.ExecutablePath).Equals($executablePath, [System.StringComparison]::OrdinalIgnoreCase) })
+                if ($samePath.Count -gt 0) { $running = $true; break }
+              } catch { }
+            }
+            Start-Sleep -Milliseconds 250
+          }
           $response = @{ ok = $true; pid = [int]$process.Id; running = $running }
         }
         'shutdown' {
@@ -201,11 +339,11 @@ while ($true) {
 `;
 
 function workerStartCommand(scriptPath: string, root: string): string {
-  const scriptArgument = `-NoProfile -NoLogo -NonInteractive -ExecutionPolicy Bypass -File "${scriptPath}" -Root "${root}"`;
+  const scriptArgument = `-NoProfile -NoLogo -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "${scriptPath}" -Root "${root}"`;
   return [
     "$ErrorActionPreference = 'Stop'",
     `$arguments = ${quotePowerShell(scriptArgument)}`,
-    `$worker = Start-Process -FilePath ${quotePowerShell("powershell.exe")} -Verb RunAs -ArgumentList $arguments -PassThru -ErrorAction Stop`,
+    `$worker = Start-Process -FilePath ${quotePowerShell("powershell.exe")} -Verb RunAs -WindowStyle Hidden -ArgumentList $arguments -PassThru -ErrorAction Stop`,
     "$worker.Id"
   ].join(";\n");
 }
@@ -301,6 +439,17 @@ export class WindowsCompanionExecutor implements CompanionExecutor {
     }
   }
 
+  async installPackage(destinationPath: string, bytes: Buffer, spec: CompanionPackageSpec, logger?: CompanionLogger): Promise<string> {
+    const source = path.join(this.root, `package-${crypto.randomUUID()}.zip`);
+    fs.writeFileSync(source, bytes, { flag: "wx" });
+    try {
+      const response = await this.request("install-package", { source, destination: destinationPath, manifestFileName: spec.manifestFileName, pluginId: spec.pluginId }, logger);
+      return typeof response.actualPath === "string" ? response.actualPath : destinationPath;
+    } finally {
+      fs.rmSync(source, { force: true });
+    }
+  }
+
   async requestGracefulClose(pid: number, logger?: CompanionLogger): Promise<void> {
     await this.request("close", { pid }, logger);
   }
@@ -365,6 +514,43 @@ export async function writeCompanionPackage(filePath: string, bytes: Buffer, pla
     if (platform !== "win32" || !["EACCES", "EPERM"].includes(errorCode))
       throw error;
     return writeWithWindowsUac(filePath, bytes, logger);
+  }
+}
+
+/**
+ * Validates a companion package and installs its extracted contents into the
+ * host's final plugin directory. Protected Windows directories use the single
+ * already-running elevated worker, so a batch install does not show one UAC
+ * prompt per application.
+ */
+export async function installCompanionPackage(
+  destinationPath: string,
+  bytes: Buffer,
+  spec: CompanionPackageSpec,
+  platform: SupportedPlatform = process.platform,
+  executor?: CompanionExecutor,
+  logger?: CompanionLogger
+): Promise<string> {
+  // Validate before asking for elevation or touching the existing plugin.
+  validateCompanionPackage(bytes, spec);
+  writeLog(logger, "package.install.begin", { destinationPath, pluginId: spec.pluginId, manifestFileName: spec.manifestFileName, bytes: bytes.length, platform });
+  if (platform === "win32" && likelyProtectedWindowsPath(destinationPath)) {
+    if (executor) return executor.installPackage(destinationPath, bytes, spec, logger);
+    const elevated = new WindowsCompanionExecutor(logger);
+    try { return await elevated.installPackage(destinationPath, bytes, spec, logger); }
+    finally { await elevated.close(); }
+  }
+  try {
+    return installDirectPackage(destinationPath, bytes, spec, platform, logger);
+  } catch (error) {
+    const errorCode = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+    if (platform === "win32" && ["EACCES", "EPERM"].includes(errorCode)) {
+      if (executor) return executor.installPackage(destinationPath, bytes, spec, logger);
+      const elevated = new WindowsCompanionExecutor(logger);
+      try { return await elevated.installPackage(destinationPath, bytes, spec, logger); }
+      finally { await elevated.close(); }
+    }
+    throw error;
   }
 }
 

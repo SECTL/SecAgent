@@ -5,7 +5,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { compareVersions, marketplaceRequestUrls } from "./marketplace.js";
-import { startCompanionProcess, writeCompanionPackage, type CompanionExecutor, type CompanionLogger } from "./companion-package.js";
+import { installCompanionPackage, startCompanionProcess, type CompanionExecutor, type CompanionLogger, type CompanionPackageSpec } from "./companion-package.js";
 
 export const SECRANDOM_PLUGIN_REPOSITORY = "SECTL/SecRandom-SecAgent-Plugin";
 export const SECRANDOM_PLUGIN_ID = "secrandom.secagent";
@@ -86,8 +86,8 @@ export interface SecRandomInstallerOptions extends SecRandomDiscoveryOptions {
   waitForExitPollMs?: number;
   waitForPluginTimeoutMs?: number;
   waitForPluginPollMs?: number;
+  installPackage?: (destinationPath: string, bytes: Buffer, spec: CompanionPackageSpec) => Promise<string> | string;
   now?: () => number;
-  writePackage?: (filePath: string, bytes: Buffer) => Promise<string> | string;
   log?: CompanionLogger;
 }
 
@@ -624,9 +624,8 @@ export class SecRandomInstaller {
     const forceTerminate = this.options.forceTerminateProcess || ((pid: number) => executor ? executor.forceTerminate(pid, (stage, data) => log(stage, data)) : defaultForceTerminate(pid, this.platform, this.commandRunner));
     const exists = this.options.exists || defaultExists;
     const readFile = this.options.readFile || defaultReadFile;
-    const writePackage = this.options.writePackage || ((filePath: string, bytes: Buffer) => executor
-      ? executor.writePackage(filePath, bytes, (stage, data) => log(stage, data))
-      : writeCompanionPackage(filePath, bytes, this.platform, (stage, data) => log(stage, data)));
+    const installPackage = this.options.installPackage || ((destinationPath: string, bytes: Buffer, spec: CompanionPackageSpec) =>
+      installCompanionPackage(destinationPath, bytes, spec, this.platform, executor, (stage, data) => log(stage, data)));
     for (const group of groups.values()) {
       log("group.begin", { dataRoot: group[0].dataRoot, targets: group.map((candidate) => candidate.id), pluginPackagesPaths: group[0].pluginPackagesPaths || [group[0].pluginPackagesPath] });
       const alreadyInstalled = group.every((candidate) => candidate.installedPluginVersion && compareVersions(candidate.installedPluginVersion, packageData.version) >= 0);
@@ -639,16 +638,24 @@ export class SecRandomInstaller {
       let closeFailed = false;
       for (const candidate of running) {
         let exited = false;
+        log("process.close.begin", { pid: candidate.pid, executablePath: candidate.executablePath });
         try {
           await requestClose(candidate.pid!);
           exited = await waitForProcessExit(candidate.pid!, isRunning, this.options.waitForExitTimeoutMs, this.options.waitForExitPollMs);
-        } catch { /* Fall through to the force-terminate path. */ }
+          log("process.close.result", { pid: candidate.pid, exited, method: "graceful" });
+        } catch (error) {
+          log("process.close.failed", { pid: candidate.pid, method: "graceful", error: error instanceof Error ? error.message : String(error) });
+        }
         if (!exited) {
           report("restarting", `SecRandom 未能优雅退出，正在强制结束进程 ${candidate.pid}`);
+          log("process.terminate.begin", { pid: candidate.pid });
           try {
             await forceTerminate(candidate.pid!);
             exited = await waitForProcessExit(candidate.pid!, isRunning, this.options.waitForExitTimeoutMs, this.options.waitForExitPollMs);
-          } catch { /* The process may be protected or already gone. */ }
+            log("process.terminate.result", { pid: candidate.pid, exited });
+          } catch (error) {
+            log("process.terminate.failed", { pid: candidate.pid, error: error instanceof Error ? error.message : String(error) });
+          }
         }
         if (!exited) { closeFailed = true; break; }
         closed.push(candidate);
@@ -662,11 +669,14 @@ export class SecRandomInstaller {
         ? group[0].pluginPackagesPaths
         : [group[0].pluginPackagesPath];
       try {
-        report("installing", "正在写入 SecRandom 插件包");
-        const actualPackagePaths: string[] = [];
-        for (const packageDirectory of packageDirectories)
-          actualPackagePaths.push(await writePackage(api.join(packageDirectory, SECRANDOM_PLUGIN_ASSET_NAME), packageData.bytes));
-        log("package.write.result", { requestedDirectories: packageDirectories, actualPackagePaths });
+        report("installing", "正在解压安装 SecRandom 插件");
+        const dataRoots = [...new Set([group[0].dataRoot, ...packageDirectories.map((item) => api.dirname(api.dirname(item)))])];
+        const actualPluginPaths: string[] = [];
+        for (const dataRoot of dataRoots) {
+          const pluginPath = api.join(dataRoot, "plugins", SECRANDOM_PLUGIN_ID);
+          actualPluginPaths.push(await installPackage(pluginPath, packageData.bytes, { pluginId: SECRANDOM_PLUGIN_ID, manifestFileName: "manifest.yml" }));
+        }
+        log("package.install.result", { requestedDataRoots: dataRoots, actualPluginPaths, detectedPackageDirectories: packageDirectories });
         const launchCandidate = closed[0] || group[0];
         const restarting = closed.length > 0;
         report("restarting", restarting ? "正在重新启动 SecRandom" : "正在启动 SecRandom");
@@ -674,14 +684,16 @@ export class SecRandomInstaller {
         let launchFailed = false;
         try { await restart(launchCandidate.executablePath, launchCandidate.launchArgs); log("process.restart.success", { executablePath: launchCandidate.executablePath }); }
         catch (error) { launchFailed = true; log("process.restart.failed", { executablePath: launchCandidate.executablePath, error: error instanceof Error ? error.message : String(error) }); }
+        const writtenVersion = installedPluginVersionFromRoots(dataRoots, this.platform, exists, readFile);
         const verifiedVersion = launchFailed ? undefined : await waitForInstalledPlugin(
-          () => installedPluginVersionFromRoots([group[0].dataRoot, ...packageDirectories.map((item) => api.dirname(api.dirname(item)))], this.platform, exists, readFile),
+          () => installedPluginVersionFromRoots(dataRoots, this.platform, exists, readFile),
           packageData.version,
           this.options.waitForPluginTimeoutMs,
           this.options.waitForPluginPollMs
         );
         const verified = Boolean(verifiedVersion);
-        log("verification.result", { expectedVersion: packageData.version, verifiedVersion, verified, launchFailed });
+        const detectedVersion = verifiedVersion || writtenVersion;
+        log("verification.result", { expectedVersion: packageData.version, writtenVersion, verifiedVersion, detectedVersion, verified, launchFailed });
         for (const candidate of group) {
           results.push({
             targetId: candidate.id,
@@ -691,14 +703,14 @@ export class SecRandomInstaller {
               ? `插件包已写入，但 SecRandom 自动${restarting ? "重启" : "启动"}失败，请手动启动`
               : verified
                 ? restarting ? `已安装 SecRandom 插件 v${verifiedVersion}，SecRandom 已自动重启` : `已安装 SecRandom 插件 v${verifiedVersion}，SecRandom 已自动启动`
-                : "插件包已写入并启动，但等待 SecRandom 解包后未检测到插件，请稍后重试",
-            ...(verifiedVersion ? { version: verifiedVersion } : {})
+                : "插件已解压并启动，但未检测到 SecRandom 插件，请查看诊断日志后重试",
+            ...(detectedVersion ? { version: detectedVersion } : {})
           });
         }
       } catch (error) {
         log("install.failed", { error: error instanceof Error ? error.message : String(error) });
         for (const candidate of closed) await restart(candidate.executablePath, candidate.launchArgs).catch(() => undefined);
-        for (const candidate of group) results.push({ targetId: candidate.id, ok: false, action: "failed", message: `写入 SecRandom 插件失败：${error instanceof Error ? error.message : String(error)}` });
+        for (const candidate of group) results.push({ targetId: candidate.id, ok: false, action: "failed", message: `安装 SecRandom 插件失败：${error instanceof Error ? error.message : String(error)}` });
       }
     }
     return [...results, ...missing];
