@@ -17,7 +17,14 @@ import { DEFAULT_MARKETPLACE_PROXY_URL } from "./marketplace.js";
 function writeClassIslandManifest(root: string, version = "0.1.0.1"): void {
   const manifestPath = path.win32.join(root, "data", "Plugins", "classisland.secagent", "manifest.yml");
   fs.mkdirSync(path.win32.dirname(manifestPath), { recursive: true });
-  fs.writeFileSync(manifestPath, `id: classisland.secagent\nversion: ${version}\n`);
+  fs.writeFileSync(manifestPath, `id: classisland.secagent\nentranceAssembly: ClassIsland.SecAgent.Plugin.dll\nversion: ${version}\n`);
+  fs.writeFileSync(path.win32.join(path.win32.dirname(manifestPath), "ClassIsland.SecAgent.Plugin.dll"), "test assembly");
+}
+
+function classIslandHealthResponse(input: string | URL): Response | undefined {
+  return String(input) === "http://127.0.0.1:18789/health"
+    ? new Response(JSON.stringify({ apiVersion: 1, name: "classisland", status: "ok" }), { status: 200 })
+    : undefined;
 }
 
 test("ClassIsland versions enforce the 2.1.1.0 minimum", () => {
@@ -95,6 +102,25 @@ test("scans Windows external locations when the installer has no explicit execut
   assert.equal(target?.source, "discovery");
 });
 
+test("does not report a ClassIsland package when its entrance assembly is missing", async () => {
+  const exe = "C:\\Portable\\ClassIsland\\ClassIsland.exe";
+  const manifestPath = "C:\\Portable\\ClassIsland\\data\\Plugins\\classisland.secagent\\manifest.yml";
+  const found = await discoverClassIslandInstallations({
+    platform: "win32",
+    home: "C:\\Users\\teacher",
+    env: { APPDATA: "C:\\Users\\teacher\\AppData\\Roaming" },
+    executablePaths: [exe],
+    runningProcesses: [],
+    exists: (candidate) => candidate === exe || candidate === manifestPath,
+    versionOf: () => "2.1.1.0",
+    readFile: (filePath) => filePath.endsWith("\\PackageType")
+      ? "folder"
+      : "id: classisland.secagent\nentranceAssembly: ClassIsland.SecAgent.Plugin.dll\nversion: 0.1.0.1\n"
+  });
+  assert.equal(found.length, 1);
+  assert.equal(found[0].installedPluginVersion, undefined);
+});
+
 test("downloads through ghproxy first, verifies the asset, and installs to the selected portable instance", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-classisland-"));
   try {
@@ -109,6 +135,8 @@ test("downloads through ghproxy first, verifies the asset, and installs to the s
     const fetcher = async (input: string | URL): Promise<Response> => {
       const url = String(input);
       calls.push(url);
+      const health = classIslandHealthResponse(input);
+      if (health) return health;
       if (url.includes("api.github.com")) return new Response(JSON.stringify({ tag_name: "0.1.0.1", draft: false, prerelease: false, assets: [{ name: CLASSISLAND_PLUGIN_ASSET_NAME, browser_download_url: "https://github.com/SECTL/ClassIsland-SecAgent-Plugin/releases/download/0.1.0.1/ClassIsland.SecAgent.Plugin.cipx", size: bytes.length, digest: `sha256:${digest}` }] }), { status: 200 });
       return new Response(bytes, { status: 200 });
     };
@@ -148,6 +176,8 @@ test("falls back from the proxy to direct GitHub for both release metadata and t
     const fetcher = async (input: string | URL): Promise<Response> => {
       const url = String(input);
       calls.push(url);
+      const health = classIslandHealthResponse(input);
+      if (health) return health;
       if (url.startsWith(`${DEFAULT_MARKETPLACE_PROXY_URL}/`)) return new Response("proxy unavailable", { status: 503 });
       if (url.includes("api.github.com")) return new Response(JSON.stringify({ tag_name: "0.1.0.1", assets: [{ name: CLASSISLAND_PLUGIN_ASSET_NAME, browser_download_url: "https://github.com/SECTL/ClassIsland-SecAgent-Plugin/releases/download/0.1.0.1/ClassIsland.SecAgent.Plugin.cipx", digest: `sha256:${digest}`, size: bytes.length }] }), { status: 200 });
       return new Response(bytes, { status: 200 });
@@ -156,7 +186,7 @@ test("falls back from the proxy to direct GitHub for both release metadata and t
     const [target] = await installer.detect();
     const [result] = await installer.install([target.id]);
     assert.equal(result.ok, true);
-    assert.equal(calls.length, 4);
+    assert.equal(calls.length, 5);
     assert.equal(calls[0].startsWith(`${DEFAULT_MARKETPLACE_PROXY_URL}/https://api.github.com/`), true);
     assert.equal(calls[1].startsWith("https://api.github.com/"), true);
     assert.equal(calls[2].startsWith(`${DEFAULT_MARKETPLACE_PROXY_URL}/https://github.com/`), true);
@@ -179,6 +209,8 @@ test("uses the GitHub release page digest when the REST API is rate limited", as
     const fetcher = async (input: string | URL): Promise<Response> => {
       const url = String(input);
       calls.push(url);
+      const health = classIslandHealthResponse(input);
+      if (health) return health;
       if (url.includes("api.github.com")) return new Response(JSON.stringify({ message: "rate limit exceeded" }), { status: 403 });
       if (url.includes("releases/latest")) return new Response('<a href="/SECTL/ClassIsland-SecAgent-Plugin/releases/tag/0.1.0.1">latest</a>', { status: 200 });
       if (url.includes("expanded_assets")) return new Response(`<li><a href="/SECTL/ClassIsland-SecAgent-Plugin/releases/download/0.1.0.1/${CLASSISLAND_PLUGIN_ASSET_NAME}"><span>${CLASSISLAND_PLUGIN_ASSET_NAME}</span></a><span>sha256:${digest}</span></li>`, { status: 200 });
@@ -235,9 +267,13 @@ test("restarts a running ClassIsland and starts an idle instance after installin
     const bytes = Buffer.from("startable cipx bytes");
     const digest = crypto.createHash("sha256").update(bytes).digest("hex");
     const launches: Array<{ executablePath: string; args: string[] }> = [];
-    const fetcher = async (input: string | URL): Promise<Response> => String(input).includes("api.github.com")
-      ? new Response(JSON.stringify({ tag_name: "0.1.0.1", assets: [{ name: CLASSISLAND_PLUGIN_ASSET_NAME, browser_download_url: "https://github.com/example/plugin.cipx", digest: `sha256:${digest}`, size: bytes.length }] }), { status: 200 })
-      : new Response(bytes, { status: 200 });
+    const fetcher = async (input: string | URL): Promise<Response> => {
+      const health = classIslandHealthResponse(input);
+      if (health) return health;
+      return String(input).includes("api.github.com")
+        ? new Response(JSON.stringify({ tag_name: "0.1.0.1", assets: [{ name: CLASSISLAND_PLUGIN_ASSET_NAME, browser_download_url: "https://github.com/example/plugin.cipx", digest: `sha256:${digest}`, size: bytes.length }] }), { status: 200 })
+        : new Response(bytes, { status: 200 });
+    };
 
     const runningInstaller = new ClassIslandInstaller({
       platform: "win32",
@@ -299,9 +335,13 @@ test("force-terminates ClassIsland when graceful close fails", async () => {
       isProcessRunning: async () => running,
       installPackage: async (destinationPath) => destinationPath,
       restartProcess: async () => { writeClassIslandManifest(root); },
-      fetcher: async (input: string | URL) => String(input).includes("api.github.com")
-        ? new Response(JSON.stringify({ tag_name: "0.1.0.1", assets: [{ name: CLASSISLAND_PLUGIN_ASSET_NAME, browser_download_url: "https://github.com/example/plugin.cipx", digest: `sha256:${digest}`, size: bytes.length }] }), { status: 200 })
-        : new Response(bytes, { status: 200 })
+      fetcher: async (input: string | URL) => {
+        const health = classIslandHealthResponse(input);
+        if (health) return health;
+        return String(input).includes("api.github.com")
+          ? new Response(JSON.stringify({ tag_name: "0.1.0.1", assets: [{ name: CLASSISLAND_PLUGIN_ASSET_NAME, browser_download_url: "https://github.com/example/plugin.cipx", digest: `sha256:${digest}`, size: bytes.length }] }), { status: 200 })
+          : new Response(bytes, { status: 200 });
+      }
     });
     const [target] = await installer.detect();
     const [result] = await installer.install([target.id]);

@@ -14,6 +14,14 @@ function latestCompatibleVersion(plugin: MarketplacePlugin | undefined, platform
   return latest && latest.minHostApiVersion <= 1 && latest.platforms.includes(platform) ? latest : undefined;
 }
 
+function isClassIslandTargetReady(target: ClassIslandInstallCandidate): boolean {
+  return Boolean(target.installedPluginVersion && (!target.isRunning || target.pluginHealthy === true));
+}
+
+function isSecRandomTargetReady(target: SecRandomInstallCandidate): boolean {
+  return Boolean(target.installedPluginVersion);
+}
+
 export function OobeWizard() {
   const bridge = window.secagent;
   const [step, setStep] = useState<OobeStep>("source");
@@ -401,7 +409,7 @@ export function OobeWizard() {
       setClassIslandResults((current) => ({ ...current, ...Object.fromEntries(results.map((result) => [result.targetId, result])) }));
       setClassIslandTargets((current) => current.map((target) => {
         const result = results.find((item) => item.targetId === target.id);
-        return result?.version ? { ...target, installedPluginVersion: result.version } : target;
+        return result?.ok && result.version ? { ...target, installedPluginVersion: result.version } : target;
       }));
       await refreshCompanionTargets();
       const failures = results.filter((result) => !result.ok);
@@ -434,7 +442,7 @@ export function OobeWizard() {
       setSecRandomResults((current) => ({ ...current, ...Object.fromEntries(results.map((result) => [result.targetId, result])) }));
       setSecRandomTargets((current) => current.map((target) => {
         const result = results.find((item) => item.targetId === target.id);
-        return result?.version ? { ...target, installedPluginVersion: result.version } : target;
+        return result?.ok && result.version ? { ...target, installedPluginVersion: result.version } : target;
       }));
       await refreshCompanionTargets();
       const failures = results.filter((result) => !result.ok);
@@ -493,8 +501,8 @@ export function OobeWizard() {
     const selectedClassIslandTargets = classIslandTargets.filter((target) => classIslandSelectedIds.includes(target.id));
     const selectedSecRandomTargets = secRandomTargets.filter((target) => secRandomSelectedIds.includes(target.id));
     const selectedIccceTargets = iccceTargets.filter((target) => iccceSelectedIds.includes(target.id));
-    const classIslandCompanionInstalled = selectedClassIslandTargets.length > 0 && selectedClassIslandTargets.every((target) => Boolean(target.installedPluginVersion));
-    const secRandomCompanionInstalled = selectedSecRandomTargets.length > 0 && selectedSecRandomTargets.every((target) => Boolean(target.installedPluginVersion));
+    const classIslandCompanionInstalled = selectedClassIslandTargets.length > 0 && selectedClassIslandTargets.every(isClassIslandTargetReady);
+    const secRandomCompanionInstalled = selectedSecRandomTargets.length > 0 && selectedSecRandomTargets.every(isSecRandomTargetReady);
     const iccceCompanionInstalled = selectedIccceTargets.length > 0 && selectedIccceTargets.every((target) => Boolean(target.installedPluginVersion));
     const installSpecial = (app: DetectedCompanionApp | undefined, pluginId: string, market: MarketplacePlugin | undefined, targetIds: string[], companionInstalled: boolean) => {
       if (!app?.detected && !targetIds.length) return;
@@ -539,11 +547,11 @@ export function OobeWizard() {
       applyResults(result.iccce, setIccceResults);
       setClassIslandTargets((current) => current.map((target) => {
         const item = result.classIsland.find((candidate) => candidate.targetId === target.id);
-        return item?.version ? { ...target, installedPluginVersion: item.version } : target;
+        return item?.ok && item.version ? { ...target, installedPluginVersion: item.version } : target;
       }));
       setSecRandomTargets((current) => current.map((target) => {
         const item = result.secRandom.find((candidate) => candidate.targetId === target.id);
-        return item?.version ? { ...target, installedPluginVersion: item.version } : target;
+        return item?.ok && item.version ? { ...target, installedPluginVersion: item.version } : target;
       }));
       setIccceTargets((current) => current.map((target) => {
         const item = result.iccce.find((candidate) => candidate.targetId === target.id);
@@ -574,11 +582,11 @@ export function OobeWizard() {
       if (!plugins.some((plugin) => plugin.id === app.pluginId)) return false;
       if (app.pluginId === "classisland-connector") {
         const targets = classIslandTargets.filter((target) => target.compatible);
-        return targets.length > 0 && targets.every((target) => Boolean(target.installedPluginVersion));
+        return targets.length > 0 && targets.every(isClassIslandTargetReady);
       }
       if (app.pluginId === "secrandom") {
         const targets = secRandomTargets.filter((target) => target.compatible);
-        return targets.length > 0 && targets.every((target) => Boolean(target.installedPluginVersion));
+        return targets.length > 0 && targets.every(isSecRandomTargetReady);
       }
       if (app.pluginId === "iccce-connector") {
         const targets = iccceTargets.filter((target) => target.compatible);
@@ -686,13 +694,13 @@ export function OobeWizard() {
           const saInstalling = installingId === app.pluginId;
           const installing = saInstalling || companionInstalling;
           const selectedClassIslandTargets = classIslandTargets.filter((target) => classIslandSelectedIds.includes(target.id));
-          const classIslandInstalledTargetCount = selectedClassIslandTargets.filter((target) => Boolean(target.installedPluginVersion)).length;
-          const classIslandCompanionInstalled = selectedClassIslandTargets.length > 0 && selectedClassIslandTargets.every((target) => Boolean(target.installedPluginVersion));
+          const classIslandInstalledTargetCount = selectedClassIslandTargets.filter(isClassIslandTargetReady).length;
+          const classIslandCompanionInstalled = selectedClassIslandTargets.length > 0 && selectedClassIslandTargets.every(isClassIslandTargetReady);
           const classIslandCanInstall = selectedClassIslandTargets.length > 0 && selectedClassIslandTargets.every((target) => target.compatible) && !classIslandCompanionInstalled;
           const classIslandPhaseLabel = classIslandPhase === "downloading" ? "下载中…" : classIslandPhase === "verifying" ? "校验中…" : classIslandPhase === "installing" ? "安装中…" : classIslandPhase === "restarting" ? "重启中…" : "安装 ClassIsland 端插件";
           const selectedSecRandomTargets = secRandomTargets.filter((target) => secRandomSelectedIds.includes(target.id));
-          const secRandomInstalledTargetCount = selectedSecRandomTargets.filter((target) => Boolean(target.installedPluginVersion)).length;
-          const secRandomCompanionInstalled = selectedSecRandomTargets.length > 0 && selectedSecRandomTargets.every((target) => Boolean(target.installedPluginVersion));
+          const secRandomInstalledTargetCount = selectedSecRandomTargets.filter(isSecRandomTargetReady).length;
+          const secRandomCompanionInstalled = selectedSecRandomTargets.length > 0 && selectedSecRandomTargets.every(isSecRandomTargetReady);
           const secRandomCanInstall = selectedSecRandomTargets.length > 0 && selectedSecRandomTargets.every((target) => target.compatible) && !secRandomCompanionInstalled;
           const secRandomPhaseLabel = secRandomPhase === "downloading" ? "下载中…" : secRandomPhase === "verifying" ? "校验中…" : secRandomPhase === "installing" ? "安装中…" : secRandomPhase === "restarting" ? "重启中…" : "安装 SecRandom 端插件";
           const selectedIccceTargets = iccceTargets.filter((target) => iccceSelectedIds.includes(target.id));

@@ -25,7 +25,7 @@ interface PluginStatus { id: string; format?: "secagent" | "agent"; name: string
 interface MarketplaceVersion { version: string; minHostApiVersion: number; assetUrl: string; sha256: string; permissions: string[]; platforms: string[] }
 interface MarketplacePlugin { id: string; format?: "secagent" | "agent"; name: string; description: string; repository: string; icon?: string; readme?: string; latest?: MarketplaceVersion; releaseError?: string }
 interface DetectedCompanionApp { pluginId: string; appName: string; description: string; icon: string; detected: boolean; evidence?: string }
-interface ClassIslandInstallCandidate { id: string; executablePath: string; rootPath: string; dataRoot: string; pluginPackagesPath: string; version?: string; installedPluginVersion?: string; packageType?: string; isRunning: boolean; pid?: number; launchArgs: string[]; source: string; compatible: boolean; reason?: string }
+interface ClassIslandInstallCandidate { id: string; executablePath: string; rootPath: string; dataRoot: string; pluginPackagesPath: string; version?: string; installedPluginVersion?: string; pluginHealthy?: boolean; packageType?: string; isRunning: boolean; pid?: number; launchArgs: string[]; source: string; compatible: boolean; reason?: string }
 interface ClassIslandInstallResult { targetId: string; ok: boolean; action: "installed" | "already-installed" | "skipped" | "failed"; message: string; version?: string }
 type ClassIslandInstallPhase = "downloading" | "verifying" | "installing" | "restarting";
 interface ClassIslandInstallProgress { phase: "downloading" | "verifying" | "installing" | "restarting"; targetIds: string[]; message?: string }

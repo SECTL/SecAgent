@@ -16,7 +16,8 @@ import { DEFAULT_MARKETPLACE_PROXY_URL } from "./marketplace.js";
 function writeSecRandomManifest(root: string, version = "1.0.1"): void {
   const manifestPath = path.win32.join(root, "data", "plugins", "secrandom.secagent", "manifest.yml");
   fs.mkdirSync(path.win32.dirname(manifestPath), { recursive: true });
-  fs.writeFileSync(manifestPath, `id: secrandom.secagent\nversion: ${version}\n`);
+  fs.writeFileSync(manifestPath, `id: secrandom.secagent\nentranceAssembly: SecRandom.SecAgentPlugin.dll\nversion: ${version}\n`);
+  fs.writeFileSync(path.win32.join(path.win32.dirname(manifestPath), "SecRandom.SecAgentPlugin.dll"), "test assembly");
 }
 
 test("resolves portable and installed SecRandom data directories", () => {
@@ -42,6 +43,26 @@ test("resolves portable and installed SecRandom data directories", () => {
     readFile: () => JSON.stringify({ packageKind: "windows-exe" })
   });
   assert.equal(installed.dataRoot, "C:\\Users\\teacher\\AppData\\Local\\SecRandom\\data");
+});
+
+test("does not use a stale package data directory when the active root is the fallback", async () => {
+  const exe = "C:\\Program Files\\SECTL\\SecRandom\\SecRandom.Desktop.exe";
+  const markerPath = "C:\\Program Files\\SECTL\\SecRandom\\SecRandom.package.json";
+  const staleManifestPath = "C:\\Program Files\\SECTL\\SecRandom\\data\\plugins\\secrandom.secagent\\manifest.yml";
+  const found = await discoverSecRandomInstallations({
+    platform: "win32",
+    home: "C:\\Users\\teacher",
+    env: { LOCALAPPDATA: "C:\\Users\\teacher\\AppData\\Local" },
+    executablePaths: [exe],
+    runningProcesses: [],
+    exists: (candidate) => candidate === exe || candidate === markerPath || candidate === staleManifestPath,
+    versionOf: () => "3.0.0-alpha.2",
+    readFile: (filePath) => filePath === markerPath
+      ? JSON.stringify({ packageKind: "windows-exe" })
+      : "id: secrandom.secagent\nentranceAssembly: SecRandom.SecAgentPlugin.dll\nversion: 1.0.2\n"
+  });
+  assert.equal(found.length, 1);
+  assert.equal(found[0].installedPluginVersion, undefined);
 });
 
 test("enforces the SecRandom v3 plugin API minimum and detects running targets", async () => {

@@ -919,7 +919,11 @@ ipcMain.handle("marketplace:install", async (_event, version: MarketplaceVersion
   catch (error) { recordTelemetryFailure({ type: "plugin.start.failed", error, context: { phase: "marketplace-install", version: version.version } }); throw error; }
 });
 ipcMain.handle("apps:detect", () => detectCompanionApps());
-ipcMain.handle("classisland:detect", () => classIslandInstaller.detect());
+ipcMain.handle("classisland:detect", async () => {
+  const candidates = await classIslandInstaller.detect();
+  logMain("companion.classisland.detect", { candidates: candidates.map((candidate) => ({ id: candidate.id, executablePath: candidate.executablePath, dataRoot: candidate.dataRoot, pluginPackagesPath: candidate.pluginPackagesPath, version: candidate.version, installedPluginVersion: candidate.installedPluginVersion, pluginHealthy: candidate.pluginHealthy, isRunning: candidate.isRunning, compatible: candidate.compatible, source: candidate.source })) });
+  return candidates;
+});
 ipcMain.handle("classisland:pick", async () => {
   const result = await dialog.showOpenDialog(settingsWindow || windowRef!, {
     properties: ["openFile"],
@@ -939,7 +943,11 @@ ipcMain.handle("classisland:install", async (event, targetIds: unknown) => {
     await executor?.close();
   }
 });
-ipcMain.handle("secrandom:detect", () => secRandomInstaller.detect());
+ipcMain.handle("secrandom:detect", async () => {
+  const candidates = await secRandomInstaller.detect();
+  logMain("companion.secrandom.detect", { candidates: candidates.map((candidate) => ({ id: candidate.id, executablePath: candidate.executablePath, dataRoot: candidate.dataRoot, pluginPackagesPath: candidate.pluginPackagesPath, version: candidate.version, installedPluginVersion: candidate.installedPluginVersion, isRunning: candidate.isRunning, compatible: candidate.compatible, source: candidate.source })) });
+  return candidates;
+});
 ipcMain.handle("secrandom:pick", async () => {
   const result = await dialog.showOpenDialog(settingsWindow || windowRef!, {
     properties: ["openFile"],
@@ -959,7 +967,11 @@ ipcMain.handle("secrandom:install", async (event, targetIds: unknown) => {
     await executor?.close();
   }
 });
-ipcMain.handle("iccce:detect", () => iccceInstaller.detect());
+ipcMain.handle("iccce:detect", async () => {
+  const candidates = await iccceInstaller.detect();
+  logMain("companion.iccce.detect", { candidates: candidates.map((candidate) => ({ id: candidate.id, executablePath: candidate.executablePath, pluginPackagesPath: candidate.pluginPackagesPath, pluginsPath: candidate.pluginsPath, version: candidate.version, installedPluginVersion: candidate.installedPluginVersion, isRunning: candidate.isRunning, compatible: candidate.compatible, source: candidate.source })) });
+  return candidates;
+});
 ipcMain.handle("iccce:pick", async () => {
   const result = await dialog.showOpenDialog(settingsWindow || windowRef!, {
     properties: ["openFile"],

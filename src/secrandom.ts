@@ -15,6 +15,8 @@ export const SECRANDOM_RELEASE_API_URL = `https://api.github.com/repos/${SECRAND
 const SECRANDOM_RELEASE_PAGE_URL = `https://github.com/${SECRANDOM_PLUGIN_REPOSITORY}/releases/latest`;
 
 const SECRANDOM_PLUGIN_VERSION_PATTERN = /^version\s*:\s*["']?([^"'\r\n#]+)["']?/im;
+const SECRANDOM_PLUGIN_ID_PATTERN = /^id\s*:\s*["']?([^"'\r\n#]+)["']?/im;
+const SECRANDOM_PLUGIN_ENTRANCE_PATTERN = /^entranceAssembly\s*:\s*["']?([^"'\r\n#]+)["']?/im;
 const WINDOWS_SECRANDOM_EXE = "SecRandom.Desktop.exe";
 const WINDOWS_SECRANDOM_LAUNCHER = "SecRandomLauncher.exe";
 const MAX_SECRANDOM_PLUGIN_BYTES = 100 * 1024 * 1024;
@@ -296,27 +298,44 @@ export function resolveSecRandomLayout(executablePath: string, options: { platfo
   const readFile = options.readFile || defaultReadFile;
   const marker = readPackageMarker(executablePath, platform, env, exists, readFile);
   const portable = marker.packageType?.toLowerCase() === "portable-zip";
-  const dataRoot = portable ? api.join(marker.packageRoot, "data") : api.join(localAppData(platform, home, env, api), "SecRandom", "data");
+  const packageDataRoot = api.join(marker.packageRoot, "data");
+  const fallbackDataRoot = api.join(localAppData(platform, home, env, api), "SecRandom", "data");
+  const packageDataRootWritable = canWriteDirectory(packageDataRoot) || (!exists(packageDataRoot) && canWriteDirectory(marker.packageRoot));
+  const dataRoot = portable ? packageDataRoot : packageDataRootWritable ? packageDataRoot : fallbackDataRoot;
   const pluginPackagesPath = api.join(dataRoot, "cache", "plugin-packages");
-  const pluginPackagesPaths = portable
-    ? [pluginPackagesPath]
-    : [...new Set([pluginPackagesPath, api.join(marker.packageRoot, "data", "cache", "plugin-packages")])];
+  const pluginPackagesPaths = [pluginPackagesPath];
   return { packageRoot: marker.packageRoot, dataRoot, pluginPackagesPath, pluginPackagesPaths, ...(marker.packageType ? { packageType: marker.packageType } : {}) };
+}
+
+function canWriteDirectory(directory: string): boolean {
+  try {
+    fs.accessSync(directory, fs.constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function installedPluginVersion(dataRoot: string, platform: SupportedPlatform, exists: (candidate: string) => boolean, readFile: (filePath: string) => string): string | undefined {
   const api = platformPath(platform);
-  const manifestPath = api.join(dataRoot, "plugins", SECRANDOM_PLUGIN_ID, "manifest.yml");
+  const pluginPath = api.join(dataRoot, "plugins", SECRANDOM_PLUGIN_ID);
+  const manifestPath = api.join(pluginPath, "manifest.yml");
   if (!exists(manifestPath)) return undefined;
-  try { return SECRANDOM_PLUGIN_VERSION_PATTERN.exec(readFile(manifestPath))?.[1]?.trim(); } catch { return undefined; }
+  if (exists(api.join(pluginPath, ".disabled")) || exists(api.join(pluginPath, ".uninstall"))) return undefined;
+  try {
+    const manifest = readFile(manifestPath);
+    if (SECRANDOM_PLUGIN_ID_PATTERN.exec(manifest)?.[1]?.trim().toLowerCase() !== SECRANDOM_PLUGIN_ID) return undefined;
+    const entranceAssembly = SECRANDOM_PLUGIN_ENTRANCE_PATTERN.exec(manifest)?.[1]?.trim();
+    if (!entranceAssembly || entranceAssembly.includes("..") || entranceAssembly.includes("/") || entranceAssembly.includes("\\")) return undefined;
+    if (!exists(api.join(pluginPath, entranceAssembly))) return undefined;
+    return SECRANDOM_PLUGIN_VERSION_PATTERN.exec(manifest)?.[1]?.trim();
+  } catch {
+    return undefined;
+  }
 }
 
-function installedPluginVersionFromRoots(dataRoots: string[], platform: SupportedPlatform, exists: (candidate: string) => boolean, readFile: (filePath: string) => string): string | undefined {
-  for (const dataRoot of dataRoots) {
-    const version = installedPluginVersion(dataRoot, platform, exists, readFile);
-    if (version) return version;
-  }
-  return undefined;
+function isSecRandomPluginReady(candidate: SecRandomInstallCandidate): boolean {
+  return Boolean(candidate.installedPluginVersion);
 }
 
 async function waitForInstalledPlugin(
@@ -418,8 +437,7 @@ export async function discoverSecRandomInstallations(options: SecRandomDiscovery
     const version = processInfo?.version || await versionOf(executablePath);
     const layout = resolveSecRandomLayout(executablePath, { platform, home, env, exists, readFile });
     const compatible = isCompatibleSecRandomVersion(version);
-    const dataRoots = [...new Set([layout.dataRoot, ...layout.pluginPackagesPaths.map((item) => api.dirname(api.dirname(item)))])];
-    const installed = installedPluginVersionFromRoots(dataRoots, platform, exists, readFile);
+    const installed = installedPluginVersion(layout.dataRoot, platform, exists, readFile);
     const candidate: CachedCandidate = {
       id: hashId(executablePath, layout.dataRoot, platform),
       executablePath,
@@ -628,7 +646,7 @@ export class SecRandomInstaller {
       installCompanionPackage(destinationPath, bytes, spec, this.platform, executor, (stage, data) => log(stage, data)));
     for (const group of groups.values()) {
       log("group.begin", { dataRoot: group[0].dataRoot, targets: group.map((candidate) => candidate.id), pluginPackagesPaths: group[0].pluginPackagesPaths || [group[0].pluginPackagesPath] });
-      const alreadyInstalled = group.every((candidate) => candidate.installedPluginVersion && compareVersions(candidate.installedPluginVersion, packageData.version) >= 0);
+      const alreadyInstalled = group.every((candidate) => isSecRandomPluginReady(candidate) && compareVersions(candidate.installedPluginVersion!, packageData.version) >= 0);
       if (alreadyInstalled) {
         for (const candidate of group) results.push({ targetId: candidate.id, ok: true, action: "already-installed", message: `已安装 SecRandom 插件 v${packageData.version}`, version: packageData.version });
         continue;
@@ -665,18 +683,12 @@ export class SecRandomInstaller {
         for (const candidate of group) results.push({ targetId: candidate.id, ok: false, action: "failed", message: "SecRandom 无法退出，强制结束也失败，未安装插件；请手动关闭后重试" });
         continue;
       }
-      const packageDirectories = group[0].pluginPackagesPaths?.length
-        ? group[0].pluginPackagesPaths
-        : [group[0].pluginPackagesPath];
       try {
         report("installing", "正在解压安装 SecRandom 插件");
-        const dataRoots = [...new Set([group[0].dataRoot, ...packageDirectories.map((item) => api.dirname(api.dirname(item)))])];
-        const actualPluginPaths: string[] = [];
-        for (const dataRoot of dataRoots) {
-          const pluginPath = api.join(dataRoot, "plugins", SECRANDOM_PLUGIN_ID);
-          actualPluginPaths.push(await installPackage(pluginPath, packageData.bytes, { pluginId: SECRANDOM_PLUGIN_ID, manifestFileName: "manifest.yml" }));
-        }
-        log("package.install.result", { requestedDataRoots: dataRoots, actualPluginPaths, detectedPackageDirectories: packageDirectories });
+        const dataRoot = group[0].dataRoot;
+        const pluginPath = api.join(dataRoot, "plugins", SECRANDOM_PLUGIN_ID);
+        const actualPluginPath = await installPackage(pluginPath, packageData.bytes, { pluginId: SECRANDOM_PLUGIN_ID, manifestFileName: "manifest.yml" });
+        log("package.install.result", { requestedDataRoot: dataRoot, actualPluginPath, detectedPackageDirectory: group[0].pluginPackagesPath });
         const launchCandidate = closed[0] || group[0];
         const restarting = closed.length > 0;
         report("restarting", restarting ? "正在重新启动 SecRandom" : "正在启动 SecRandom");
@@ -684,9 +696,9 @@ export class SecRandomInstaller {
         let launchFailed = false;
         try { await restart(launchCandidate.executablePath, launchCandidate.launchArgs); log("process.restart.success", { executablePath: launchCandidate.executablePath }); }
         catch (error) { launchFailed = true; log("process.restart.failed", { executablePath: launchCandidate.executablePath, error: error instanceof Error ? error.message : String(error) }); }
-        const writtenVersion = installedPluginVersionFromRoots(dataRoots, this.platform, exists, readFile);
+        const writtenVersion = installedPluginVersion(dataRoot, this.platform, exists, readFile);
         const verifiedVersion = launchFailed ? undefined : await waitForInstalledPlugin(
-          () => installedPluginVersionFromRoots(dataRoots, this.platform, exists, readFile),
+          () => installedPluginVersion(dataRoot, this.platform, exists, readFile),
           packageData.version,
           this.options.waitForPluginTimeoutMs,
           this.options.waitForPluginPollMs
