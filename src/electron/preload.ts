@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld("secagent", {
   installPlugin: () => ipcRenderer.invoke("plugins:install"),
   listMarketplace: () => ipcRenderer.invoke("marketplace:list"),
   installMarketplaceVersion: (version: unknown) => ipcRenderer.invoke("marketplace:install", version),
+  updatePlugin: (id: string) => ipcRenderer.invoke("plugins:update", id),
   detectInstalledApps: () => ipcRenderer.invoke("apps:detect"),
   detectClassIslandInstallations: () => ipcRenderer.invoke("classisland:detect"),
   pickClassIslandExecutable: () => ipcRenderer.invoke("classisland:pick"),

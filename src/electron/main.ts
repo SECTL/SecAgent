@@ -95,7 +95,10 @@ const classIslandInstaller = new ClassIslandInstaller({ log: logMain });
 const secRandomInstaller = new SecRandomInstaller({ log: logMain });
 const iccceInstaller = new IccceInstaller({ log: logMain });
 const activeSessionRuns = new Map<string, AbortController>();
-const MARKETPLACE_UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+// Plugin updates hot-swap as soon as they download, but the poll itself only
+// reads the signed index (one request), so a 10-minute cadence stays friendly
+// to the shared proxy.
+const MARKETPLACE_UPDATE_INTERVAL_MS = 10 * 60 * 1000;
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const AUTO_START_ARG = "--autostart";
 const AUTO_START_ARGS = [AUTO_START_ARG];
@@ -151,9 +154,10 @@ function launchWindowsInstaller(installerPath: string): void {
 async function updateInstalledPlugins(): Promise<void> {
   if (!pluginManager) return;
   try {
-    const updates = await marketplace.updateInstalled(pluginManager);
+    const { updates, errors } = await marketplace.installUpdates(pluginManager);
     if (updates.length) logMain("marketplace.plugins.updated", { updates });
     else logMain("marketplace.plugins.checked", { updated: 0 });
+    if (errors.length) logMain("marketplace.plugins.update.errors", { errors });
   } catch (error) {
     logMain("marketplace.plugins.update.failed", { error: error instanceof Error ? error.message : String(error) });
     recordTelemetryFailure({ type: "plugin.start.failed", error, context: { phase: "marketplace-update" } });
@@ -952,6 +956,17 @@ ipcMain.handle("marketplace:install", async (_event, version: MarketplaceVersion
   if (!pluginManager) throw new Error("插件管理器尚未启动");
   try { await marketplace.install(pluginManager, version); return pluginManager.list(); }
   catch (error) { recordTelemetryFailure({ type: "plugin.start.failed", error, context: { phase: "marketplace-install", version: version.version } }); throw error; }
+});
+ipcMain.handle("plugins:update", async (_event, id: string) => {
+  if (!pluginManager) throw new Error("插件管理器尚未启动");
+  try {
+    const result = await marketplace.updatePlugin(pluginManager, id);
+    logMain("marketplace.plugins.manual-update", result);
+    return result;
+  } catch (error) {
+    recordTelemetryFailure({ type: "plugin.start.failed", error, context: { pluginId: id, phase: "manual-update" } });
+    throw error;
+  }
 });
 ipcMain.handle("apps:detect", () => detectCompanionApps());
 ipcMain.handle("classisland:detect", async () => {

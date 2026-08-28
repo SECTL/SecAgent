@@ -66,6 +66,7 @@ interface Window {
     installPlugin(): Promise<PluginStatus[]>;
     listMarketplace(): Promise<MarketplacePlugin[]>;
     installMarketplaceVersion(version: MarketplaceVersion): Promise<PluginStatus[]>;
+    updatePlugin(id: string): Promise<{ id: string; from: string; to: string; updated: boolean }>;
     detectInstalledApps(): Promise<DetectedCompanionApp[]>;
     detectClassIslandInstallations(): Promise<ClassIslandInstallCandidate[]>;
     pickClassIslandExecutable(): Promise<ClassIslandInstallCandidate | undefined>;

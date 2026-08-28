@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { CircleAlert, CircleCheck, Download, ExternalLink, MoreHorizontal, PackageOpen, Power, RefreshCw, Search, Trash2 } from "lucide-react";
+import { CircleAlert, CircleArrowUp, CircleCheck, Download, ExternalLink, MoreHorizontal, PackageOpen, Power, RefreshCw, Search, Trash2 } from "lucide-react";
 import { pluginStateLabel } from "../utils.js";
 
 function latestMarketVersion(plugin?: MarketplacePlugin): MarketplaceVersion | undefined {
@@ -31,6 +31,7 @@ export function PluginSettingsPanel({
   const [marketLoading, setMarketLoading] = useState(false);
   const [operationId, setOperationId] = useState("");
   const [panelError, setPanelError] = useState("");
+  const [updateNotice, setUpdateNotice] = useState("");
 
   const refreshMarket = async () => {
     setMarketLoading(true);
@@ -50,6 +51,7 @@ export function PluginSettingsPanel({
     if (!selectedId || !source.some((plugin) => plugin.id === selectedId)) setSelectedId(source[0]?.id || "");
     setDetailTab("readme");
   }, [category, plugins, marketPlugins]);
+  useEffect(() => { setUpdateNotice(""); }, [selectedId, category]);
 
   const visiblePlugins = useMemo(() => {
     const keyword = filter.trim().toLocaleLowerCase();
@@ -100,6 +102,15 @@ export function PluginSettingsPanel({
     catch (reason) { reportError(reason); }
     finally { setOperationId(""); }
   };
+  const checkUpdate = async () => {
+    if (!installed) return;
+    setOperationId(installed.id); setPanelError(""); setUpdateNotice("");
+    try {
+      const result = await bridge.updatePlugin(installed.id);
+      setUpdateNotice(result.updated ? `已更新到 v${result.to}，立即生效。` : `已是最新版本 v${installed.version}。`);
+    } catch (reason) { reportError(reason); }
+    finally { setOperationId(""); }
+  };
 
   return <div className="plugin-catalog">
     <div className="plugin-catalog-toolbar">
@@ -147,9 +158,10 @@ export function PluginSettingsPanel({
             <button className="icon-button settings-icon-button" type="button" title="更多操作"><MoreHorizontal size={18} /></button>
           </header>
           <div className="plugin-detail-actions">
-            {installed ? <><button className="primary-button" type="button" onClick={() => void toggleEnabled()} disabled={operationId === installed.id}><Power size={15} />{installed.enabled ? "禁用" : "启用"}</button><button className="secondary-button" type="button" onClick={() => void reload()} disabled={operationId === installed.id}><RefreshCw size={15} />重新加载</button><button className="secondary-button danger-button" type="button" onClick={() => void uninstall()} disabled={operationId === installed.id}><Trash2 size={15} />卸载</button></> : <button className="primary-button" type="button" onClick={() => void installMarket()} disabled={!selectedVersion || operationId === market?.id}><Download size={15} />{operationId === market?.id ? "安装中…" : `安装 v${selectedVersion?.version || "—"}`}</button>}
+            {installed ? <><button className="secondary-button" type="button" onClick={() => void checkUpdate()} disabled={operationId === installed.id}><CircleArrowUp size={15} />{operationId === installed.id ? "检查中…" : "检查更新"}</button><button className="primary-button" type="button" onClick={() => void toggleEnabled()} disabled={operationId === installed.id}><Power size={15} />{installed.enabled ? "禁用" : "启用"}</button><button className="secondary-button" type="button" onClick={() => void reload()} disabled={operationId === installed.id}><RefreshCw size={15} />重新加载</button><button className="secondary-button danger-button" type="button" onClick={() => void uninstall()} disabled={operationId === installed.id}><Trash2 size={15} />卸载</button></> : <button className="primary-button" type="button" onClick={() => void installMarket()} disabled={!selectedVersion || operationId === market?.id}><Download size={15} />{operationId === market?.id ? "安装中…" : `安装 v${selectedVersion?.version || "—"}`}</button>}
             {(installed?.repository || market?.repository) && <a className="secondary-button link-button" href={installed?.repository || market?.repository} target="_blank" rel="noreferrer"><ExternalLink size={15} />项目主页</a>}
           </div>
+          {updateNotice && <div className="plugin-detail-message success"><CircleCheck size={16} />{updateNotice}</div>}
           {market?.releaseError && <div className="plugin-detail-message error"><CircleAlert size={16} />暂不可用：{market.releaseError}</div>}
           {installed?.message && <div className={`plugin-detail-message ${installed.state}`}><CircleAlert size={16} />{installed.message}</div>}
           <div className="plugin-detail-tabs" role="tablist">

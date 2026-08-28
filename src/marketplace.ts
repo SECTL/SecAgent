@@ -65,6 +65,17 @@ export interface MarketplacePluginMetadata {
 
 export interface MarketplaceUpdate { id: string; from: string; to: string }
 
+export interface MarketplaceUpdateCandidate extends MarketplaceUpdate {
+  /** Resolved release entry from the signed index, ready to install. */
+  version: MarketplaceVersion;
+}
+
+export interface MarketplaceUpdateResult {
+  updates: MarketplaceUpdate[];
+  /** Per-plugin failures; one bad asset no longer aborts the whole round. */
+  errors: Array<{ id: string; error: string }>;
+}
+
 type MarketplaceFetch = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
 /** The official market trust root. Rotate this with a matching signed index. */
@@ -99,6 +110,7 @@ interface CachedRelease {
 export class MarketplaceClient {
   private readonly releaseCache = new Map<string, CachedRelease>();
   private readonly releaseRequests = new Map<string, Promise<CachedRelease>>();
+  private updateOperation: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly indexUrl = process.env.SECAGENT_PLUGIN_MARKET_URL || DEFAULT_MARKETPLACE_INDEX_URL,
@@ -107,11 +119,7 @@ export class MarketplaceClient {
   ) {}
 
   async list(): Promise<MarketplacePlugin[]> {
-    if (!this.indexUrl) throw new Error("未配置插件市场地址，请设置 SECAGENT_PLUGIN_MARKET_URL");
-    if (!isAllowedMarketUrl(this.indexUrl)) throw new Error("插件市场必须使用 HTTPS 地址；本地测试仅允许回环地址");
-
-    const index = await fetchMarketplaceIndex(this.indexUrl, this.fetcher);
-    this.verifyIndex(index);
+    const index = await this.fetchVerifiedIndex();
     const metadata = await Promise.all(index.plugins.map(async (reference) => ({
       reference,
       plugin: await this.fetchPluginMetadata(reference)
@@ -157,16 +165,79 @@ export class MarketplaceClient {
     }
   }
 
-  async updateInstalled(manager: PluginManager): Promise<MarketplaceUpdate[]> {
-    const catalog = await this.list();
-    const updates: MarketplaceUpdate[] = [];
-    for (const installed of manager.list()) {
-      const latest = catalog.find((candidate) => candidate.id === installed.id)?.latest;
-      if (!latest || !isCompatibleVersion(latest) || compareVersions(latest.version, installed.version) <= 0) continue;
-      await this.install(manager, latest);
-      updates.push({ id: installed.id, from: installed.version, to: latest.version });
+  /**
+   * Lightweight update check for the background poll: reads only the signed
+   * index (one request) instead of the full catalog, keeping a 10-minute
+   * cadence friendly to the shared proxy. References without embedded release
+   * data (older indexes) are skipped; the market tab still resolves those via
+   * {@link list}.
+   */
+  async checkUpdates(installed: Array<{ id: string; version: string }>): Promise<MarketplaceUpdateCandidate[]> {
+    const index = await this.fetchVerifiedIndex();
+    const candidates: MarketplaceUpdateCandidate[] = [];
+    for (const entry of installed) {
+      const reference = index.plugins.find((candidate) => candidate.id === entry.id);
+      if (!reference?.latest) continue;
+      let latest: MarketplaceVersion;
+      try {
+        latest = validateMarketplaceVersion(reference.latest);
+      } catch {
+        continue;
+      }
+      if (!isCompatibleVersion(latest) || compareVersions(latest.version, entry.version) <= 0) continue;
+      candidates.push({ id: entry.id, from: entry.version, to: latest.version, version: latest });
     }
-    return updates;
+    return candidates;
+  }
+
+  /** Hot-swaps every installed plugin that lags behind the signed index. */
+  async installUpdates(manager: PluginManager): Promise<MarketplaceUpdateResult> {
+    return this.runUpdateOperation(async () => {
+      const candidates = await this.checkUpdates(manager.list());
+      const updates: MarketplaceUpdate[] = [];
+      const errors: MarketplaceUpdateResult["errors"] = [];
+      // Sequential on purpose: the shared proxy is rate limited, so plugins
+      // download one at a time.
+      for (const candidate of candidates) {
+        try {
+          await this.install(manager, candidate.version);
+          updates.push({ id: candidate.id, from: candidate.from, to: candidate.to });
+        } catch (error) {
+          errors.push({ id: candidate.id, error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      return { updates, errors };
+    });
+  }
+
+  /**
+   * Single-plugin variant for the manual "check for updates" action. Returns
+   * {@link updated} false when the plugin already matches the signed index.
+   */
+  async updatePlugin(manager: PluginManager, id: string): Promise<MarketplaceUpdate & { updated: boolean }> {
+    return this.runUpdateOperation(async () => {
+      const installed = manager.list().find((plugin) => plugin.id === id);
+      if (!installed) throw new Error(`未安装插件：${id}`);
+      const candidate = (await this.checkUpdates([installed])).find((item) => item.id === id);
+      if (!candidate) return { id, from: installed.version, to: installed.version, updated: false };
+      await this.install(manager, candidate.version);
+      return { id, from: candidate.from, to: candidate.to, updated: true };
+    });
+  }
+
+  /** Serializes update rounds so a slow download cannot overlap the next poll. */
+  private runUpdateOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.updateOperation.then(() => operation());
+    this.updateOperation = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  private async fetchVerifiedIndex(): Promise<MarketplaceIndex> {
+    if (!this.indexUrl) throw new Error("未配置插件市场地址，请设置 SECAGENT_PLUGIN_MARKET_URL");
+    if (!isAllowedMarketUrl(this.indexUrl)) throw new Error("插件市场必须使用 HTTPS 地址；本地测试仅允许回环地址");
+    const index = await fetchMarketplaceIndex(this.indexUrl, this.fetcher);
+    this.verifyIndex(index);
+    return index;
   }
 
   private async fetchPluginMetadata(reference: MarketplacePluginReference): Promise<MarketplacePluginMetadata> {
@@ -449,7 +520,7 @@ function isMarketplaceVersion(value: unknown): value is MarketplaceVersion {
 }
 
 function validateMarketplaceVersion(value: MarketplaceVersion): MarketplaceVersion {
-  if (!isMarketplaceVersion(value)) throw new Error("甯傚満绱㈠紩涓殑 Release 鏁版嵁鏃犳晥");
+  if (!isMarketplaceVersion(value)) throw new Error("市场索引中的 Release 数据无效");
   return value;
 }
 

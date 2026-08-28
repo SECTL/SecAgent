@@ -296,6 +296,7 @@ html.wake-mode, html.wake-mode body, body.wake-mode { min-width: 0; overflow: hi
 .plugin-detail-actions .link-button { color: #4e5864; text-decoration: none; }
 .plugin-detail-message { display: flex; align-items: flex-start; gap: 8px; margin: 0 30px 14px; padding: 10px 12px; border-radius: 8px; background: #fff4e7; color: #96641c; font-size: 12px; line-height: 1.45; }
 .plugin-detail-message.error { background: #fff0f0; color: #aa4545; }
+.plugin-detail-message.success { background: #edf8ef; color: #35793f; }
 .plugin-detail-tabs { display: flex; gap: 19px; padding: 0 30px; border-bottom: 1px solid #e8e9eb; }
 .plugin-detail-tabs button { position: relative; padding: 9px 1px 11px; border: 0; background: transparent; color: #878d96; font-size: 12px; cursor: pointer; }
 .plugin-detail-tabs button.active { color: #1e75d1; font-weight: 650; }.plugin-detail-tabs button.active::after { position: absolute; right: 0; bottom: -1px; left: 0; height: 2px; border-radius: 2px 2px 0 0; background: #2389ec; content: ""; }
