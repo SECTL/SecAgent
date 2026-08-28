@@ -65,6 +65,23 @@ test("persists the autostart preference with the settings", () => {
   }
 });
 
+test("hides the main window after autostart by default and honors opting out", () => {
+  const workspace = temporaryWorkspace();
+  try {
+    initializeWorkspace(workspace);
+
+    // Fresh installs (including installer-based ones) start with the option on.
+    assert.equal(readSettings(workspace).autostartHidden, true);
+
+    const settings = readSettings(workspace);
+    assert.equal(saveSettings(workspace, { ...settings, autostart: true }).autostartHidden, true);
+    assert.equal(saveSettings(workspace, { ...settings, autostartHidden: false }).autostartHidden, false);
+    assert.equal(readSettings(workspace).autostartHidden, false);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("defaults and persists Windows update preferences", () => {
   const workspace = temporaryWorkspace();
   try {

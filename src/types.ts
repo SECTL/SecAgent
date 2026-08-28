@@ -124,7 +124,7 @@ export interface SecAgentConfig {
   updates?: UpdatePreferences;
   telemetry?: TelemetrySettings;
   mcp: { servers: Record<string, McpServerConfig> };
-  defaults?: { modelId?: string; reasoningEffort?: ReasoningEffort; customModelMode?: boolean; autostart?: boolean };
+  defaults?: { modelId?: string; reasoningEffort?: ReasoningEffort; customModelMode?: boolean; autostart?: boolean; autostartHidden?: boolean };
 }
 
 /** A tool supplied by a locally installed SecAgent plugin. */

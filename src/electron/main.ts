@@ -1407,7 +1407,9 @@ app.whenReady().then(async () => {
     app.dock?.setIcon(appIconPath());
   }
   logMain("app.ready");
-  createWindow(!needsOnboarding && !isAutostartLaunch());
+  // An autostart launch stays in the tray (voice wake and shortcuts keep running)
+  // unless the user turned the "hide the main window after autostart" option off.
+  createWindow(!needsOnboarding && (!isAutostartLaunch() || initialSettings.autostartHidden === false));
   try {
     registerWakeShortcut(initialSettings.wake.hotkey || DEFAULT_WAKE_HOTKEY);
     if (initialSettings.wake.voiceEnabled) void startConfiguredVoiceWake().catch((error) => {
