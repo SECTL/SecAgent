@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { installCompanionPackage, startCompanionProcessUnelevated, type CompanionExecutor, type CompanionLogger, type CompanionPackageSpec } from "./companion-package.js";
+import { installCompanionPackage, startCompanionProcessWithSameElevation, type CompanionExecutor, type CompanionLogger, type CompanionPackageSpec } from "./companion-package.js";
 import { DEFAULT_MARKETPLACE_PROXY_URL, marketplaceRequestUrls } from "./marketplace.js";
 
 export const CLASSISLAND_PLUGIN_REPOSITORY = "SECTL/ClassIsland-SecAgent-Plugin";
@@ -18,6 +18,7 @@ const CLASSISLAND_PLUGIN_VERSION_PATTERN = /^version\s*:\s*["']?([^"'\r\n#]+)["'
 const CLASSISLAND_PLUGIN_ID_PATTERN = /^id\s*:\s*["']?([^"'\r\n#]+)["']?/im;
 const CLASSISLAND_PLUGIN_ENTRANCE_PATTERN = /^entranceAssembly\s*:\s*["']?([^"'\r\n#]+)["']?/im;
 const WINDOWS_CLASSISLAND_EXE = "ClassIsland.exe";
+const WINDOWS_CLASSISLAND_RUNTIME_EXE = "ClassIsland.Desktop.exe";
 const MAX_CLASSISLAND_PLUGIN_BYTES = 100 * 1024 * 1024;
 const CLASSISLAND_HEALTH_URL = "http://127.0.0.1:18789/health";
 
@@ -38,6 +39,8 @@ export interface ClassIslandInstallCandidate {
   packageType?: string;
   isRunning: boolean;
   pid?: number;
+  /** Every running process belonging to this ClassIsland installation. */
+  processIds?: number[];
   launchArgs: string[];
   source: string;
   compatible: boolean;
@@ -56,6 +59,8 @@ export type ClassIslandInstallPhase = "downloading" | "verifying" | "installing"
 export interface ClassIslandInstallProgress {
   phase: ClassIslandInstallPhase;
   targetIds: string[];
+  /** Determinate progress for the companion half (0-100). */
+  percent?: number;
   message?: string;
 }
 
@@ -64,6 +69,7 @@ export interface ClassIslandRunningProcess {
   pid: number;
   commandLine?: string;
   version?: string;
+  processName?: string;
 }
 
 export interface ClassIslandDiscoveryOptions {
@@ -80,10 +86,12 @@ export interface ClassIslandDiscoveryOptions {
 }
 
 export interface ClassIslandInstallerOptions extends ClassIslandDiscoveryOptions {
-  requestGracefulClose?: (pid: number) => Promise<void>;
+  requestGracefulClose?: (pid: number) => Promise<void | boolean>;
   forceTerminateProcess?: (pid: number) => Promise<void>;
   isProcessRunning?: (pid: number) => Promise<boolean>;
   restartProcess?: (executablePath: string, args: string[]) => Promise<void>;
+  /** Graceful close is only a brief opportunity; force termination follows. */
+  gracefulCloseTimeoutMs?: number;
   waitForExitTimeoutMs?: number;
   waitForExitPollMs?: number;
   waitForPluginTimeoutMs?: number;
@@ -194,8 +202,9 @@ $result = Get-ChildItem -Path $roots -Filter '*.lnk' -File -Recurse -ErrorAction
 async function discoverRunningProcesses(platform: SupportedPlatform, commandRunner: CommandRunner): Promise<ClassIslandRunningProcess[]> {
   if (platform !== "win32") return [];
   const script = String.raw`
+$names = @('${WINDOWS_CLASSISLAND_EXE}', '${WINDOWS_CLASSISLAND_RUNTIME_EXE}')
 Get-CimInstance Win32_Process |
-  Where-Object { $_.Name -ieq 'ClassIsland.exe' } |
+  Where-Object { $names -contains $_.Name } |
   ForEach-Object {
     $version = $null
     try { $version = (Get-Item -LiteralPath $_.ExecutablePath).VersionInfo.ProductVersion } catch { }
@@ -204,6 +213,7 @@ Get-CimInstance Win32_Process |
       pid = [int]$_.ProcessId
       commandLine = $_.CommandLine
       version = $version
+      processName = [string]$_.Name
     }
   } | ConvertTo-Json -Compress
 `;
@@ -216,11 +226,36 @@ Get-CimInstance Win32_Process |
       if (!item || typeof item !== "object") return [];
       const record = item as Record<string, unknown>;
       if (typeof record.executablePath !== "string" || typeof record.pid !== "number") return [];
-      return [{ executablePath: record.executablePath, pid: record.pid, ...(typeof record.commandLine === "string" ? { commandLine: record.commandLine } : {}), ...(typeof record.version === "string" ? { version: record.version } : {}) }];
+      return [{ executablePath: record.executablePath, pid: record.pid, ...(typeof record.commandLine === "string" ? { commandLine: record.commandLine } : {}), ...(typeof record.version === "string" ? { version: record.version } : {}), ...(typeof record.processName === "string" ? { processName: record.processName } : {}) }];
     });
   } catch {
     return [];
   }
+}
+
+function canonicalClassIslandExecutable(
+  executablePath: string,
+  platform: SupportedPlatform,
+  exists: (candidate: string) => boolean
+): string {
+  if (platform !== "win32") return executablePath;
+  const api = path.win32;
+  const normalized = executablePath.trim().replace(/^"(.*)"$/, "$1");
+  if (api.basename(normalized).toLowerCase() === WINDOWS_CLASSISLAND_EXE.toLowerCase()) return normalized;
+
+  let directory = api.dirname(normalized);
+  for (let depth = 0; depth < 6; depth++) {
+    const launcher = api.join(directory, WINDOWS_CLASSISLAND_EXE);
+    if (exists(launcher)) return launcher;
+    const parent = api.dirname(directory);
+    if (parent === directory) break;
+    directory = parent;
+  }
+  return normalized;
+}
+
+function isClassIslandRuntimeProcess(processInfo: ClassIslandRunningProcess): boolean {
+  return (processInfo.processName || path.win32.basename(processInfo.executablePath)).toLowerCase() === WINDOWS_CLASSISLAND_RUNTIME_EXE.toLowerCase();
 }
 
 interface ClassIslandReleaseMetadata {
@@ -399,20 +434,33 @@ function installedPluginVersion(dataRoot: string, platform: SupportedPlatform, e
   } catch { return undefined; }
 }
 
-async function probeClassIslandPlugin(fetcher: Fetcher): Promise<boolean> {
-  try {
-    const response = await fetcher(CLASSISLAND_HEALTH_URL, { signal: AbortSignal.timeout(1_500), headers: { Accept: "application/json" } });
-    if (!response.ok) return false;
-    const payload = await response.json() as { apiVersion?: unknown; name?: unknown; status?: unknown };
-    return payload.apiVersion === 1 && payload.name === "classisland" && payload.status === "ok";
-  } catch { return false; }
+interface PluginHealthResult {
+  healthy: boolean;
+  reason: string;
+  status?: number;
 }
 
-async function waitForClassIslandHealth(fetcher: Fetcher, timeoutMs = 15_000, pollMs = 250): Promise<boolean> {
+async function probeClassIslandPluginDetailed(fetcher: Fetcher): Promise<PluginHealthResult> {
+  try {
+    const response = await fetcher(CLASSISLAND_HEALTH_URL, { signal: AbortSignal.timeout(1_500), headers: { Accept: "application/json" } });
+    if (!response.ok) return { healthy: false, reason: `健康检查返回 HTTP ${response.status}`, status: response.status };
+    const payload = await response.json() as { apiVersion?: unknown; name?: unknown; status?: unknown };
+    if (payload.apiVersion === 1 && payload.name === "classisland" && payload.status === "ok") return { healthy: true, reason: "ok", status: response.status };
+    return { healthy: false, reason: "健康检查返回内容不匹配", status: response.status };
+  } catch { return { healthy: false, reason: "健康检查服务未响应" }; }
+}
+
+async function probeClassIslandPlugin(fetcher: Fetcher): Promise<boolean> {
+  return (await probeClassIslandPluginDetailed(fetcher)).healthy;
+}
+
+async function waitForClassIslandHealth(fetcher: Fetcher, timeoutMs = 15_000, pollMs = 250): Promise<PluginHealthResult> {
   const deadline = Date.now() + timeoutMs;
+  let last: PluginHealthResult = { healthy: false, reason: "健康检查服务未响应" };
   while (true) {
-    if (await probeClassIslandPlugin(fetcher)) return true;
-    if (Date.now() >= deadline) return false;
+    last = await probeClassIslandPluginDetailed(fetcher);
+    if (last.healthy) return last;
+    if (Date.now() >= deadline) return last;
     await new Promise((resolve) => setTimeout(resolve, pollMs));
   }
 }
@@ -476,7 +524,11 @@ export async function discoverClassIslandInstallations(options: ClassIslandDisco
   const readFile = options.readFile || defaultReadFile;
   const commandRunner = options.commandRunner || defaultCommandRunner;
   const fetcher = options.fetcher;
-  const running = options.runningProcesses || await discoverRunningProcesses(platform, commandRunner);
+  const runningProcesses = options.runningProcesses || await discoverRunningProcesses(platform, commandRunner);
+  const running = runningProcesses.map((processInfo) => ({
+    ...processInfo,
+    executablePath: canonicalClassIslandExecutable(processInfo.executablePath, platform, exists)
+  }));
   const externalPaths = platform === "win32" && !options.executablePaths?.length && !options.runningProcesses ? await discoverWindowsExternalPaths(commandRunner, env) : [];
   const inputPaths = [
     ...staticExecutablePaths(platform, home, env),
@@ -485,8 +537,23 @@ export async function discoverClassIslandInstallations(options: ClassIslandDisco
     ...running.map((item) => item.executablePath)
   ];
   const candidates = new Map<string, CachedCandidate>();
-  const runningByPath = new Map(running.map((item) => [normalizePath(item.executablePath, platform), item]));
-  const runningByName = new Map(running.filter((item) => !/[\\/]/.test(item.executablePath)).map((item) => [api.basename(item.executablePath).toLowerCase(), item]));
+  const runningByPath = new Map<string, ClassIslandRunningProcess>();
+  const runningPidsByPath = new Map<string, number[]>();
+  for (const item of running) {
+    const key = normalizePath(item.executablePath, platform);
+    const pids = runningPidsByPath.get(key) || [];
+    if (!pids.includes(item.pid)) pids.push(item.pid);
+    runningPidsByPath.set(key, pids);
+    const previous = runningByPath.get(key);
+    if (!previous || (isClassIslandRuntimeProcess(item) && !isClassIslandRuntimeProcess(previous))) runningByPath.set(key, item);
+  }
+  const runningByName = new Map<string, ClassIslandRunningProcess>();
+  for (const item of running) {
+    if (/[\\/]/.test(item.executablePath)) continue;
+    const key = api.basename(item.executablePath).toLowerCase();
+    const previous = runningByName.get(key);
+    if (!previous || (isClassIslandRuntimeProcess(item) && !isClassIslandRuntimeProcess(previous))) runningByName.set(key, item);
+  }
   const versionOf = options.versionOf || ((executablePath: string) => defaultVersionOf(executablePath, platform, commandRunner));
   for (const executablePath of [...new Set(inputPaths.map((item) => api.normalize(item)))]) {
     if (!exists(executablePath)) continue;
@@ -496,6 +563,7 @@ export async function discoverClassIslandInstallations(options: ClassIslandDisco
     const compatible = isCompatibleClassIslandVersion(version);
     const installedVersion = installedPluginVersion(layout.dataRoot, platform, exists, readFile);
     const pluginHealthy = processInfo && fetcher ? await probeClassIslandPlugin(fetcher) : undefined;
+    const processIds = processInfo ? runningPidsByPath.get(normalizePath(executablePath, platform)) : undefined;
     const candidate: CachedCandidate = {
       id: hashId(executablePath, layout.dataRoot, platform),
       executablePath,
@@ -508,6 +576,7 @@ export async function discoverClassIslandInstallations(options: ClassIslandDisco
       ...(layout.packageType ? { packageType: layout.packageType } : {}),
       isRunning: Boolean(processInfo),
       ...(processInfo ? { pid: processInfo.pid, launchArgs: parseWindowsCommandLine(processInfo.commandLine).slice(1) } : { launchArgs: [] }),
+      ...(processIds?.length ? { processIds: [...processIds] } : {}),
       source: processInfo ? "running-process" : options.executablePaths?.includes(executablePath) ? "manual-or-explicit" : "discovery",
       compatible,
       ...(compatible ? {} : { reason: version ? `ClassIsland 版本过低，需要 ${MIN_CLASSISLAND_VERSION} 及以上` : "无法确认 ClassIsland 版本，请选择可识别的 ClassIsland.exe" }),
@@ -573,13 +642,14 @@ async function downloadLatestClassIslandPlugin(fetcher: Fetcher, now: () => numb
   throw new Error(`下载 ClassIsland 插件失败：${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
 
-async function defaultRequestGracefulClose(pid: number, platform: SupportedPlatform, commandRunner: CommandRunner): Promise<void> {
+async function defaultRequestGracefulClose(pid: number, platform: SupportedPlatform, commandRunner: CommandRunner): Promise<boolean> {
   if (platform === "win32") {
-    const script = `$process = Get-Process -Id ${pid} -ErrorAction Stop; [void]$process.CloseMainWindow()`;
-    await commandRunner("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script]);
-    return;
+    const script = `$process = Get-Process -Id ${pid} -ErrorAction Stop; [bool]$process.CloseMainWindow()`;
+    const result = await commandRunner("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script]);
+    return result.stdout.trim().toLowerCase() !== "false";
   }
   process.kill(pid, "SIGTERM");
+  return true;
 }
 
 async function defaultForceTerminate(pid: number, platform: SupportedPlatform, commandRunner: CommandRunner): Promise<void> {
@@ -641,21 +711,24 @@ export class ClassIslandInstaller {
     const results: ClassIslandInstallResult[] = invalid.map((candidate) => ({ targetId: candidate.id, ok: false, action: "skipped", message: candidate.reason || "ClassIsland 版本不兼容" }));
     if (!valid.length) return [...results, ...missing];
 
-    const report = (phase: ClassIslandInstallPhase, message?: string) => onProgress?.({ phase, targetIds, ...(message ? { message } : {}) });
+    const report = (phase: ClassIslandInstallPhase, message?: string, percent?: number) => {
+      const phasePercent = percent ?? ({ downloading: 18, verifying: 38, installing: 62, restarting: 80 } as const)[phase];
+      onProgress?.({ phase, targetIds, percent: phasePercent, ...(message ? { message } : {}) });
+    };
     const log = (stage: string, data: unknown = {}) => this.options.log?.(`companion.classisland.${stage}`, data);
-    log("install.begin", { targetIds, candidates: selected.map((candidate) => ({ id: candidate.id, executablePath: candidate.executablePath, dataRoot: candidate.dataRoot, pluginPackagesPath: candidate.pluginPackagesPath, version: candidate.version, installedPluginVersion: candidate.installedPluginVersion, pluginHealthy: candidate.pluginHealthy, isRunning: candidate.isRunning, pid: candidate.pid })) });
+    log("install.begin", { targetIds, candidates: selected.map((candidate) => ({ id: candidate.id, executablePath: candidate.executablePath, dataRoot: candidate.dataRoot, pluginPackagesPath: candidate.pluginPackagesPath, version: candidate.version, installedPluginVersion: candidate.installedPluginVersion, pluginHealthy: candidate.pluginHealthy, isRunning: candidate.isRunning, pid: candidate.pid, processIds: candidate.processIds })) });
     const packageData = await downloadLatestClassIslandPlugin(this.fetcher, this.options.now || Date.now, (phase, message) => report(phase, message));
     log("download.success", { version: packageData.version, bytes: packageData.bytes.length, sha256: packageData.sha256 });
     const api = platformPath(this.platform);
-    // The elevated executor is intentionally limited to writing protected
-    // plugin files. Starting ClassIsland as Administrator changes its profile
-    // and can make the process exit before the plugin host becomes available.
-    // Launch it again as the interactive user, without PowerShell/UAC.
+    // Restart with the same token as SecAgent. A normal SecAgent uses the
+    // interactive-shell broker; an administrator-launched SecAgent starts the
+    // companion directly with the administrator token.
     const restart = this.options.restartProcess || ((executablePath: string, args: string[]) =>
-      startCompanionProcessUnelevated(executablePath, args, this.platform, (stage, data) => log(stage, data)));
+      startCompanionProcessWithSameElevation(executablePath, args, this.platform, (stage, data) => log(stage, data)));
     const isRunning = this.options.isProcessRunning || ((pid: number) => executor ? executor.isProcessRunning(pid, (stage, data) => log(stage, data)) : defaultIsProcessRunning(pid));
     const requestClose = this.options.requestGracefulClose || ((pid: number) => executor ? executor.requestGracefulClose(pid, (stage, data) => log(stage, data)) : defaultRequestGracefulClose(pid, this.platform, this.commandRunner));
     const forceTerminate = this.options.forceTerminateProcess || ((pid: number) => executor ? executor.forceTerminate(pid, (stage, data) => log(stage, data)) : defaultForceTerminate(pid, this.platform, this.commandRunner));
+    const gracefulCloseTimeoutMs = this.options.gracefulCloseTimeoutMs ?? 2_000;
     const exists = this.options.exists || defaultExists;
     const readFile = this.options.readFile || defaultReadFile;
     const installPackage = this.options.installPackage || ((destinationPath: string, bytes: Buffer, spec: CompanionPackageSpec) =>
@@ -669,7 +742,7 @@ export class ClassIslandInstaller {
       const refreshed = await this.detect();
       const refreshedById = new Map(refreshed.map((candidate) => [candidate.id, candidate]));
       currentValid = valid.map((candidate) => refreshedById.get(candidate.id) || candidate);
-      log("process.refresh.result", { candidates: currentValid.map((candidate) => ({ id: candidate.id, executablePath: candidate.executablePath, isRunning: candidate.isRunning, pid: candidate.pid })) });
+      log("process.refresh.result", { candidates: currentValid.map((candidate) => ({ id: candidate.id, executablePath: candidate.executablePath, isRunning: candidate.isRunning, pid: candidate.pid, processIds: candidate.processIds })) });
     } catch (error) {
       log("process.refresh.failed", { error: error instanceof Error ? error.message : String(error) });
     }
@@ -685,35 +758,43 @@ export class ClassIslandInstaller {
         for (const candidate of group) results.push({ targetId: candidate.id, ok: true, action: "already-installed", message: `已安装 ClassIsland 插件 v${packageData.version}`, version: packageData.version });
         continue;
       }
-      const running = group.filter((candidate) => candidate.isRunning && candidate.pid !== undefined);
-      const closed: ClassIslandInstallCandidate[] = [];
+      const running = group.flatMap((candidate) => {
+        const processIds = candidate.processIds?.length ? candidate.processIds : candidate.pid === undefined ? [] : [candidate.pid];
+        return processIds.map((pid) => ({ candidate, pid }));
+      }).filter((item, index, all) => all.findIndex((other) => other.pid === item.pid) === index);
+      const closed: Array<{ candidate: ClassIslandInstallCandidate; pid: number }> = [];
       let closeFailed = false;
-      for (const candidate of running) {
+      for (const { candidate, pid } of running) {
         let exited = false;
-        log("process.close.begin", { pid: candidate.pid, executablePath: candidate.executablePath });
+        log("process.close.begin", { pid, executablePath: candidate.executablePath });
         try {
-          await requestClose(candidate.pid!);
-          exited = await waitForProcessExit(candidate.pid!, isRunning, this.options.waitForExitTimeoutMs, this.options.waitForExitPollMs);
-          log("process.close.result", { pid: candidate.pid, exited, method: "graceful" });
+          const closeAccepted = (await requestClose(pid)) !== false;
+          exited = closeAccepted && await waitForProcessExit(pid, isRunning, gracefulCloseTimeoutMs, this.options.waitForExitPollMs);
+          log("process.close.result", { pid, accepted: closeAccepted, exited, method: "graceful" });
         } catch (error) {
-          log("process.close.failed", { pid: candidate.pid, method: "graceful", error: error instanceof Error ? error.message : String(error) });
+          log("process.close.failed", { pid, method: "graceful", error: error instanceof Error ? error.message : String(error) });
         }
         if (!exited) {
-          report("restarting", `ClassIsland 未能优雅退出，正在强制结束进程 ${candidate.pid}`);
-          log("process.terminate.begin", { pid: candidate.pid });
+          report("restarting", `ClassIsland 未能优雅退出，正在强制结束进程 ${pid}`);
+          log("process.terminate.begin", { pid });
           try {
-            await forceTerminate(candidate.pid!);
-            exited = await waitForProcessExit(candidate.pid!, isRunning, this.options.waitForExitTimeoutMs, this.options.waitForExitPollMs);
-            log("process.terminate.result", { pid: candidate.pid, exited });
+            await forceTerminate(pid);
+            exited = await waitForProcessExit(pid, isRunning, this.options.waitForExitTimeoutMs, this.options.waitForExitPollMs);
+            log("process.terminate.result", { pid, exited });
           } catch (error) {
-            log("process.terminate.failed", { pid: candidate.pid, error: error instanceof Error ? error.message : String(error) });
+            log("process.terminate.failed", { pid, error: error instanceof Error ? error.message : String(error) });
           }
         }
         if (!exited) { closeFailed = true; break; }
-        closed.push(candidate);
+        closed.push({ candidate, pid });
       }
       if (closeFailed) {
-        for (const candidate of closed) await restart(candidate.executablePath, candidate.launchArgs).catch(() => undefined);
+        const restarted = new Set<string>();
+        for (const { candidate } of closed) {
+          if (restarted.has(candidate.id)) continue;
+          restarted.add(candidate.id);
+          await restart(candidate.executablePath, candidate.launchArgs).catch(() => undefined);
+        }
         for (const candidate of group) results.push({ targetId: candidate.id, ok: false, action: "failed", message: "ClassIsland 无法退出，强制结束也失败，未安装插件；请手动关闭后重试" });
         continue;
       }
@@ -722,19 +803,14 @@ export class ClassIslandInstaller {
         report("installing", "正在解压安装 ClassIsland 插件");
         const actualPluginPath = await installPackage(pluginPath, packageData.bytes, { pluginId: CLASSISLAND_PLUGIN_ID, manifestFileName: "manifest.yml" });
         log("package.install.result", { requestedPath: pluginPath, actualPluginPath });
-        const launchCandidate = closed[0] || group[0];
+        const launchCandidate = closed[0]?.candidate || group[0];
         const restarting = closed.length > 0;
-        // ClassIsland exposes --waitMutex for this race. It waits for the
-        // existing Global\\ClassIsland.Lock owner instead of showing its
-        // duplicate-instance dialog.
-        const launchArgs = launchCandidate.launchArgs.some((arg) => arg.toLowerCase() === "--waitmutex" || arg.toLowerCase() === "-m")
-          ? launchCandidate.launchArgs
-          : [...launchCandidate.launchArgs, "--waitMutex"];
         report("restarting", restarting ? "正在重新启动 ClassIsland" : "正在启动 ClassIsland");
-        log("process.restart.begin", { executablePath: launchCandidate.executablePath, args: launchArgs, wasRunning: restarting });
+        log("process.restart.begin", { executablePath: launchCandidate.executablePath, args: launchCandidate.launchArgs, wasRunning: restarting, closedPids: closed.map((item) => item.pid) });
         let launchFailed = false;
-        try { await restart(launchCandidate.executablePath, launchArgs); log("process.restart.success", { executablePath: launchCandidate.executablePath, args: launchArgs }); }
+        try { await restart(launchCandidate.executablePath, launchCandidate.launchArgs); log("process.restart.success", { executablePath: launchCandidate.executablePath, args: launchCandidate.launchArgs }); }
         catch (error) { launchFailed = true; log("process.restart.failed", { executablePath: launchCandidate.executablePath, error: error instanceof Error ? error.message : String(error) }); }
+        if (!launchFailed) report("verifying", "正在确认 ClassIsland 插件已加载", 94);
         const writtenVersion = installedPluginVersion(group[0].dataRoot, this.platform, exists, readFile);
         const verifiedVersion = launchFailed ? undefined : await waitForInstalledPlugin(
           () => installedPluginVersion(group[0].dataRoot, this.platform, exists, readFile),
@@ -742,14 +818,13 @@ export class ClassIslandInstaller {
           this.options.waitForPluginTimeoutMs,
           this.options.waitForPluginPollMs
         );
-        const pluginHealthy = !launchFailed && await waitForClassIslandHealth(
-          this.fetcher,
-          this.options.waitForPluginTimeoutMs,
-          this.options.waitForPluginPollMs
-        );
+        const health = launchFailed
+          ? { healthy: false, reason: "对方软件未成功启动" }
+          : await waitForClassIslandHealth(this.fetcher, this.options.waitForPluginTimeoutMs, this.options.waitForPluginPollMs);
+        const pluginHealthy = health.healthy;
         const verified = Boolean(verifiedVersion) && pluginHealthy;
         const detectedVersion = verified ? verifiedVersion : writtenVersion;
-        log("verification.result", { expectedVersion: packageData.version, writtenVersion, verifiedVersion, detectedVersion, pluginHealthy, verified, launchFailed });
+        log("verification.result", { expectedVersion: packageData.version, writtenVersion, verifiedVersion, detectedVersion, pluginHealthy, healthReason: health.reason, healthStatus: health.status, verified, launchFailed });
         for (const candidate of group) {
           results.push({
             targetId: candidate.id,
@@ -759,13 +834,18 @@ export class ClassIslandInstaller {
               ? `插件包已写入，但 ClassIsland 自动${restarting ? "重启" : "启动"}失败，请手动启动`
               : verified
                 ? restarting ? `已安装 ClassIsland 插件 v${verifiedVersion}，ClassIsland 已自动重启` : `已安装 ClassIsland 插件 v${verifiedVersion}，ClassIsland 已自动启动`
-                : "插件已解压并启动，但未检测到 ClassIsland 插件，请查看诊断日志后重试",
+                : `插件已解压并启动，但未检测到 ClassIsland 插件（${health.reason}），请查看诊断日志后重试`,
             ...(verified && detectedVersion ? { version: detectedVersion } : {})
           });
         }
       } catch (error) {
         log("install.failed", { error: error instanceof Error ? error.message : String(error) });
-        for (const candidate of closed) await restart(candidate.executablePath, candidate.launchArgs).catch(() => undefined);
+        const restarted = new Set<string>();
+        for (const { candidate } of closed) {
+          if (restarted.has(candidate.id)) continue;
+          restarted.add(candidate.id);
+          await restart(candidate.executablePath, candidate.launchArgs).catch(() => undefined);
+        }
         for (const candidate of group) results.push({ targetId: candidate.id, ok: false, action: "failed", message: `安装 ClassIsland 插件失败：${error instanceof Error ? error.message : String(error)}` });
       }
     }

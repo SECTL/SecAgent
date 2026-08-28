@@ -5,13 +5,14 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { compareVersions, marketplaceRequestUrls } from "./marketplace.js";
-import { installCompanionPackage, startCompanionProcess, type CompanionExecutor, type CompanionLogger, type CompanionPackageSpec } from "./companion-package.js";
+import { installCompanionPackage, startCompanionProcessWithSameElevation, type CompanionExecutor, type CompanionLogger, type CompanionPackageSpec } from "./companion-package.js";
 
 export const ICCCE_PLUGIN_REPOSITORY = "SECTL/ICC-CE-SecAgent-Plugin";
 export const ICCCE_PLUGIN_ID = "inkcanvas.iccce.secagent";
 export const ICCCE_PLUGIN_ASSET_NAME = "inkcanvas.iccce.secagent.icpx";
 export const ICCCE_RELEASE_API_URL = `https://api.github.com/repos/${ICCCE_PLUGIN_REPOSITORY}/releases/latest`;
 const ICCCE_RELEASE_PAGE_URL = `https://github.com/${ICCCE_PLUGIN_REPOSITORY}/releases/latest`;
+const ICCCE_PLUGIN_HEALTH_URL = "http://127.0.0.1:18790/health";
 
 const ICCCE_PLUGIN_VERSION_PATTERN = /["']?Version["']?\s*:\s*["']([^"']+)["']/i;
 const ICCCE_PLUGIN_ID_PATTERN = /["']?Id["']?\s*:\s*["']([^"']+)["']/i;
@@ -31,6 +32,7 @@ export interface IccceInstallCandidate {
   pluginsPath: string;
   version?: string;
   installedPluginVersion?: string;
+  pluginHealthy?: boolean;
   packageType?: string;
   isRunning: boolean;
   pid?: number;
@@ -52,6 +54,8 @@ export type IccceInstallPhase = "downloading" | "verifying" | "installing" | "re
 export interface IccceInstallProgress {
   phase: IccceInstallPhase;
   targetIds: string[];
+  /** Determinate progress for the companion half (0-100). */
+  percent?: number;
   message?: string;
 }
 
@@ -72,14 +76,17 @@ export interface IccceDiscoveryOptions {
   versionOf?: (executablePath: string) => Promise<string | undefined> | string | undefined;
   exists?: (candidate: string) => boolean;
   readFile?: (filePath: string) => string;
+  fetcher?: Fetcher;
 }
 
 export interface IccceInstallerOptions extends IccceDiscoveryOptions {
   fetcher?: Fetcher;
-  requestGracefulClose?: (pid: number) => Promise<void>;
+  requestGracefulClose?: (pid: number) => Promise<void | boolean>;
   forceTerminateProcess?: (pid: number) => Promise<void>;
   isProcessRunning?: (pid: number) => Promise<boolean>;
   restartProcess?: (executablePath: string, args: string[]) => Promise<void>;
+  /** Graceful close is only a brief opportunity; force termination follows. */
+  gracefulCloseTimeoutMs?: number;
   waitForExitTimeoutMs?: number;
   waitForExitPollMs?: number;
   waitForPluginTimeoutMs?: number;
@@ -338,6 +345,37 @@ async function waitForInstalledPlugin(
   }
 }
 
+interface PluginHealthResult {
+  healthy: boolean;
+  reason: string;
+  status?: number;
+}
+
+async function probeIcccePluginDetailed(fetcher: Fetcher): Promise<PluginHealthResult> {
+  try {
+    const response = await fetcher(ICCCE_PLUGIN_HEALTH_URL, { signal: AbortSignal.timeout(1_500), headers: { Accept: "application/json" } });
+    if (!response.ok) return { healthy: false, reason: `健康检查返回 HTTP ${response.status}`, status: response.status };
+    const payload = await response.json() as { apiVersion?: unknown; name?: unknown; status?: unknown };
+    if (payload.apiVersion === 1 && payload.name === "iccce" && payload.status === "ok") return { healthy: true, reason: "ok", status: response.status };
+    return { healthy: false, reason: "健康检查返回内容不匹配", status: response.status };
+  } catch { return { healthy: false, reason: "健康检查服务未响应" }; }
+}
+
+async function probeIcccePlugin(fetcher: Fetcher): Promise<boolean> {
+  return (await probeIcccePluginDetailed(fetcher)).healthy;
+}
+
+async function waitForIcccePluginHealth(fetcher: Fetcher, timeoutMs = 15_000, pollMs = 250): Promise<PluginHealthResult> {
+  const deadline = Date.now() + timeoutMs;
+  let last: PluginHealthResult = { healthy: false, reason: "健康检查服务未响应" };
+  while (true) {
+    last = await probeIcccePluginDetailed(fetcher);
+    if (last.healthy) return last;
+    if (Date.now() >= deadline) return last;
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+}
+
 async function defaultVersionOf(executablePath: string, platform: SupportedPlatform, commandRunner: CommandRunner): Promise<string | undefined> {
   if (platform !== "win32") return undefined;
   const script = `$item = Get-Item -LiteralPath ${quotePowerShell(executablePath)}; $item.VersionInfo.ProductVersion`;
@@ -372,6 +410,7 @@ export async function discoverIccceInstallations(options: IccceDiscoveryOptions 
     const processInfo = runningByPath.get(normalizePath(executablePath, platform)) || runningByName.get(api.basename(executablePath).toLowerCase());
     const version = processInfo?.version || await versionOf(executablePath);
     const layout = resolveIccceLayout(executablePath, { platform, home, env });
+    const pluginHealthy = processInfo && options.fetcher ? await probeIcccePlugin(options.fetcher) : undefined;
     const candidate: CachedCandidate = {
       id: hashId(executablePath, layout.packageRoot, platform),
       executablePath,
@@ -380,6 +419,7 @@ export async function discoverIccceInstallations(options: IccceDiscoveryOptions 
       pluginsPath: layout.pluginsPath,
       ...(version ? { version } : {}),
       ...(installedPluginVersion(layout, platform, exists, readFile) ? { installedPluginVersion: installedPluginVersion(layout, platform, exists, readFile) } : {}),
+      ...(pluginHealthy !== undefined ? { pluginHealthy } : {}),
       ...(layout.packageType ? { packageType: layout.packageType } : {}),
       isRunning: Boolean(processInfo),
       ...(processInfo ? { pid: processInfo.pid, launchArgs: parseWindowsCommandLine(processInfo.commandLine).slice(1) } : { launchArgs: [] }),
@@ -489,13 +529,14 @@ async function downloadLatestIcccePlugin(fetcher: Fetcher, now: () => number, on
   throw new Error(`下载 ICC-CE 插件失败：${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
 
-async function defaultRequestGracefulClose(pid: number, platform: SupportedPlatform, commandRunner: CommandRunner): Promise<void> {
+async function defaultRequestGracefulClose(pid: number, platform: SupportedPlatform, commandRunner: CommandRunner): Promise<boolean> {
   if (platform === "win32") {
-    const script = `$process = Get-Process -Id ${pid} -ErrorAction Stop; [void]$process.CloseMainWindow()`;
-    await commandRunner("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script]);
-    return;
+    const script = `$process = Get-Process -Id ${pid} -ErrorAction Stop; [bool]$process.CloseMainWindow()`;
+    const result = await commandRunner("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script]);
+    return result.stdout.trim().toLowerCase() !== "false";
   }
   process.kill(pid, "SIGTERM");
+  return true;
 }
 
 async function defaultForceTerminate(pid: number, platform: SupportedPlatform, commandRunner: CommandRunner): Promise<void> {
@@ -535,13 +576,13 @@ export class IccceInstaller {
   }
 
   async detect(): Promise<IccceInstallCandidate[]> {
-    const discovered = await discoverIccceInstallations({ ...this.options, commandRunner: this.commandRunner, platform: this.platform, executablePaths: [...(this.options.executablePaths || []), ...[...this.candidates.values()].map((candidate) => candidate.executablePath)] });
+    const discovered = await discoverIccceInstallations({ ...this.options, fetcher: this.fetcher, commandRunner: this.commandRunner, platform: this.platform, executablePaths: [...(this.options.executablePaths || []), ...[...this.candidates.values()].map((candidate) => candidate.executablePath)] });
     this.candidates = new Map(discovered.map((candidate) => [candidate.id, candidate]));
     return discovered;
   }
 
   async inspect(executablePath: string): Promise<IccceInstallCandidate | undefined> {
-    const discovered = await discoverIccceInstallations({ ...this.options, commandRunner: this.commandRunner, platform: this.platform, executablePaths: [executablePath] });
+    const discovered = await discoverIccceInstallations({ ...this.options, fetcher: this.fetcher, commandRunner: this.commandRunner, platform: this.platform, executablePaths: [executablePath] });
     const candidate = discovered[0];
     if (candidate) this.candidates.set(candidate.id, candidate);
     return candidate;
@@ -556,9 +597,12 @@ export class IccceInstaller {
     const results: IccceInstallResult[] = selected.filter((candidate) => !candidate.compatible).map((candidate) => ({ targetId: candidate.id, ok: false, action: "skipped" as const, message: candidate.reason || "ICC-CE 版本不兼容" }));
     if (!valid.length) return [...results, ...missing];
 
-    const report = (phase: IccceInstallPhase, message?: string) => onProgress?.({ phase, targetIds, ...(message ? { message } : {}) });
+    const report = (phase: IccceInstallPhase, message?: string, percent?: number) => {
+      const phasePercent = percent ?? ({ downloading: 18, verifying: 38, installing: 62, restarting: 80 } as const)[phase];
+      onProgress?.({ phase, targetIds, percent: phasePercent, ...(message ? { message } : {}) });
+    };
     const log = (stage: string, data: unknown = {}) => this.options.log?.(`companion.iccce.${stage}`, data);
-    log("install.begin", { targetIds, candidates: selected.map((candidate) => ({ id: candidate.id, executablePath: candidate.executablePath, rootPath: candidate.rootPath, pluginPackagesPath: candidate.pluginPackagesPath, pluginsPath: candidate.pluginsPath, version: candidate.version, installedPluginVersion: candidate.installedPluginVersion, isRunning: candidate.isRunning, pid: candidate.pid })) });
+    log("install.begin", { targetIds, candidates: selected.map((candidate) => ({ id: candidate.id, executablePath: candidate.executablePath, rootPath: candidate.rootPath, pluginPackagesPath: candidate.pluginPackagesPath, pluginsPath: candidate.pluginsPath, version: candidate.version, installedPluginVersion: candidate.installedPluginVersion, pluginHealthy: candidate.pluginHealthy, isRunning: candidate.isRunning, pid: candidate.pid })) });
     const packageData = await downloadLatestIcccePlugin(this.fetcher, this.options.now || Date.now, (phase, message) => report(phase, message));
     log("download.success", { version: packageData.version, bytes: packageData.bytes.length, sha256: packageData.sha256 });
     const groups = new Map<string, IccceInstallCandidate[]>();
@@ -566,19 +610,21 @@ export class IccceInstaller {
       const key = normalizePath(candidate.rootPath, this.platform);
       groups.set(key, [...(groups.get(key) || []), candidate]);
     }
-    const restart = this.options.restartProcess || ((executablePath: string, args: string[]) => executor
-      ? executor.startProcess(executablePath, args, (stage, data) => log(stage, data))
-      : startCompanionProcess(executablePath, args, this.platform, (stage, data) => log(stage, data)));
+    const restart = this.options.restartProcess || ((executablePath: string, args: string[]) =>
+      startCompanionProcessWithSameElevation(executablePath, args, this.platform, (stage, data) => log(stage, data)));
     const isRunning = this.options.isProcessRunning || ((pid: number) => executor ? executor.isProcessRunning(pid, (stage, data) => log(stage, data)) : defaultIsProcessRunning(pid));
     const requestClose = this.options.requestGracefulClose || ((pid: number) => executor ? executor.requestGracefulClose(pid, (stage, data) => log(stage, data)) : defaultRequestGracefulClose(pid, this.platform, this.commandRunner));
     const forceTerminate = this.options.forceTerminateProcess || ((pid: number) => executor ? executor.forceTerminate(pid, (stage, data) => log(stage, data)) : defaultForceTerminate(pid, this.platform, this.commandRunner));
+    const gracefulCloseTimeoutMs = this.options.gracefulCloseTimeoutMs ?? 2_000;
     const exists = this.options.exists || defaultExists;
     const readFile = this.options.readFile || defaultReadFile;
     const installPackage = this.options.installPackage || ((destinationPath: string, bytes: Buffer, spec: CompanionPackageSpec) =>
       installCompanionPackage(destinationPath, bytes, spec, this.platform, executor, (stage, data) => log(stage, data)));
     for (const group of groups.values()) {
       log("group.begin", { rootPath: group[0].rootPath, targets: group.map((candidate) => candidate.id), pluginPackagesPath: group[0].pluginPackagesPath, pluginsPath: group[0].pluginsPath });
-      const alreadyInstalled = group.every((candidate) => candidate.installedPluginVersion && compareVersions(candidate.installedPluginVersion, packageData.version) >= 0);
+      const alreadyInstalled = group.every((candidate) => candidate.installedPluginVersion
+        && (!candidate.isRunning || candidate.pluginHealthy === true)
+        && compareVersions(candidate.installedPluginVersion, packageData.version) >= 0);
       if (alreadyInstalled) {
         for (const candidate of group) results.push({ targetId: candidate.id, ok: true, action: "already-installed", message: `已安装 ICC-CE 插件 v${packageData.version}`, version: packageData.version });
         continue;
@@ -590,9 +636,9 @@ export class IccceInstaller {
         let exited = false;
         log("process.close.begin", { pid: candidate.pid, executablePath: candidate.executablePath });
         try {
-          await requestClose(candidate.pid!);
-          exited = await waitForProcessExit(candidate.pid!, isRunning, this.options.waitForExitTimeoutMs, this.options.waitForExitPollMs);
-          log("process.close.result", { pid: candidate.pid, exited, method: "graceful" });
+          const closeAccepted = (await requestClose(candidate.pid!)) !== false;
+          exited = closeAccepted && await waitForProcessExit(candidate.pid!, isRunning, gracefulCloseTimeoutMs, this.options.waitForExitPollMs);
+          log("process.close.result", { pid: candidate.pid, accepted: closeAccepted, exited, method: "graceful" });
         } catch (error) {
           log("process.close.failed", { pid: candidate.pid, method: "graceful", error: error instanceof Error ? error.message : String(error) });
         }
@@ -627,6 +673,7 @@ export class IccceInstaller {
         let launchFailed = false;
         try { await restart(launchCandidate.executablePath, launchCandidate.launchArgs); log("process.restart.success", { executablePath: launchCandidate.executablePath }); }
         catch (error) { launchFailed = true; log("process.restart.failed", { executablePath: launchCandidate.executablePath, error: error instanceof Error ? error.message : String(error) }); }
+        if (!launchFailed) report("verifying", "正在确认 ICC-CE 插件已加载", 94);
         const installedLayout: ResolvedIccceLayout = {
           packageRoot: group[0].rootPath,
           pluginPackagesPath: group[0].pluginPackagesPath,
@@ -640,9 +687,13 @@ export class IccceInstaller {
           this.options.waitForPluginTimeoutMs,
           this.options.waitForPluginPollMs
         );
-        const verified = Boolean(verifiedVersion);
-        const detectedVersion = verifiedVersion || writtenVersion;
-        log("verification.result", { expectedVersion: packageData.version, writtenVersion, verifiedVersion, detectedVersion, verified, launchFailed });
+        const health = launchFailed
+          ? { healthy: false, reason: "对方软件未成功启动" }
+          : await waitForIcccePluginHealth(this.fetcher, this.options.waitForPluginTimeoutMs, this.options.waitForPluginPollMs);
+        const pluginHealthy = health.healthy;
+        const verified = Boolean(verifiedVersion) && pluginHealthy;
+        const detectedVersion = verified ? verifiedVersion : writtenVersion;
+        log("verification.result", { expectedVersion: packageData.version, writtenVersion, verifiedVersion, detectedVersion, pluginHealthy, healthReason: health.reason, healthStatus: health.status, verified, launchFailed });
         for (const candidate of group) {
           results.push({
             targetId: candidate.id,
@@ -652,8 +703,8 @@ export class IccceInstaller {
               ? `插件包已写入，但 ICC-CE 自动${restarting ? "重启" : "启动"}失败，请手动启动`
               : verified
                 ? restarting ? `已安装 ICC-CE 插件 v${verifiedVersion}，ICC-CE 已自动重启` : `已安装 ICC-CE 插件 v${verifiedVersion}，ICC-CE 已自动启动`
-                : "插件已解压并启动，但未检测到 ICC-CE 插件，请查看诊断日志后重试",
-            ...(detectedVersion ? { version: detectedVersion } : {})
+                : `插件已解压并启动，但未检测到 ICC-CE 插件（${health.reason}），请查看诊断日志后重试`,
+            ...(verified && detectedVersion ? { version: detectedVersion } : {})
           });
         }
       } catch (error) {

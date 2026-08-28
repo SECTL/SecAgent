@@ -83,6 +83,50 @@ test("discovers multiple ClassIsland versions and marks old versions incompatibl
   assert.match(found.find((item) => item.executablePath === paths[1])?.reason || "", /2\.1\.1\.0/);
 });
 
+test("maps the running ClassIsland.Desktop process back to its launcher and closes the real instance", async () => {
+  const root = "C:\\Portable\\ClassIsland";
+  const launcher = path.win32.join(root, "ClassIsland.exe");
+  const runtime = path.win32.join(root, "app-2.1.1.1", "ClassIsland.Desktop.exe");
+  const found = await discoverClassIslandInstallations({
+    platform: "win32",
+    home: "C:\\Users\\teacher",
+    env: { APPDATA: "C:\\Users\\teacher\\AppData\\Roaming" },
+    executablePaths: [launcher],
+    runningProcesses: [{ executablePath: runtime, pid: 99, commandLine: `"${runtime}" --profile school`, version: "2.1.1.1", processName: "ClassIsland.Desktop.exe" }],
+    exists: (candidate) => candidate === launcher || candidate === runtime,
+    versionOf: () => "2.1.1.1",
+    readFile: (filePath) => filePath.endsWith("\\PackageType") ? "folder" : ""
+  });
+  assert.equal(found.length, 1);
+  assert.equal(found[0].executablePath, launcher);
+  assert.equal(found[0].isRunning, true);
+  assert.equal(found[0].pid, 99);
+  assert.deepEqual(found[0].launchArgs, ["--profile", "school"]);
+  assert.equal(found[0].dataRoot, path.win32.join(root, "data"));
+});
+
+test("keeps every running ClassIsland process for single-instance shutdown", async () => {
+  const root = "C:\\Portable\\ClassIsland";
+  const launcher = path.win32.join(root, "ClassIsland.exe");
+  const runtime = path.win32.join(root, "app-2.1.1.1", "ClassIsland.Desktop.exe");
+  const found = await discoverClassIslandInstallations({
+    platform: "win32",
+    home: "C:\\Users\\teacher",
+    env: { APPDATA: "C:\\Users\\teacher\\AppData\\Roaming" },
+    executablePaths: [launcher],
+    runningProcesses: [
+      { executablePath: launcher, pid: 98, commandLine: `"${launcher}"`, version: "2.1.1.1", processName: "ClassIsland.exe" },
+      { executablePath: runtime, pid: 99, commandLine: `"${runtime}" --profile school`, version: "2.1.1.1", processName: "ClassIsland.Desktop.exe" }
+    ],
+    exists: (candidate) => candidate === launcher || candidate === runtime,
+    versionOf: () => "2.1.1.1",
+    readFile: (filePath) => filePath.endsWith("\\PackageType") ? "folder" : ""
+  });
+  assert.equal(found.length, 1);
+  assert.deepEqual(found[0].processIds, [98, 99]);
+  assert.equal(found[0].pid, 99);
+});
+
 test("scans Windows external locations when the installer has no explicit executable paths", async () => {
   const exe = "C:\\Program Files\\ClassIsland\\ClassIsland.exe";
   const commandRunner = async (_file: string, args: string[]) => ({
@@ -291,7 +335,7 @@ test("restarts a running ClassIsland and starts an idle instance after installin
     const [runningResult] = await runningInstaller.install([runningTarget.id]);
     assert.equal(runningResult.ok, true);
     assert.match(runningResult.message, /自动重启/);
-    assert.deepEqual(launches, [{ executablePath: exe, args: ["--profile", "school", "--waitMutex"] }]);
+    assert.deepEqual(launches, [{ executablePath: exe, args: ["--profile", "school"] }]);
 
     fs.rmSync(path.win32.join(root, "data", "Plugins", "classisland.secagent"), { recursive: true, force: true });
     launches.length = 0;
@@ -309,7 +353,7 @@ test("restarts a running ClassIsland and starts an idle instance after installin
     const [idleResult] = await idleInstaller.install([idleTarget.id]);
     assert.equal(idleResult.ok, true);
     assert.match(idleResult.message, /自动启动/);
-    assert.deepEqual(launches, [{ executablePath: exe, args: ["--waitMutex"] }]);
+    assert.deepEqual(launches, [{ executablePath: exe, args: [] }]);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -330,7 +374,7 @@ test("force-terminates ClassIsland when graceful close fails", async () => {
       executablePaths: [exe],
       runningProcesses: [{ executablePath: exe, pid: 123, version: "2.1.1.0" }],
       exists: (candidate) => fs.existsSync(candidate),
-      requestGracefulClose: async () => { throw new Error("still running"); },
+      requestGracefulClose: async () => false,
       forceTerminateProcess: async () => { forceKilled = true; running = false; },
       isProcessRunning: async () => running,
       installPackage: async (destinationPath) => destinationPath,

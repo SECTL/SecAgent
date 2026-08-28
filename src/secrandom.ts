@@ -5,7 +5,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { compareVersions, marketplaceRequestUrls } from "./marketplace.js";
-import { installCompanionPackage, startCompanionProcess, type CompanionExecutor, type CompanionLogger, type CompanionPackageSpec } from "./companion-package.js";
+import { installCompanionPackage, startCompanionProcessWithSameElevation, type CompanionExecutor, type CompanionLogger, type CompanionPackageSpec } from "./companion-package.js";
 
 export const SECRANDOM_PLUGIN_REPOSITORY = "SECTL/SecRandom-SecAgent-Plugin";
 export const SECRANDOM_PLUGIN_ID = "secrandom.secagent";
@@ -56,6 +56,8 @@ export type SecRandomInstallPhase = "downloading" | "verifying" | "installing" |
 export interface SecRandomInstallProgress {
   phase: SecRandomInstallPhase;
   targetIds: string[];
+  /** Determinate progress for the companion half (0-100). */
+  percent?: number;
   message?: string;
 }
 
@@ -80,10 +82,12 @@ export interface SecRandomDiscoveryOptions {
 
 export interface SecRandomInstallerOptions extends SecRandomDiscoveryOptions {
   fetcher?: Fetcher;
-  requestGracefulClose?: (pid: number) => Promise<void>;
+  requestGracefulClose?: (pid: number) => Promise<void | boolean>;
   forceTerminateProcess?: (pid: number) => Promise<void>;
   isProcessRunning?: (pid: number) => Promise<boolean>;
   restartProcess?: (executablePath: string, args: string[]) => Promise<void>;
+  /** Graceful close is only a brief opportunity; force termination follows. */
+  gracefulCloseTimeoutMs?: number;
   waitForExitTimeoutMs?: number;
   waitForExitPollMs?: number;
   waitForPluginTimeoutMs?: number;
@@ -555,13 +559,14 @@ async function downloadLatestSecRandomPlugin(fetcher: Fetcher, now: () => number
   throw new Error(`下载 SecRandom 插件失败：${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
 
-async function defaultRequestGracefulClose(pid: number, platform: SupportedPlatform, commandRunner: CommandRunner): Promise<void> {
+async function defaultRequestGracefulClose(pid: number, platform: SupportedPlatform, commandRunner: CommandRunner): Promise<boolean> {
   if (platform === "win32") {
-    const script = `$process = Get-Process -Id ${pid} -ErrorAction Stop; [void]$process.CloseMainWindow()`;
-    await commandRunner("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script]);
-    return;
+    const script = `$process = Get-Process -Id ${pid} -ErrorAction Stop; [bool]$process.CloseMainWindow()`;
+    const result = await commandRunner("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script]);
+    return result.stdout.trim().toLowerCase() !== "false";
   }
   process.kill(pid, "SIGTERM");
+  return true;
 }
 
 async function defaultForceTerminate(pid: number, platform: SupportedPlatform, commandRunner: CommandRunner): Promise<void> {
@@ -623,7 +628,10 @@ export class SecRandomInstaller {
     const results: SecRandomInstallResult[] = invalid.map((candidate) => ({ targetId: candidate.id, ok: false, action: "skipped", message: candidate.reason || "SecRandom 版本不兼容" }));
     if (!valid.length) return [...results, ...missing];
 
-    const report = (phase: SecRandomInstallPhase, message?: string) => onProgress?.({ phase, targetIds, ...(message ? { message } : {}) });
+    const report = (phase: SecRandomInstallPhase, message?: string, percent?: number) => {
+      const phasePercent = percent ?? ({ downloading: 18, verifying: 38, installing: 62, restarting: 80 } as const)[phase];
+      onProgress?.({ phase, targetIds, percent: phasePercent, ...(message ? { message } : {}) });
+    };
     const log = (stage: string, data: unknown = {}) => this.options.log?.(`companion.secrandom.${stage}`, data);
     log("install.begin", { targetIds, candidates: selected.map((candidate) => ({ id: candidate.id, executablePath: candidate.executablePath, rootPath: candidate.rootPath, dataRoot: candidate.dataRoot, pluginPackagesPath: candidate.pluginPackagesPath, pluginPackagesPaths: candidate.pluginPackagesPaths, version: candidate.version, installedPluginVersion: candidate.installedPluginVersion, isRunning: candidate.isRunning, pid: candidate.pid })) });
     const packageData = await downloadLatestSecRandomPlugin(this.fetcher, this.options.now || Date.now, (phase, message) => report(phase, message));
@@ -634,12 +642,12 @@ export class SecRandomInstaller {
       const key = normalizePath(candidate.dataRoot, this.platform);
       groups.set(key, [...(groups.get(key) || []), candidate]);
     }
-    const restart = this.options.restartProcess || ((executablePath: string, args: string[]) => executor
-      ? executor.startProcess(executablePath, args, (stage, data) => log(stage, data))
-      : startCompanionProcess(executablePath, args, this.platform, (stage, data) => log(stage, data)));
+    const restart = this.options.restartProcess || ((executablePath: string, args: string[]) =>
+      startCompanionProcessWithSameElevation(executablePath, args, this.platform, (stage, data) => log(stage, data)));
     const isRunning = this.options.isProcessRunning || ((pid: number) => executor ? executor.isProcessRunning(pid, (stage, data) => log(stage, data)) : defaultIsProcessRunning(pid));
     const requestClose = this.options.requestGracefulClose || ((pid: number) => executor ? executor.requestGracefulClose(pid, (stage, data) => log(stage, data)) : defaultRequestGracefulClose(pid, this.platform, this.commandRunner));
     const forceTerminate = this.options.forceTerminateProcess || ((pid: number) => executor ? executor.forceTerminate(pid, (stage, data) => log(stage, data)) : defaultForceTerminate(pid, this.platform, this.commandRunner));
+    const gracefulCloseTimeoutMs = this.options.gracefulCloseTimeoutMs ?? 2_000;
     const exists = this.options.exists || defaultExists;
     const readFile = this.options.readFile || defaultReadFile;
     const installPackage = this.options.installPackage || ((destinationPath: string, bytes: Buffer, spec: CompanionPackageSpec) =>
@@ -658,9 +666,9 @@ export class SecRandomInstaller {
         let exited = false;
         log("process.close.begin", { pid: candidate.pid, executablePath: candidate.executablePath });
         try {
-          await requestClose(candidate.pid!);
-          exited = await waitForProcessExit(candidate.pid!, isRunning, this.options.waitForExitTimeoutMs, this.options.waitForExitPollMs);
-          log("process.close.result", { pid: candidate.pid, exited, method: "graceful" });
+          const closeAccepted = (await requestClose(candidate.pid!)) !== false;
+          exited = closeAccepted && await waitForProcessExit(candidate.pid!, isRunning, gracefulCloseTimeoutMs, this.options.waitForExitPollMs);
+          log("process.close.result", { pid: candidate.pid, accepted: closeAccepted, exited, method: "graceful" });
         } catch (error) {
           log("process.close.failed", { pid: candidate.pid, method: "graceful", error: error instanceof Error ? error.message : String(error) });
         }
@@ -696,6 +704,7 @@ export class SecRandomInstaller {
         let launchFailed = false;
         try { await restart(launchCandidate.executablePath, launchCandidate.launchArgs); log("process.restart.success", { executablePath: launchCandidate.executablePath }); }
         catch (error) { launchFailed = true; log("process.restart.failed", { executablePath: launchCandidate.executablePath, error: error instanceof Error ? error.message : String(error) }); }
+        if (!launchFailed) report("verifying", "正在确认 SecRandom 插件已加载", 94);
         const writtenVersion = installedPluginVersion(dataRoot, this.platform, exists, readFile);
         const verifiedVersion = launchFailed ? undefined : await waitForInstalledPlugin(
           () => installedPluginVersion(dataRoot, this.platform, exists, readFile),

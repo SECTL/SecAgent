@@ -408,9 +408,8 @@ html.wake-mode, html.wake-mode body, body.wake-mode { min-width: 0; overflow: hi
 @keyframes oobe-plugin-detection-spin { to { transform: rotate(360deg); } }
 .oobe-plugin-list { max-width: 760px; margin: 0 auto 22px; }
 .oobe-plugin-list h2 { margin: 0 0 10px; font-size: 15px; }
-.oobe-plugin-card { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; position: relative; overflow: hidden; border-radius: 0; box-shadow: none; }
-.oobe-plugin-card::before { content: ""; position: absolute; z-index: 0; top: 0; bottom: 0; left: -38%; width: 38%; pointer-events: none; background: linear-gradient(90deg, transparent, rgba(35,137,236,.16), rgba(35,137,236,.28)); }
-.oobe-plugin-card.is-installing::before { animation: oobe-plugin-install-progress 1.15s ease-in-out infinite; }
+@property --oobe-plugin-progress { syntax: "<percentage>"; inherits: false; initial-value: 0%; }
+.oobe-plugin-card { --oobe-plugin-progress: 0%; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; position: relative; overflow: hidden; border-radius: 0; box-shadow: none; background: linear-gradient(90deg, rgba(35,137,236,.15) 0 var(--oobe-plugin-progress), #fff var(--oobe-plugin-progress) 100%); transition: --oobe-plugin-progress 420ms cubic-bezier(.2, .8, .2, 1), background 420ms cubic-bezier(.2, .8, .2, 1); }
 .oobe-plugin-card > * { position: relative; z-index: 1; }
 .oobe-plugin-card:first-of-type { border-radius: 12px 12px 0 0; }
 .oobe-plugin-card:last-of-type { border-radius: 0 0 12px 12px; }
@@ -465,12 +464,11 @@ html.wake-mode, html.wake-mode body, body.wake-mode { min-width: 0; overflow: hi
 .oobe-progress-segment.is-active { background: #2389ec; transform: scaleY(1.15); }
 .oobe-plugins-reveal .oobe-plugin-card { animation: oobe-plugin-card-rise 480ms cubic-bezier(.2, .8, .2, 1) both; }
 @keyframes oobe-plugin-card-rise { from { opacity: 0; transform: translateY(22px); } to { opacity: 1; transform: translateY(0); } }
-@keyframes oobe-plugin-install-progress { from { left: -38%; } to { left: 100%; } }
 .oobe-plugin-state { color: #176b39; font-size: 13px; white-space: nowrap; }
 .oobe-actions { display: flex; justify-content: flex-end; gap: 8px; max-width: 760px; margin: 8px auto 0; }
 .primary-button:disabled { opacity: .55; cursor: not-allowed; }
 @media (max-width: 640px) { .oobe-plugin-heading { align-items: flex-start; flex-direction: column; } .oobe-plugin-side-actions { width: 100%; min-width: 0; margin-left: 54px; } .oobe-plugin-side-actions-single { justify-content: flex-start; } .oobe-plugin-side-action { grid-template-columns: 92px minmax(0, 1fr); justify-content: start; } .oobe-classisland-target-heading { align-items: flex-start; flex-direction: column; } }
-@media (prefers-reduced-motion: reduce) { .oobe-page, .oobe-page-exit.oobe-page-forward, .oobe-page-exit.oobe-page-back, .oobe-page-enter.oobe-page-forward, .oobe-page-enter.oobe-page-back, .oobe-plugin-card::before, .oobe-plugin-icon.has-plugin-icon .oobe-plugin-icon-app, .oobe-plugin-icon.has-plugin-icon .oobe-plugin-icon-plugin { animation: none; } .oobe-choice, .oobe-choice-arrow { transition-duration: 0ms; } }
+@media (prefers-reduced-motion: reduce) { .oobe-page, .oobe-page-exit.oobe-page-forward, .oobe-page-exit.oobe-page-back, .oobe-plugin-icon.has-plugin-icon .oobe-plugin-icon-app, .oobe-plugin-icon.has-plugin-icon .oobe-plugin-icon-plugin { animation: none; } .oobe-choice, .oobe-choice-arrow, .oobe-plugin-card { transition-duration: 0ms; } }
 .official-balance-groups { display: flex; flex-direction: column; gap: 4px; min-width: 210px; }
 .diagnostic-upload-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--line, #e4e8ed); }
 .diagnostic-upload-controls { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }

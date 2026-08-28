@@ -9,11 +9,12 @@ import AdmZip from "adm-zip";
 type SupportedPlatform = NodeJS.Platform;
 export type CompanionLogger = (stage: string, data?: unknown) => void;
 const execFileAsync = promisify(execFile);
+let windowsElevationPromise: Promise<boolean | undefined> | undefined;
 
 export interface CompanionExecutor {
   writePackage(filePath: string, bytes: Buffer, logger?: CompanionLogger): Promise<string>;
   installPackage(destinationPath: string, bytes: Buffer, spec: CompanionPackageSpec, logger?: CompanionLogger): Promise<string>;
-  requestGracefulClose(pid: number, logger?: CompanionLogger): Promise<void>;
+  requestGracefulClose(pid: number, logger?: CompanionLogger): Promise<boolean>;
   forceTerminate(pid: number, logger?: CompanionLogger): Promise<void>;
   isProcessRunning(pid: number, logger?: CompanionLogger): Promise<boolean>;
   startProcess(executablePath: string, args: string[], logger?: CompanionLogger): Promise<void>;
@@ -52,6 +53,43 @@ function compactProcessError(error: unknown): string {
   const safeMessage = message.startsWith("Command failed:") ? "PowerShell 命令执行失败" : message;
   const text = detail && !safeMessage.includes(detail) ? `${safeMessage}: ${detail}` : safeMessage;
   return text.slice(0, 2_000);
+}
+
+/**
+ * Returns the elevation state of the current Electron process. The result is
+ * cached because the token cannot change while this process is running. An
+ * unknown result is deliberately kept distinct from false: a restart must
+ * never silently downgrade an administrator-launched SecAgent process.
+ */
+export async function getWindowsProcessElevation(logger?: CompanionLogger): Promise<boolean | undefined> {
+  if (process.platform !== "win32") return false;
+  if (!windowsElevationPromise) {
+    const command = [
+      "$identity = [Security.Principal.WindowsIdentity]::GetCurrent()",
+      "$principal = New-Object Security.Principal.WindowsPrincipal($identity)",
+      "$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)"
+    ].join(";\n");
+    windowsElevationPromise = execFileAsync("powershell.exe", [
+      "-NoProfile", "-NoLogo", "-NonInteractive", "-WindowStyle", "Hidden",
+      "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodePowerShell(command)
+    ], { encoding: "utf8", windowsHide: true, maxBuffer: 2 * 1024 * 1024 })
+      .then((result) => {
+        const match = result.stdout.trim().match(/(true|false)\s*$/i);
+        if (!match) throw new Error("无法解析当前进程权限状态");
+        const elevated = match[1].toLowerCase() === "true";
+        writeLog(logger, "process.elevation.detected", { elevated });
+        return elevated;
+      })
+      .catch((error) => {
+        writeLog(logger, "process.elevation.failed", { error: compactProcessError(error) });
+        return undefined;
+      });
+  }
+  return windowsElevationPromise;
+}
+
+export async function isWindowsProcessElevated(logger?: CompanionLogger): Promise<boolean> {
+  return (await getWindowsProcessElevation(logger)) === true;
 }
 
 function isPathInside(candidate: string, root: string, platform: SupportedPlatform): boolean {
@@ -450,8 +488,9 @@ export class WindowsCompanionExecutor implements CompanionExecutor {
     }
   }
 
-  async requestGracefulClose(pid: number, logger?: CompanionLogger): Promise<void> {
-    await this.request("close", { pid }, logger);
+  async requestGracefulClose(pid: number, logger?: CompanionLogger): Promise<boolean> {
+    const response = await this.request("close", { pid }, logger);
+    return response.accepted !== false;
   }
 
   async forceTerminate(pid: number, logger?: CompanionLogger): Promise<void> {
@@ -503,8 +542,10 @@ async function writeWithWindowsUac(filePath: string, bytes: Buffer, logger?: Com
  */
 export async function writeCompanionPackage(filePath: string, bytes: Buffer, platform: SupportedPlatform = process.platform, logger?: CompanionLogger): Promise<string> {
   writeLog(logger, "package.write.begin", { filePath, bytes: bytes.length, platform });
-  if (platform === "win32" && likelyProtectedWindowsPath(filePath))
+  if (platform === "win32" && likelyProtectedWindowsPath(filePath)) {
+    if (await isWindowsProcessElevated(logger)) return writeDirect(filePath, bytes, platform, logger);
     return writeWithWindowsUac(filePath, bytes, logger);
+  }
 
   try {
     return writeDirect(filePath, bytes, platform, logger);
@@ -513,6 +554,7 @@ export async function writeCompanionPackage(filePath: string, bytes: Buffer, pla
     writeLog(logger, "package.write.failed", { filePath, errorCode, error: error instanceof Error ? error.message : String(error) });
     if (platform !== "win32" || !["EACCES", "EPERM"].includes(errorCode))
       throw error;
+    if (await isWindowsProcessElevated(logger)) return writeDirect(filePath, bytes, platform, logger);
     return writeWithWindowsUac(filePath, bytes, logger);
   }
 }
@@ -536,6 +578,7 @@ export async function installCompanionPackage(
   writeLog(logger, "package.install.begin", { destinationPath, pluginId: spec.pluginId, manifestFileName: spec.manifestFileName, bytes: bytes.length, platform });
   if (platform === "win32" && likelyProtectedWindowsPath(destinationPath)) {
     if (executor) return executor.installPackage(destinationPath, bytes, spec, logger);
+    if (await isWindowsProcessElevated(logger)) return installDirectPackage(destinationPath, bytes, spec, platform, logger);
     const elevated = new WindowsCompanionExecutor(logger);
     try { return await elevated.installPackage(destinationPath, bytes, spec, logger); }
     finally { await elevated.close(); }
@@ -546,6 +589,7 @@ export async function installCompanionPackage(
     const errorCode = error && typeof error === "object" && "code" in error ? String(error.code) : "";
     if (platform === "win32" && ["EACCES", "EPERM"].includes(errorCode)) {
       if (executor) return executor.installPackage(destinationPath, bytes, spec, logger);
+      if (await isWindowsProcessElevated(logger)) return installDirectPackage(destinationPath, bytes, spec, platform, logger);
       const elevated = new WindowsCompanionExecutor(logger);
       try { return await elevated.installPackage(destinationPath, bytes, spec, logger); }
       finally { await elevated.close(); }
@@ -555,13 +599,42 @@ export async function installCompanionPackage(
 }
 
 /**
- * Starts a companion host as the current user without invoking PowerShell or
- * another UAC prompt. The installer may still have used an elevated executor
- * to write the plugin files, but the host itself should keep its normal user
- * context and profile.
+ * Starts a companion host with the same elevation as the current SecAgent
+ * process. A normal SecAgent process uses the interactive shell broker so the
+ * companion remains a normal user process after the one installer UAC prompt;
+ * an administrator-launched SecAgent starts it directly and keeps the admin
+ * token. The PowerShell broker is hidden and never creates a console window.
  */
-export async function startCompanionProcessUnelevated(executablePath: string, args: string[], platform: SupportedPlatform = process.platform, logger?: CompanionLogger): Promise<void> {
-  writeLog(logger, "process.start.begin", { executablePath, args, platform, elevated: false });
+export async function startCompanionProcessWithSameElevation(executablePath: string, args: string[], platform: SupportedPlatform = process.platform, logger?: CompanionLogger): Promise<void> {
+  const elevation = platform === "win32" ? await getWindowsProcessElevation(logger) : false;
+  const elevated = elevation === true;
+  writeLog(logger, "process.start.begin", { executablePath, args, platform, elevated: elevation === undefined ? "unknown" : elevated });
+  if (platform === "win32" && elevation === false) {
+    // A normal SecAgent process must not elevate the companion or change its
+    // user profile. PowerShell is only the hidden COM bridge; no console
+    // window is created and no second UAC prompt is shown.
+    const workingDirectory = path.win32.dirname(executablePath);
+    const argumentList = args.map(quoteWindowsArgument).join(" ");
+    const command = [
+      "$ErrorActionPreference = 'Stop'",
+      "$shell = New-Object -ComObject Shell.Application",
+      `$shell.ShellExecute(${quotePowerShell(executablePath)}, ${quotePowerShell(argumentList)}, ${quotePowerShell(workingDirectory)}, 'open', 1)`
+    ].join(";\n");
+    try {
+      await execFileAsync("powershell.exe", ["-NoProfile", "-NoLogo", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodePowerShell(command)], {
+        encoding: "utf8",
+        windowsHide: true,
+        maxBuffer: 2 * 1024 * 1024
+      });
+      writeLog(logger, "process.start.success", { executablePath, args, workingDirectory, elevated: false, launchMode: "interactive-shell" });
+      return;
+    } catch (error) {
+      const message = compactProcessError(error);
+      writeLog(logger, "process.start.broker.failed", { executablePath, args, workingDirectory, error: message });
+      // A shell broker can be unavailable in a service/session-less context.
+      // Fall back to the direct hidden launch so manual installs still work.
+    }
+  }
   const { spawn } = await import("node:child_process");
   const workingDirectory = platform === "win32" ? path.win32.dirname(executablePath) : path.dirname(executablePath);
   await new Promise<void>((resolve, reject) => {
@@ -572,18 +645,27 @@ export async function startCompanionProcessUnelevated(executablePath: string, ar
       windowsHide: platform === "win32"
     });
     child.once("error", (error) => {
-      writeLog(logger, "process.start.failed", { executablePath, args, workingDirectory, elevated: false, error: error instanceof Error ? error.message : String(error) });
+      writeLog(logger, "process.start.failed", { executablePath, args, workingDirectory, elevated: elevation === undefined ? "unknown" : elevated, error: error instanceof Error ? error.message : String(error) });
       reject(error);
     });
     child.once("spawn", () => {
       child.unref();
-      writeLog(logger, "process.start.success", { executablePath, args, workingDirectory, elevated: false, ...(child.pid ? { pid: child.pid } : {}) });
+      writeLog(logger, "process.start.success", { executablePath, args, workingDirectory, elevated: elevation === undefined ? "unknown" : elevated, launchMode: elevated ? "same-process-token" : "direct-fallback", ...(child.pid ? { pid: child.pid } : {}) });
       resolve();
     });
     child.once("exit", (code, signal) => {
-      writeLog(logger, "process.exit", { executablePath, args, elevated: false, code, signal });
+      writeLog(logger, "process.exit", { executablePath, args, elevated: elevation === undefined ? "unknown" : elevated, code, signal });
     });
   });
+}
+
+/** @deprecated Kept for callers compiled against alpha.10; the implementation now preserves elevation. */
+export const startCompanionProcessUnelevated = startCompanionProcessWithSameElevation;
+
+function quoteWindowsArgument(value: string): string {
+  if (!value.length) return '""';
+  if (!/[\s"]/.test(value)) return value;
+  return `"${value.replace(/(\\*)"/g, "$1$1\\\"").replace(/(\\+)$/g, "$1$1")}"`;
 }
 
 /** Starts a companion host elevated so it can unpack into a protected install directory. */

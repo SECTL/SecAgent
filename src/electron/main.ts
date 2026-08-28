@@ -23,7 +23,7 @@ import { detectCompanionApps } from "../companion-apps.js";
 import { ClassIslandInstaller } from "../classisland.js";
 import { SecRandomInstaller } from "../secrandom.js";
 import { IccceInstaller } from "../iccce.js";
-import { WindowsCompanionExecutor } from "../companion-package.js";
+import { getWindowsProcessElevation, WindowsCompanionExecutor } from "../companion-package.js";
 import { SecAgentHttpServer } from "../secagent-http.js";
 import { Models } from "@opencode-ai/models";
 import { DEFAULT_WAKE_HOTKEY, normalizeWakeHotkey } from "../wake-hotkey.js";
@@ -186,6 +186,41 @@ function logMain(stage: string, data: unknown = {}): void {
   const line = JSON.stringify({ at: new Date().toISOString(), stage, data }) + "\n";
   fs.appendFileSync(path.join(logDir, "electron-main.jsonl"), line, "utf8");
   if (stage.startsWith("companion.")) fs.appendFileSync(path.join(logDir, "companion-install.jsonl"), line, "utf8");
+}
+
+async function createCompanionExecutor(): Promise<WindowsCompanionExecutor | undefined> {
+  if (process.platform !== "win32") return undefined;
+  const elevation = await getWindowsProcessElevation(logMain);
+  // An administrator-launched SecAgent already has permission to write the
+  // protected companion directories. Reusing that token avoids a second UAC
+  // worker and lets restarted companions keep the same privilege level.
+  if (elevation === true) {
+    logMain("companion.executor.same-token", { elevated: true });
+    return undefined;
+  }
+  const executor = new WindowsCompanionExecutor(logMain);
+  logMain("companion.executor.created", { elevated: elevation === false ? false : "unknown" });
+  return executor;
+}
+
+// A batch install and a manually clicked install can arrive through different
+// IPC calls. They must not close/restart the same companion concurrently: that
+// creates duplicate UAC workers, singleton dialogs and competing package scans.
+let companionInstallQueue: Promise<void> = Promise.resolve();
+function withCompanionInstallLock<T>(label: string, operation: () => Promise<T>): Promise<T> {
+  const queuedAt = Date.now();
+  logMain("companion.install.queue.wait", { label });
+  const run = companionInstallQueue.then(async () => {
+    const startedAt = Date.now();
+    logMain("companion.install.queue.begin", { label, waitMs: startedAt - queuedAt });
+    try {
+      return await operation();
+    } finally {
+      logMain("companion.install.queue.end", { label, durationMs: Date.now() - startedAt });
+    }
+  });
+  companionInstallQueue = run.then(() => undefined, () => undefined);
+  return run;
 }
 
 process.on("uncaughtException", (error) => {
@@ -921,7 +956,7 @@ ipcMain.handle("marketplace:install", async (_event, version: MarketplaceVersion
 ipcMain.handle("apps:detect", () => detectCompanionApps());
 ipcMain.handle("classisland:detect", async () => {
   const candidates = await classIslandInstaller.detect();
-  logMain("companion.classisland.detect", { candidates: candidates.map((candidate) => ({ id: candidate.id, executablePath: candidate.executablePath, dataRoot: candidate.dataRoot, pluginPackagesPath: candidate.pluginPackagesPath, version: candidate.version, installedPluginVersion: candidate.installedPluginVersion, pluginHealthy: candidate.pluginHealthy, isRunning: candidate.isRunning, compatible: candidate.compatible, source: candidate.source })) });
+  logMain("companion.classisland.detect", { candidates: candidates.map((candidate) => ({ id: candidate.id, executablePath: candidate.executablePath, dataRoot: candidate.dataRoot, pluginPackagesPath: candidate.pluginPackagesPath, version: candidate.version, installedPluginVersion: candidate.installedPluginVersion, pluginHealthy: candidate.pluginHealthy, isRunning: candidate.isRunning, pid: candidate.pid, processIds: candidate.processIds, compatible: candidate.compatible, source: candidate.source })) });
   return candidates;
 });
 ipcMain.handle("classisland:pick", async () => {
@@ -934,14 +969,16 @@ ipcMain.handle("classisland:pick", async () => {
 });
 ipcMain.handle("classisland:install", async (event, targetIds: unknown) => {
   if (!Array.isArray(targetIds) || targetIds.some((item) => typeof item !== "string")) throw new Error("ClassIsland 安装目标无效");
-  const executor = process.platform === "win32" ? new WindowsCompanionExecutor(logMain) : undefined;
-  try {
-    return await classIslandInstaller.install(targetIds, (progress) => {
-      if (!event.sender.isDestroyed()) event.sender.send("classisland:progress", progress);
-    }, executor);
-  } finally {
-    await executor?.close();
-  }
+  return withCompanionInstallLock("classisland", async () => {
+    const executor = await createCompanionExecutor();
+    try {
+      return await classIslandInstaller.install(targetIds, (progress) => {
+        if (!event.sender.isDestroyed()) event.sender.send("classisland:progress", progress);
+      }, executor);
+    } finally {
+      await executor?.close();
+    }
+  });
 });
 ipcMain.handle("secrandom:detect", async () => {
   const candidates = await secRandomInstaller.detect();
@@ -958,18 +995,20 @@ ipcMain.handle("secrandom:pick", async () => {
 });
 ipcMain.handle("secrandom:install", async (event, targetIds: unknown) => {
   if (!Array.isArray(targetIds) || targetIds.some((item) => typeof item !== "string")) throw new Error("SecRandom 安装目标无效");
-  const executor = process.platform === "win32" ? new WindowsCompanionExecutor(logMain) : undefined;
-  try {
-    return await secRandomInstaller.install(targetIds, (progress) => {
-      if (!event.sender.isDestroyed()) event.sender.send("secrandom:progress", progress);
-    }, executor);
-  } finally {
-    await executor?.close();
-  }
+  return withCompanionInstallLock("secrandom", async () => {
+    const executor = await createCompanionExecutor();
+    try {
+      return await secRandomInstaller.install(targetIds, (progress) => {
+        if (!event.sender.isDestroyed()) event.sender.send("secrandom:progress", progress);
+      }, executor);
+    } finally {
+      await executor?.close();
+    }
+  });
 });
 ipcMain.handle("iccce:detect", async () => {
   const candidates = await iccceInstaller.detect();
-  logMain("companion.iccce.detect", { candidates: candidates.map((candidate) => ({ id: candidate.id, executablePath: candidate.executablePath, pluginPackagesPath: candidate.pluginPackagesPath, pluginsPath: candidate.pluginsPath, version: candidate.version, installedPluginVersion: candidate.installedPluginVersion, isRunning: candidate.isRunning, compatible: candidate.compatible, source: candidate.source })) });
+  logMain("companion.iccce.detect", { candidates: candidates.map((candidate) => ({ id: candidate.id, executablePath: candidate.executablePath, rootPath: candidate.rootPath, pluginPackagesPath: candidate.pluginPackagesPath, pluginsPath: candidate.pluginsPath, version: candidate.version, installedPluginVersion: candidate.installedPluginVersion, pluginHealthy: candidate.pluginHealthy, isRunning: candidate.isRunning, compatible: candidate.compatible, source: candidate.source })) });
   return candidates;
 });
 ipcMain.handle("iccce:pick", async () => {
@@ -982,14 +1021,16 @@ ipcMain.handle("iccce:pick", async () => {
 });
 ipcMain.handle("iccce:install", async (event, targetIds: unknown) => {
   if (!Array.isArray(targetIds) || targetIds.some((item) => typeof item !== "string")) throw new Error("ICC-CE 安装目标无效");
-  const executor = process.platform === "win32" ? new WindowsCompanionExecutor(logMain) : undefined;
-  try {
-    return await iccceInstaller.install(targetIds, (progress) => {
-      if (!event.sender.isDestroyed()) event.sender.send("iccce:progress", progress);
-    }, executor);
-  } finally {
-    await executor?.close();
-  }
+  return withCompanionInstallLock("iccce", async () => {
+    const executor = await createCompanionExecutor();
+    try {
+      return await iccceInstaller.install(targetIds, (progress) => {
+        if (!event.sender.isDestroyed()) event.sender.send("iccce:progress", progress);
+      }, executor);
+    } finally {
+      await executor?.close();
+    }
+  });
 });
 ipcMain.handle("companions:install-all", async (event, payload: unknown) => {
   if (!payload || typeof payload !== "object") throw new Error("联动插件安装目标无效");
@@ -1012,30 +1053,41 @@ ipcMain.handle("companions:install-all", async (event, payload: unknown) => {
     action: "failed" as const,
     message: error instanceof Error ? error.message : String(error)
   }));
-  const executor = process.platform === "win32" ? new WindowsCompanionExecutor(logMain) : undefined;
-  logMain("companion.batch.begin", { classIslandIds, secRandomIds, iccceIds, elevatedExecutor: Boolean(executor) });
-  try {
-    let classIsland: unknown[] = [];
-    let secRandom: unknown[] = [];
-    let iccce: unknown[] = [];
-    if (classIslandIds.length) {
-      try { classIsland = await classIslandInstaller.install(classIslandIds, sendProgress("classisland:progress"), executor); }
-      catch (error) { logMain("companion.batch.classisland.failed", { error: error instanceof Error ? error.message : String(error) }); classIsland = failureResults(classIslandIds, error); }
+  return withCompanionInstallLock("batch", async () => {
+    const executor = await createCompanionExecutor();
+    logMain("companion.batch.begin", { classIslandIds, secRandomIds, iccceIds, elevatedExecutor: Boolean(executor) });
+    try {
+      let classIsland: unknown[] = [];
+      let secRandom: unknown[] = [];
+      let iccce: unknown[] = [];
+      if (classIslandIds.length) {
+        try { classIsland = await classIslandInstaller.install(classIslandIds, sendProgress("classisland:progress"), executor); }
+        catch (error) { logMain("companion.batch.classisland.failed", { error: error instanceof Error ? error.message : String(error) }); classIsland = failureResults(classIslandIds, error); }
+      }
+      if (secRandomIds.length) {
+        try { secRandom = await secRandomInstaller.install(secRandomIds, sendProgress("secrandom:progress"), executor); }
+        catch (error) { logMain("companion.batch.secrandom.failed", { error: error instanceof Error ? error.message : String(error) }); secRandom = failureResults(secRandomIds, error); }
+      }
+      if (iccceIds.length) {
+        try { iccce = await iccceInstaller.install(iccceIds, sendProgress("iccce:progress"), executor); }
+        catch (error) { logMain("companion.batch.iccce.failed", { error: error instanceof Error ? error.message : String(error) }); iccce = failureResults(iccceIds, error); }
+      }
+      const allResults = [...classIsland, ...secRandom, ...iccce];
+      const failed = allResults.filter((item) => !item || (item as { ok?: unknown }).ok !== true);
+      logMain(failed.length ? "companion.batch.completed-with-failures" : "companion.batch.success", {
+        classIsland: classIsland.length,
+        secRandom: secRandom.length,
+        iccce: iccce.length,
+        ok: allResults.length - failed.length,
+        failed: failed.length,
+        failedTargets: failed.map((item) => (item as { targetId?: unknown }).targetId).filter((item): item is string => typeof item === "string")
+      });
+      return { classIsland, secRandom, iccce };
+    } finally {
+      await executor?.close();
+      logMain("companion.batch.end", { classIslandIds, secRandomIds, iccceIds });
     }
-    if (secRandomIds.length) {
-      try { secRandom = await secRandomInstaller.install(secRandomIds, sendProgress("secrandom:progress"), executor); }
-      catch (error) { logMain("companion.batch.secrandom.failed", { error: error instanceof Error ? error.message : String(error) }); secRandom = failureResults(secRandomIds, error); }
-    }
-    if (iccceIds.length) {
-      try { iccce = await iccceInstaller.install(iccceIds, sendProgress("iccce:progress"), executor); }
-      catch (error) { logMain("companion.batch.iccce.failed", { error: error instanceof Error ? error.message : String(error) }); iccce = failureResults(iccceIds, error); }
-    }
-    logMain("companion.batch.success", { classIsland: classIsland.length, secRandom: secRandom.length, iccce: iccce.length });
-    return { classIsland, secRandom, iccce };
-  } finally {
-    await executor?.close();
-    logMain("companion.batch.end", { classIslandIds, secRandomIds, iccceIds });
-  }
+  });
 });
 ipcMain.handle("oobe:progress:get", () => readOobeProgress(DEFAULT_WORKSPACE));
 ipcMain.handle("oobe:progress:save", (_event, progress: OobeProgress) => {

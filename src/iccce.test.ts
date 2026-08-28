@@ -73,6 +73,7 @@ test("downloads ICC-CE icpx through ghproxy, verifies it, and restarts the selec
     const fetcher = async (input: string | URL): Promise<Response> => {
       const url = String(input);
       calls.push(url);
+      if (url === "http://127.0.0.1:18790/health") return new Response(JSON.stringify({ apiVersion: 1, name: "iccce", status: "ok" }), { status: 200 });
       if (url.includes("api.github.com")) return new Response(JSON.stringify({ tag_name: "v0.3.2", draft: false, prerelease: false, assets: [{ name: ICCCE_PLUGIN_ASSET_NAME, browser_download_url: "https://github.com/SECTL/ICC-CE-SecAgent-Plugin/releases/download/v0.3.2/ICC-CE.SecAgent.Plugin.icpx", size: bytes.length, digest: `sha256:${digest}` }] }), { status: 200 });
       return new Response(bytes, { status: 200 });
     };
@@ -96,8 +97,9 @@ test("downloads ICC-CE icpx through ghproxy, verifies it, and restarts the selec
     assert.match(result.message, /自动重启/);
     assert.equal(fs.existsSync(installedPath), true);
     assert.deepEqual(launches, [{ executablePath: exe, args: ["--profile", "classroom"] }]);
-    assert.equal(calls[0].startsWith(`${DEFAULT_MARKETPLACE_PROXY_URL}/https://api.github.com/`), true);
-    assert.equal(calls[1].startsWith(`${DEFAULT_MARKETPLACE_PROXY_URL}/https://github.com/`), true);
+    const marketplaceCalls = calls.filter((url) => url.includes("api.github.com") || url.includes("github.com/SECTL/ICC-CE-SecAgent-Plugin/releases/download"));
+    assert.equal(marketplaceCalls[0].startsWith(`${DEFAULT_MARKETPLACE_PROXY_URL}/https://api.github.com/`), true);
+    assert.equal(marketplaceCalls[1].startsWith(`${DEFAULT_MARKETPLACE_PROXY_URL}/https://github.com/`), true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
