@@ -16,5 +16,7 @@ models/
 !models/sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23/tokens.txt
 __pycache__/
 .chrome-icon-profile/
+.tmp/
 .tmp-icc-*/
+.claude-tmp-*
 secagent-ce-icon-generated.png
