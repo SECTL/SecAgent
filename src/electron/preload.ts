@@ -51,11 +51,19 @@ contextBridge.exposeInMainWorld("secagent", {
   detectIccceInstallations: () => ipcRenderer.invoke("iccce:detect"),
   pickIccceExecutable: () => ipcRenderer.invoke("iccce:pick"),
   installIccceCompanion: (targetIds: string[]) => ipcRenderer.invoke("iccce:install", targetIds),
-  installAllCompanions: (payload: { classIsland?: string[]; secRandom?: string[]; iccce?: string[] }) => ipcRenderer.invoke("companions:install-all", payload),
+  installAllCompanions: (payload: { classIsland?: string[]; secRandom?: string[]; iccce?: string[]; cw?: string[] }) => ipcRenderer.invoke("companions:install-all", payload),
   onIccceProgress: (listener: (progress: unknown) => void) => {
     const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
     ipcRenderer.on("iccce:progress", wrapped);
     return () => ipcRenderer.removeListener("iccce:progress", wrapped);
+  },
+  detectClassWidgetsInstallations: () => ipcRenderer.invoke("cw:detect"),
+  pickClassWidgetsExecutable: () => ipcRenderer.invoke("cw:pick"),
+  installClassWidgetsCompanion: (targetIds: string[]) => ipcRenderer.invoke("cw:install", targetIds),
+  onClassWidgetsProgress: (listener: (progress: unknown) => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
+    ipcRenderer.on("cw:progress", wrapped);
+    return () => ipcRenderer.removeListener("cw:progress", wrapped);
   },
   getOobeProgress: () => ipcRenderer.invoke("oobe:progress:get"),
   saveOobeProgress: (progress: unknown) => ipcRenderer.invoke("oobe:progress:save", progress),

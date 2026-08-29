@@ -35,6 +35,9 @@ interface SecRandomInstallProgress { phase: "downloading" | "verifying" | "insta
 interface IccceInstallCandidate { id: string; executablePath: string; rootPath: string; pluginPackagesPath: string; pluginsPath: string; version?: string; installedPluginVersion?: string; pluginHealthy?: boolean; packageType?: string; isRunning: boolean; pid?: number; launchArgs: string[]; source: string; compatible: boolean; reason?: string }
 interface IccceInstallResult { targetId: string; ok: boolean; action: "installed" | "already-installed" | "skipped" | "failed"; message: string; version?: string }
 interface IccceInstallProgress { phase: "downloading" | "verifying" | "installing" | "closing" | "restarting"; targetIds: string[]; percent?: number; message?: string }
+interface ClassWidgetsInstallCandidate { id: string; executablePath: string; rootPath: string; pluginsPath: string; version?: string; installedPluginVersion?: string; pluginHealthy?: boolean; isRunning: boolean; pid?: number; processIds?: number[]; launchArgs: string[]; source: string; compatible: boolean; reason?: string }
+interface ClassWidgetsInstallResult { targetId: string; ok: boolean; action: "installed" | "already-installed" | "skipped" | "failed"; message: string; version?: string }
+interface ClassWidgetsInstallProgress { phase: "downloading" | "verifying" | "installing" | "closing" | "restarting"; targetIds: string[]; percent?: number; message?: string }
 interface OobeProgress { step: "source" | "config" | "plugins"; source?: "official" | "custom"; provider?: Omit<ProviderConfig, "apiKey"> }
 interface Window {
   secagent: {
@@ -80,8 +83,12 @@ interface Window {
     detectIccceInstallations(): Promise<IccceInstallCandidate[]>;
     pickIccceExecutable(): Promise<IccceInstallCandidate | undefined>;
     installIccceCompanion(targetIds: string[]): Promise<IccceInstallResult[]>;
-    installAllCompanions(payload: { classIsland?: string[]; secRandom?: string[]; iccce?: string[] }): Promise<{ classIsland: ClassIslandInstallResult[]; secRandom: SecRandomInstallResult[]; iccce: IccceInstallResult[] }>;
+    installAllCompanions(payload: { classIsland?: string[]; secRandom?: string[]; iccce?: string[]; cw?: string[] }): Promise<{ classIsland: ClassIslandInstallResult[]; secRandom: SecRandomInstallResult[]; iccce: IccceInstallResult[]; cw: ClassWidgetsInstallResult[] }>;
     onIccceProgress(listener: (progress: IccceInstallProgress) => void): () => void;
+    detectClassWidgetsInstallations(): Promise<ClassWidgetsInstallCandidate[]>;
+    pickClassWidgetsExecutable(): Promise<ClassWidgetsInstallCandidate | undefined>;
+    installClassWidgetsCompanion(targetIds: string[]): Promise<ClassWidgetsInstallResult[]>;
+    onClassWidgetsProgress(listener: (progress: ClassWidgetsInstallProgress) => void): () => void;
     getOobeProgress(): Promise<OobeProgress | undefined>;
     saveOobeProgress(progress: OobeProgress): Promise<OobeProgress | undefined>;
     openExternal(url: string): Promise<{ ok: true }>;

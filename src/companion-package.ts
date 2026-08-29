@@ -149,7 +149,8 @@ function validateCompanionPackage(bytes: Buffer, spec: CompanionPackageSpec): Ad
     const parsed = JSON.parse(manifestText) as Record<string, unknown>;
     const readString = (...keys: string[]) => keys.map((key) => parsed[key]).find((value): value is string => typeof value === "string")?.trim();
     id = readString("Id", "id");
-    entranceAssembly = readString("EntranceAssembly", "entranceAssembly");
+    // CW2 plugins declare a Python entry script instead of a .NET assembly.
+    entranceAssembly = readString("EntranceAssembly", "entranceAssembly", "entry");
   } else {
     id = manifestValue(manifestText, "id");
     entranceAssembly = manifestValue(manifestText, "entranceAssembly");

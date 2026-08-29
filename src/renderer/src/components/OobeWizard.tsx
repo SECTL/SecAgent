@@ -27,6 +27,10 @@ function isIccceTargetReady(target: IccceInstallCandidate): boolean {
   return Boolean(target.installedPluginVersion && (!target.isRunning || target.pluginHealthy === true));
 }
 
+function isClassWidgetsTargetReady(target: ClassWidgetsInstallCandidate): boolean {
+  return Boolean(target.installedPluginVersion && (!target.isRunning || target.pluginHealthy === true));
+}
+
 function companionPluginStatus(
   appName: string,
   target: { installedPluginVersion?: string; isRunning: boolean; pluginHealthy?: boolean }
@@ -88,7 +92,7 @@ export function OobeWizard() {
   // keep its last progress position on the card.
   const saPercentRef = useRef<Record<string, number>>({});
   const [batchSecAgentTargets, setBatchSecAgentTargets] = useState<Record<string, boolean>>({});
-  const [batchCompanionTargets, setBatchCompanionTargets] = useState<{ classIsland?: string[]; secRandom?: string[]; iccce?: string[] }>({});
+  const [batchCompanionTargets, setBatchCompanionTargets] = useState<{ classIsland?: string[]; secRandom?: string[]; iccce?: string[]; cw?: string[] }>({});
   const [classIslandTargets, setClassIslandTargets] = useState<ClassIslandInstallCandidate[]>([]);
   const [classIslandSelectedIds, setClassIslandSelectedIds] = useState<string[]>([]);
   const [classIslandTargetsExpanded, setClassIslandTargetsExpanded] = useState(true);
@@ -107,6 +111,12 @@ export function OobeWizard() {
   const [iccceResults, setIccceResults] = useState<Record<string, IccceInstallResult>>({});
   const [icccePhase, setIcccePhase] = useState<IccceInstallProgress["phase"] | "idle">("idle");
   const [iccceProgressPercent, setIccceProgressPercent] = useState(0);
+  const [cwTargets, setCwTargets] = useState<ClassWidgetsInstallCandidate[]>([]);
+  const [cwSelectedIds, setCwSelectedIds] = useState<string[]>([]);
+  const [cwTargetsExpanded, setCwTargetsExpanded] = useState(true);
+  const [cwResults, setCwResults] = useState<Record<string, ClassWidgetsInstallResult>>({});
+  const [cwPhase, setCwPhase] = useState<ClassWidgetsInstallProgress["phase"] | "idle">("idle");
+  const [cwProgressPercent, setCwProgressPercent] = useState(0);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [progressReady, setProgressReady] = useState(false);
@@ -151,8 +161,9 @@ export function OobeWizard() {
       bridge.detectInstalledApps().catch(() => [] as DetectedCompanionApp[]),
       bridge.detectClassIslandInstallations().catch(() => [] as ClassIslandInstallCandidate[]),
       bridge.detectSecRandomInstallations().catch(() => [] as SecRandomInstallCandidate[]),
-      bridge.detectIccceInstallations().catch(() => [] as IccceInstallCandidate[])
-    ]).then(([detectedApps, classIslandTargets, secRandomTargets, iccceTargets]) => {
+      bridge.detectIccceInstallations().catch(() => [] as IccceInstallCandidate[]),
+      bridge.detectClassWidgetsInstallations().catch(() => [] as ClassWidgetsInstallCandidate[])
+    ]).then(([detectedApps, classIslandTargets, secRandomTargets, iccceTargets, cwTargets]) => {
       if (disposed) return;
       setApps(detectedApps);
       setClassIslandTargets(classIslandTargets);
@@ -183,6 +194,16 @@ export function OobeWizard() {
         const running = iccceTargets.filter((target) => target.compatible && target.isRunning).map((target) => target.id);
         if (running.length) return running;
         const compatible = iccceTargets.filter((target) => target.compatible);
+        return compatible.length === 1 ? [compatible[0].id] : [];
+      });
+      setCwTargets(cwTargets);
+      setCwTargetsExpanded(cwTargets.length !== 1);
+      setCwSelectedIds((current) => {
+        const validCurrent = current.filter((id) => cwTargets.some((target) => target.id === id && target.compatible));
+        if (validCurrent.length) return validCurrent;
+        const running = cwTargets.filter((target) => target.compatible && target.isRunning).map((target) => target.id);
+        if (running.length) return running;
+        const compatible = cwTargets.filter((target) => target.compatible);
         return compatible.length === 1 ? [compatible[0].id] : [];
       });
     }).finally(() => {
@@ -264,6 +285,17 @@ export function OobeWizard() {
       companionPercentRef.current["iccce-connector"] = progress.percent;
       setCompanionHighWater((current) => progress.percent! > (current["iccce-connector"] ?? 0)
         ? { ...current, "iccce-connector": progress.percent! }
+        : current);
+    }
+  }), [bridge]);
+
+  useEffect(() => bridge.onClassWidgetsProgress((progress) => {
+    if (progress?.phase) setCwPhase(progress.phase);
+    if (typeof progress?.percent === "number") {
+      setCwProgressPercent(progress.percent);
+      companionPercentRef.current["class-widgets"] = progress.percent;
+      setCompanionHighWater((current) => progress.percent! > (current["class-widgets"] ?? 0)
+        ? { ...current, "class-widgets": progress.percent! }
         : current);
     }
   }), [bridge]);
@@ -393,7 +425,9 @@ export function OobeWizard() {
         ? secRandomTargets.some((target) => secRandomSelectedIds.includes(target.id) && !isSecRandomTargetReady(target))
         : plugin.id === "iccce-connector"
           ? iccceTargets.some((target) => iccceSelectedIds.includes(target.id) && !isIccceTargetReady(target))
-          : false;
+          : plugin.id === "class-widgets"
+            ? cwTargets.some((target) => cwSelectedIds.includes(target.id) && !isClassWidgetsTargetReady(target))
+            : false;
     setInstallingId(plugin.id);
     setCardProgressHold((current) => {
       const next = { ...current };
@@ -477,12 +511,27 @@ export function OobeWizard() {
     }
   };
 
+  const pickClassWidgetsExecutable = async () => {
+    setError("");
+    try {
+      const candidate = await bridge.pickClassWidgetsExecutable();
+      if (!candidate) return;
+      setCwTargetsExpanded(true);
+      setCwTargets((current) => current.some((item) => item.id === candidate.id) ? current.map((item) => item.id === candidate.id ? candidate : item) : [...current, candidate]);
+      if (candidate.compatible) setCwSelectedIds((current) => current.includes(candidate.id) ? current : [...current, candidate.id]);
+      if (!candidate.compatible) setError(candidate.reason || "选择的 Class Widgets 版本不兼容");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
   const refreshCompanionTargets = async () => {
     try {
-      const [classIsland, secRandom, iccce] = await Promise.all([
+      const [classIsland, secRandom, iccce, cw] = await Promise.all([
         bridge.detectClassIslandInstallations(),
         bridge.detectSecRandomInstallations(),
-        bridge.detectIccceInstallations()
+        bridge.detectIccceInstallations(),
+        bridge.detectClassWidgetsInstallations()
       ]);
       const merge = <T extends { id: string }>(current: T[], refreshed: T[]): T[] => {
         if (!refreshed.length) return current;
@@ -492,6 +541,7 @@ export function OobeWizard() {
       setClassIslandTargets((current) => merge(current, classIsland));
       setSecRandomTargets((current) => merge(current, secRandom));
       setIccceTargets((current) => merge(current, iccce));
+      setCwTargets((current) => merge(current, cw));
     } catch {
       // The installation result is still useful if a companion is in the
       // middle of its own shutdown/startup transition.
@@ -659,21 +709,77 @@ export function OobeWizard() {
     }
   };
 
+  const installClassWidgetsPlugin = async (_market: MarketplacePlugin | undefined): Promise<boolean> => {
+    const selectedTargets = cwTargets.filter((target) => cwSelectedIds.includes(target.id));
+    if (!selectedTargets.length) {
+      setError("请先选择一个或多个 Class Widgets 安装目标");
+      return false;
+    }
+    if (selectedTargets.some((target) => !target.compatible)) {
+      setError("所选 Class Widgets 版本低于 2.0.0.0，无法安装联动插件");
+      return false;
+    }
+    const saHalfInstalled = plugins.some((plugin) => plugin.id === "class-widgets");
+    const holdValue = () => {
+      const percent = Math.max(10, companionPercentRef.current["class-widgets"] ?? 10);
+      return saHalfInstalled ? 50 + percent / 2 : percent;
+    };
+    setInstallingId("class-widgets:companion");
+    setCwPhase("downloading");
+    setCwProgressPercent(10);
+    setCompanionHighWater((current) => ({ ...current, "class-widgets": 10 }));
+    companionPercentRef.current["class-widgets"] = 10;
+    setCardProgressHold((current) => {
+      const next = { ...current };
+      delete next["class-widgets"];
+      return next;
+    });
+    setError("");
+    try {
+      const results = await bridge.installClassWidgetsCompanion(selectedTargets.map((target) => target.id));
+      setCwResults((current) => ({ ...current, ...Object.fromEntries(results.map((result) => [result.targetId, result])) }));
+      setCwTargets((current) => current.map((target) => {
+        const result = results.find((item) => item.targetId === target.id);
+        return result?.ok && result.version ? { ...target, installedPluginVersion: result.version } : target;
+      }));
+      await refreshCompanionTargets();
+      const failures = results.filter((result) => !result.ok);
+      if (failures.length) {
+        setCardProgressHold((current) => ({ ...current, "class-widgets": holdValue() }));
+        setError(failures.map((result) => result.message).join("；"));
+      } else {
+        setCardProgressHold((current) => ({ ...current, "class-widgets": 100 }));
+      }
+      return failures.length === 0;
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      setCardProgressHold((current) => ({ ...current, "class-widgets": holdValue() }));
+      return false;
+    } finally {
+      setInstallingId("");
+      setCwPhase("idle");
+      setCwProgressPercent(0);
+    }
+  };
+
   const installAllPlugins = async () => {
     if (!companionDetectionReady || installingId || allDetectedCompanionsInstalled) return;
     setError("");
     const tasks: Array<() => Promise<void>> = [];
-    const batchTargets: { classIsland?: string[]; secRandom?: string[]; iccce?: string[] } = {};
+    const batchTargets: { classIsland?: string[]; secRandom?: string[]; iccce?: string[]; cw?: string[] } = {};
     const batchSecAgentTargets: Record<string, boolean> = {};
     const classIslandMarket = marketPlugins.find((plugin) => plugin.id === "classisland-connector");
     const secRandomMarket = marketPlugins.find((plugin) => plugin.id === "secrandom");
     const iccceMarket = marketPlugins.find((plugin) => plugin.id === "iccce-connector");
+    const cwMarket = marketPlugins.find((plugin) => plugin.id === "class-widgets");
     const selectedClassIslandTargets = classIslandTargets.filter((target) => classIslandSelectedIds.includes(target.id));
     const selectedSecRandomTargets = secRandomTargets.filter((target) => secRandomSelectedIds.includes(target.id));
     const selectedIccceTargets = iccceTargets.filter((target) => iccceSelectedIds.includes(target.id));
+    const selectedCwTargets = cwTargets.filter((target) => cwSelectedIds.includes(target.id));
     const classIslandCompanionInstalled = selectedClassIslandTargets.length > 0 && selectedClassIslandTargets.every(isClassIslandTargetReady);
     const secRandomCompanionInstalled = selectedSecRandomTargets.length > 0 && selectedSecRandomTargets.every(isSecRandomTargetReady);
     const iccceCompanionInstalled = selectedIccceTargets.length > 0 && selectedIccceTargets.every(isIccceTargetReady);
+    const cwCompanionInstalled = selectedCwTargets.length > 0 && selectedCwTargets.every(isClassWidgetsTargetReady);
     const installSpecial = (app: DetectedCompanionApp | undefined, pluginId: string, market: MarketplacePlugin | undefined, targetIds: string[], companionInstalled: boolean) => {
       if (!app?.detected && !targetIds.length) return;
       if (!plugins.some((plugin) => plugin.id === pluginId)) batchSecAgentTargets[pluginId] = true;
@@ -684,14 +790,16 @@ export function OobeWizard() {
           if (pluginId === "classisland-connector") batchTargets.classIsland = targetIds;
           if (pluginId === "secrandom") batchTargets.secRandom = targetIds;
           if (pluginId === "iccce-connector") batchTargets.iccce = targetIds;
+          if (pluginId === "class-widgets") batchTargets.cw = targetIds;
         }
       });
     };
     installSpecial(apps.find((app) => app.pluginId === "classisland-connector"), "classisland-connector", classIslandMarket, classIslandSelectedIds, classIslandCompanionInstalled);
     installSpecial(apps.find((app) => app.pluginId === "secrandom"), "secrandom", secRandomMarket, secRandomSelectedIds, secRandomCompanionInstalled);
     installSpecial(apps.find((app) => app.pluginId === "iccce-connector"), "iccce-connector", iccceMarket, iccceSelectedIds, iccceCompanionInstalled);
+    installSpecial(apps.find((app) => app.pluginId === "class-widgets"), "class-widgets", cwMarket, cwSelectedIds, cwCompanionInstalled);
     for (const app of apps.filter((item) => item.detected)) {
-      if (app.pluginId === "classisland-connector" || app.pluginId === "secrandom" || app.pluginId === "iccce-connector") continue;
+      if (app.pluginId === "classisland-connector" || app.pluginId === "secrandom" || app.pluginId === "iccce-connector" || app.pluginId === "class-widgets") continue;
       if (plugins.some((plugin) => plugin.id === app.pluginId)) continue;
       batchSecAgentTargets[app.pluginId] = true;
       tasks.push(async () => { await installPlugin(marketPlugins.find((plugin) => plugin.id === app.pluginId)); });
@@ -713,15 +821,18 @@ export function OobeWizard() {
       setClassIslandProgressPercent(batchTargets.classIsland ? 10 : 0);
       setSecRandomProgressPercent(batchTargets.secRandom ? 10 : 0);
       setIccceProgressPercent(batchTargets.iccce ? 10 : 0);
+      setCwProgressPercent(batchTargets.cw ? 10 : 0);
       setCompanionHighWater((current) => ({
         ...current,
         ...(batchTargets.classIsland ? { "classisland-connector": 10 } : {}),
         ...(batchTargets.secRandom ? { "secrandom": 10 } : {}),
-        ...(batchTargets.iccce ? { "iccce-connector": 10 } : {})
+        ...(batchTargets.iccce ? { "iccce-connector": 10 } : {}),
+        ...(batchTargets.cw ? { "class-widgets": 10 } : {})
       }));
       setClassIslandPhase(batchTargets.classIsland ? "downloading" : "idle");
       setSecRandomPhase(batchTargets.secRandom ? "downloading" : "idle");
       setIcccePhase(batchTargets.iccce ? "downloading" : "idle");
+      setCwPhase(batchTargets.cw ? "downloading" : "idle");
       try {
         const result = await bridge.installAllCompanions(batchTargets);
         const applyResults = <T extends { targetId: string }>(
@@ -733,6 +844,7 @@ export function OobeWizard() {
         applyResults(result.classIsland, setClassIslandResults);
         applyResults(result.secRandom, setSecRandomResults);
         applyResults(result.iccce, setIccceResults);
+        applyResults(result.cw, setCwResults);
         setClassIslandTargets((current) => current.map((target) => {
           const item = result.classIsland.find((candidate) => candidate.targetId === target.id);
           return item?.ok && item.version ? { ...target, installedPluginVersion: item.version } : target;
@@ -745,8 +857,12 @@ export function OobeWizard() {
           const item = result.iccce.find((candidate) => candidate.targetId === target.id);
           return item?.ok && item.version ? { ...target, installedPluginVersion: item.version } : target;
         }));
+        setCwTargets((current) => current.map((target) => {
+          const item = result.cw.find((candidate) => candidate.targetId === target.id);
+          return item?.ok && item.version ? { ...target, installedPluginVersion: item.version } : target;
+        }));
         await refreshCompanionTargets();
-        const failures = [...result.classIsland, ...result.secRandom, ...result.iccce].filter((item) => !item.ok);
+        const failures = [...result.classIsland, ...result.secRandom, ...result.iccce, ...result.cw].filter((item) => !item.ok);
         if (failures.length) setError(failures.map((item) => item.message).join("；"));
         // Failed cards freeze at the last reported position alongside the
         // failure reasons; completed cards keep the full bar so the card
@@ -764,11 +880,12 @@ export function OobeWizard() {
         recordHold("classisland-connector", result.classIsland);
         recordHold("secrandom", result.secRandom);
         recordHold("iccce-connector", result.iccce);
+        recordHold("class-widgets", result.cw);
         if (Object.keys(holdUpdate).length) setCardProgressHold((current) => ({ ...current, ...holdUpdate }));
       } catch (reason) {
         setError(reason instanceof Error ? reason.message : String(reason));
         const holdUpdate: Record<string, number> = {};
-        const batchApps: Array<[string, string[] | undefined]> = [["classisland-connector", batchTargets.classIsland], ["secrandom", batchTargets.secRandom], ["iccce-connector", batchTargets.iccce]];
+        const batchApps: Array<[string, string[] | undefined]> = [["classisland-connector", batchTargets.classIsland], ["secrandom", batchTargets.secRandom], ["iccce-connector", batchTargets.iccce], ["class-widgets", batchTargets.cw]];
         for (const [pluginId, targetIds] of batchApps) {
           if (!targetIds?.length) continue;
           const percent = Math.max(10, companionPercentRef.current[pluginId] ?? 10);
@@ -782,6 +899,7 @@ export function OobeWizard() {
         setClassIslandPhase("idle");
         setSecRandomPhase("idle");
         setIcccePhase("idle");
+        setCwPhase("idle");
       }
     } finally {
       setBatchActive(false);
@@ -789,7 +907,7 @@ export function OobeWizard() {
     }
   };
 
-  const recommended = useMemo(() => apps.filter((app) => app.detected || app.pluginId === "classisland-connector" || app.pluginId === "secrandom" || app.pluginId === "iccce-connector"), [apps]);
+  const recommended = useMemo(() => apps.filter((app) => app.detected || app.pluginId === "classisland-connector" || app.pluginId === "secrandom" || app.pluginId === "iccce-connector" || app.pluginId === "class-widgets"), [apps]);
   const allDetectedCompanionsInstalled = useMemo(() => {
     const detectedApps = apps.filter((app) => app.detected);
     if (!detectedApps.length) return false;
@@ -811,9 +929,13 @@ export function OobeWizard() {
         const targets = iccceTargets.filter((target) => target.compatible);
         return targets.length > 0 && targets.every(isIccceTargetReady);
       }
+      if (app.pluginId === "class-widgets") {
+        const targets = cwTargets.filter((target) => target.compatible);
+        return targets.length > 0 && targets.every(isClassWidgetsTargetReady);
+      }
       return true;
     });
-  }, [apps, classIslandTargets, iccceTargets, plugins, secRandomTargets]);
+  }, [apps, classIslandTargets, iccceTargets, cwTargets, plugins, secRandomTargets]);
 
   if (!settings || !progressReady) return <main className="settings-shell oobe-shell has-window-title"><p>正在读取配置…</p></main>;
 
@@ -912,14 +1034,17 @@ export function OobeWizard() {
           const isClassIsland = app.pluginId === "classisland-connector";
           const isSecRandom = app.pluginId === "secrandom";
           const isIccce = app.pluginId === "iccce-connector";
+          const isClassWidgets = app.pluginId === "class-widgets";
           const batchCompanionInstalling = installingId === "companions:batch";
           const selectedClassIslandTargets = classIslandTargets.filter((target) => classIslandSelectedIds.includes(target.id));
           const selectedSecRandomTargets = secRandomTargets.filter((target) => secRandomSelectedIds.includes(target.id));
           const selectedIccceTargets = iccceTargets.filter((target) => iccceSelectedIds.includes(target.id));
+          const selectedCwTargets = cwTargets.filter((target) => cwSelectedIds.includes(target.id));
           const companionInstalling = installingId === `${app.pluginId}:companion` || (batchCompanionInstalling && (
             (isClassIsland && Boolean(batchCompanionTargets.classIsland?.length)) ||
             (isSecRandom && Boolean(batchCompanionTargets.secRandom?.length)) ||
-            (isIccce && Boolean(batchCompanionTargets.iccce?.length))
+            (isIccce && Boolean(batchCompanionTargets.iccce?.length)) ||
+            (isClassWidgets && Boolean(batchCompanionTargets.cw?.length))
           ));
           const saInstalling = installingId === app.pluginId;
           const classIslandInstalledTargetCount = selectedClassIslandTargets.filter(isClassIslandTargetReady).length;
@@ -934,8 +1059,12 @@ export function OobeWizard() {
            const iccceCompanionInstalled = selectedIccceTargets.length > 0 && selectedIccceTargets.every(isIccceTargetReady);
           const iccceCanInstall = selectedIccceTargets.length > 0 && selectedIccceTargets.every((target) => target.compatible) && !iccceCompanionInstalled;
           const icccePhaseLabel = icccePhase === "downloading" ? "下载中…" : icccePhase === "verifying" ? "等待插件响应…" : icccePhase === "installing" ? "写入中…" : icccePhase === "closing" ? "关闭中…" : icccePhase === "restarting" ? "启动中…" : "安装 ICC-CE 端插件";
-          const companionPhase = isClassIsland ? classIslandPhase : isSecRandom ? secRandomPhase : icccePhase;
-          const rawCompanionPercent = isClassIsland ? classIslandProgressPercent : isSecRandom ? secRandomProgressPercent : iccceProgressPercent;
+          const cwInstalledTargetCount = selectedCwTargets.filter(isClassWidgetsTargetReady).length;
+          const cwCompanionInstalled = selectedCwTargets.length > 0 && selectedCwTargets.every(isClassWidgetsTargetReady);
+          const cwCanInstall = selectedCwTargets.length > 0 && selectedCwTargets.every((target) => target.compatible) && !cwCompanionInstalled;
+          const cwPhaseLabel = cwPhase === "downloading" ? "下载中…" : cwPhase === "verifying" ? "等待插件响应…" : cwPhase === "installing" ? "写入中…" : cwPhase === "closing" ? "关闭中…" : cwPhase === "restarting" ? "启动中…" : "安装 Class Widgets 端插件";
+          const companionPhase = isClassIsland ? classIslandPhase : isSecRandom ? secRandomPhase : isIccce ? icccePhase : cwPhase;
+          const rawCompanionPercent = isClassIsland ? classIslandProgressPercent : isSecRandom ? secRandomProgressPercent : isIccce ? iccceProgressPercent : cwProgressPercent;
           const companionPercent = Math.max(rawCompanionPercent, companionHighWater[app.pluginId] ?? 0);
           const companionProgress = companionInstalling
             ? companionProgressForPhase(companionPhase, app.appName, companionPercent > 0 ? companionPercent : undefined)
@@ -946,12 +1075,14 @@ export function OobeWizard() {
               ? selectedSecRandomTargets.length > 0 && !secRandomCompanionInstalled
               : isIccce
                 ? selectedIccceTargets.length > 0 && !iccceCompanionInstalled
-                : false;
+                : isClassWidgets
+                  ? selectedCwTargets.length > 0 && !cwCompanionInstalled
+                  : false;
           // Dual-end cards reserve 0-50% of the background bar for the
           // SecAgent connector and 50-100% for the companion plugin, so the
           // bar advances monotonically across both halves. Single-side
           // plugins use the full card background.
-          const dualEnd = isClassIsland || isSecRandom || isIccce;
+          const dualEnd = isClassIsland || isSecRandom || isIccce || isClassWidgets;
           const saProgressValue = saProgress[app.pluginId] || 10;
           const saHalfOnHalf = dualEnd && companionPending;
           const saHalfPresent = Boolean(installed) || Boolean(batchSecAgentTargets[app.pluginId]);
@@ -977,7 +1108,7 @@ export function OobeWizard() {
             animationDelay: `${index * 70}ms`,
             ...(overallProgress !== undefined ? { "--oobe-plugin-progress": `${overallProgress}%` } : {})
           } as CSSProperties;
-          return <article className={`settings-card oobe-plugin-card${isClassIsland ? " oobe-plugin-card-classisland" : isSecRandom ? " oobe-plugin-card-secrandom" : isIccce ? " oobe-plugin-card-iccce" : ""}${cardBusy ? " is-installing" : ""}`} aria-busy={cardBusy} style={cardStyle} key={app.pluginId}>
+          return <article className={`settings-card oobe-plugin-card${isClassIsland ? " oobe-plugin-card-classisland" : isSecRandom ? " oobe-plugin-card-secrandom" : isIccce ? " oobe-plugin-card-iccce" : isClassWidgets ? " oobe-plugin-card-classwidgets" : ""}${cardBusy ? " is-installing" : ""}`} aria-busy={cardBusy} style={cardStyle} key={app.pluginId}>
             <div className="oobe-plugin-main">
               <span className={`oobe-plugin-icon${installed?.icon ? " has-plugin-icon" : ""}`} aria-hidden="true">
                 <img className="oobe-plugin-icon-app" src={app.icon} alt="" />
@@ -985,10 +1116,10 @@ export function OobeWizard() {
               </span>
               <div className="oobe-plugin-copy">
                 <strong>{app.appName}</strong>
-                <span>{isClassIsland ? `${classIslandTargets.length ? app.description : "未自动找到安装目录，可手动选择"} · 需要配置两端插件` : isSecRandom ? `${secRandomTargets.length ? app.description : "未自动找到安装目录，可手动选择"} · 需要配置两端插件` : isIccce ? `${iccceTargets.length ? app.description : "未自动找到安装目录，可手动选择"} · 需要配置两端插件` : `${app.description} · 已在本机找到`}</span>
+                <span>{isClassIsland ? `${classIslandTargets.length ? app.description : "未自动找到安装目录，可手动选择"} · 需要配置两端插件` : isSecRandom ? `${secRandomTargets.length ? app.description : "未自动找到安装目录，可手动选择"} · 需要配置两端插件` : isIccce ? `${iccceTargets.length ? app.description : "未自动找到安装目录，可手动选择"} · 需要配置两端插件` : isClassWidgets ? `${cwTargets.length ? app.description : "未自动找到安装目录，可手动选择"} · 需要配置两端插件` : `${app.description} · 已在本机找到`}</span>
               </div>
             </div>
-            {(isClassIsland || isSecRandom || isIccce) ? <div className="oobe-plugin-side-actions oobe-plugin-side-actions-dual">
+            {(isClassIsland || isSecRandom || isIccce || isClassWidgets) ? <div className="oobe-plugin-side-actions oobe-plugin-side-actions-dual">
               <div className="oobe-plugin-side-action">
                 <span className="oobe-plugin-side-label">SecAgent 端</span>
                 {installed ? <span className="oobe-plugin-side-state is-installed" aria-label={`SecAgent 端已安装 v${installed.version}`} title={`SecAgent 端已安装 v${installed.version}`}><Check aria-hidden="true" size={17} strokeWidth={2.5} />已安装{installed.version ? ` v${installed.version}` : ""}</span> : market && version ? <button className="primary-button" type="button" disabled={installing} onClick={() => void installPlugin(market)}>{saInstalling ? "安装中…" : "安装 SecAgent 端插件"}</button> : <span className="oobe-plugin-side-state is-unavailable">{market?.releaseError ? "暂不可用" : "暂无可用版本"}</span>}
@@ -997,7 +1128,8 @@ export function OobeWizard() {
                 <span className="oobe-plugin-side-label">{app.appName} 端</span>
                 {isClassIsland ? classIslandCompanionInstalled ? <span className="oobe-plugin-side-state is-installed" aria-label={`ClassIsland 端已安装 ${classIslandInstalledTargetCount}/${selectedClassIslandTargets.length}`}><Check aria-hidden="true" size={17} strokeWidth={2.5} />已安装 {classIslandInstalledTargetCount}/{selectedClassIslandTargets.length}</span> : !selectedClassIslandTargets.length ? <span className="oobe-plugin-side-state is-unavailable">未选择安装目标</span> : <button className="primary-button" type="button" disabled={installing || !classIslandCanInstall} onClick={() => void installClassIslandPlugin(market)}>{companionInstalling ? classIslandPhaseLabel : classIslandInstalledTargetCount ? "安装剩余 ClassIsland 端插件" : "安装 ClassIsland 端插件"}</button>
                   : isSecRandom ? secRandomCompanionInstalled ? <span className="oobe-plugin-side-state is-installed" aria-label={`SecRandom 端已安装 ${secRandomInstalledTargetCount}/${selectedSecRandomTargets.length}`}><Check aria-hidden="true" size={17} strokeWidth={2.5} />已安装 {secRandomInstalledTargetCount}/{selectedSecRandomTargets.length}</span> : !selectedSecRandomTargets.length ? <span className="oobe-plugin-side-state is-unavailable">未选择安装目标</span> : <button className="primary-button" type="button" disabled={installing || !secRandomCanInstall} onClick={() => void installSecRandomPlugin(market)}>{companionInstalling ? secRandomPhaseLabel : secRandomInstalledTargetCount ? "安装剩余 SecRandom 端插件" : "安装 SecRandom 端插件"}</button>
-                    : iccceCompanionInstalled ? <span className="oobe-plugin-side-state is-installed" aria-label={`ICC-CE 端已安装 ${iccceInstalledTargetCount}/${selectedIccceTargets.length}`}><Check aria-hidden="true" size={17} strokeWidth={2.5} />已安装 {iccceInstalledTargetCount}/{selectedIccceTargets.length}</span> : !selectedIccceTargets.length ? <span className="oobe-plugin-side-state is-unavailable">未选择安装目标</span> : <button className="primary-button" type="button" disabled={installing || !iccceCanInstall} onClick={() => void installIcccePlugin(market)}>{companionInstalling ? icccePhaseLabel : iccceInstalledTargetCount ? "安装剩余 ICC-CE 端插件" : "安装 ICC-CE 端插件"}</button>}
+                    : isIccce ? (iccceCompanionInstalled ? <span className="oobe-plugin-side-state is-installed" aria-label={`ICC-CE 端已安装 ${iccceInstalledTargetCount}/${selectedIccceTargets.length}`}><Check aria-hidden="true" size={17} strokeWidth={2.5} />已安装 {iccceInstalledTargetCount}/{selectedIccceTargets.length}</span> : !selectedIccceTargets.length ? <span className="oobe-plugin-side-state is-unavailable">未选择安装目标</span> : <button className="primary-button" type="button" disabled={installing || !iccceCanInstall} onClick={() => void installIcccePlugin(market)}>{companionInstalling ? icccePhaseLabel : iccceInstalledTargetCount ? "安装剩余 ICC-CE 端插件" : "安装 ICC-CE 端插件"}</button>)
+                      : cwCompanionInstalled ? <span className="oobe-plugin-side-state is-installed" aria-label={`Class Widgets 端已安装 ${cwInstalledTargetCount}/${selectedCwTargets.length}`}><Check aria-hidden="true" size={17} strokeWidth={2.5} />已安装 {cwInstalledTargetCount}/{selectedCwTargets.length}</span> : !selectedCwTargets.length ? <span className="oobe-plugin-side-state is-unavailable">未选择安装目标</span> : <button className="primary-button" type="button" disabled={installing || !cwCanInstall} onClick={() => void installClassWidgetsPlugin(market)}>{companionInstalling ? cwPhaseLabel : cwInstalledTargetCount ? "安装剩余 Class Widgets 端插件" : "安装 Class Widgets 端插件"}</button>}
               </div>
             </div> : <div className="oobe-plugin-side-actions oobe-plugin-side-actions-single">
               <span className="oobe-plugin-side-label">SecAgent 端</span>
@@ -1047,6 +1179,22 @@ export function OobeWizard() {
                   return <label className={`oobe-classisland-target${target.compatible ? "" : " is-incompatible"}`} key={target.id}>
                     <input type="checkbox" checked={iccceSelectedIds.includes(target.id)} disabled={!target.compatible || installing} onChange={() => setIccceSelectedIds((current) => current.includes(target.id) ? current.filter((id) => id !== target.id) : [...current, target.id])} />
                     <span><strong>ICC-CE {target.version ? `v${target.version}` : "版本未知"}{target.isRunning ? " · 正在运行" : ""}</strong><small>{target.executablePath} · {companionPluginStatus("ICC-CE", target)}</small>{!target.compatible && <em>{target.reason}</em>}{result && <em className={result.ok ? "is-success" : "is-error"}>{result.message}</em>}</span>
+                  </label>;
+                })}
+              </div>}
+            </div>}
+            {isClassWidgets && <div className="oobe-classisland-targets">
+              <div className="oobe-classisland-target-heading">
+                <button className="oobe-target-toggle" type="button" disabled={installing} aria-expanded={cwTargetsExpanded} aria-controls="oobe-cw-target-list" onClick={() => setCwTargetsExpanded((expanded) => !expanded)}><strong>选择 Class Widgets 安装目标</strong>{cwTargetsExpanded ? <ChevronDown aria-hidden="true" size={17} /> : <ChevronRight aria-hidden="true" size={17} />}</button>
+                {cwTargetsExpanded && <button className="secondary-button" type="button" disabled={installing} onClick={() => void pickClassWidgetsExecutable()}>选择 Class Widgets 可执行文件</button>}
+              </div>
+              {cwTargetsExpanded && <div id="oobe-cw-target-list">
+                {!cwTargets.length && <p className="empty-list">未找到 Class Widgets，可选择其可执行文件。</p>}
+                {cwTargets.map((target) => {
+                  const result = cwResults[target.id];
+                  return <label className={`oobe-classisland-target${target.compatible ? "" : " is-incompatible"}`} key={target.id}>
+                    <input type="checkbox" checked={cwSelectedIds.includes(target.id)} disabled={!target.compatible || installing} onChange={() => setCwSelectedIds((current) => current.includes(target.id) ? current.filter((id) => id !== target.id) : [...current, target.id])} />
+                    <span><strong>Class Widgets {target.version ? `v${target.version}` : "版本未知"}{target.isRunning ? " · 正在运行" : ""}</strong><small>{target.executablePath} · {companionPluginStatus("Class Widgets", target)}</small>{!target.compatible && <em>{target.reason}</em>}{result && <em className={result.ok ? "is-success" : "is-error"}>{result.message}</em>}</span>
                   </label>;
                 })}
               </div>}
