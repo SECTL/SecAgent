@@ -18,7 +18,22 @@ export interface CompanionExecutor {
   forceTerminate(pid: number, logger?: CompanionLogger): Promise<void>;
   isProcessRunning(pid: number, logger?: CompanionLogger): Promise<boolean>;
   startProcess(executablePath: string, args: string[], logger?: CompanionLogger): Promise<void>;
+  /** Lists host processes by executable name or installation root. Optional so
+   *  older executors keep working; callers fall back to a direct query. */
+  enumerateProcesses?(filter: HostProcessFilter, logger?: CompanionLogger): Promise<HostProcessInfo[]>;
   close(): Promise<void>;
+}
+
+export interface HostProcessFilter {
+  names: string[];
+  roots: string[];
+}
+
+export interface HostProcessInfo {
+  pid: number;
+  name?: string;
+  executablePath?: string;
+  commandLine?: string;
 }
 
 export interface CompanionPackageSpec {
@@ -215,7 +230,43 @@ function writeDirect(filePath: string, bytes: Buffer, platform: SupportedPlatfor
   }
 }
 
-const ELEVATED_WORKER_SCRIPT = String.raw`
+/**
+ * Shared PowerShell body that collects host processes into $matched. A process
+ * matches when its executable lives under one of $roots (installation root,
+ * including versioned subfolders like ClassIsland's app-2.1.1.1-0), or when its
+ * executable path is unreadable and its name equals one of $names. The
+ * name-only fallback is what makes elevated host processes visible to a
+ * non-elevated SecAgent: Win32_Process hides their ExecutablePath, so a
+ * path-based match alone would miss exactly the instances that must be closed
+ * before a plugin can be loaded.
+ * $roots and $names must be defined by the caller; $matched is the output.
+ *
+ * PowerShell variables are CASE-INSENSITIVE: `$root` and the worker script's
+ * `$Root` parameter are the same variable. Every local here is $enum-prefixed
+ * so nothing can clobber the worker's protocol paths — an early alpha shipped
+ * a `foreach ($root in $roots)` that silently redirected the worker's request
+ * loop into the ClassIsland install directory, leaving every later elevated
+ * operation to time out.
+ */
+const ENUMERATE_PROCESSES_PS = String.raw`
+$matched = @()
+foreach ($enumProcess in @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)) {
+  $enumExePath = [string]$enumProcess.ExecutablePath
+  $isMatch = $false
+  if ($enumExePath) {
+    foreach ($enumRoot in $roots) {
+      if ($enumExePath.Equals($enumRoot, [System.StringComparison]::OrdinalIgnoreCase) -or $enumExePath.StartsWith($enumRoot + '\', [System.StringComparison]::OrdinalIgnoreCase)) { $isMatch = $true; break }
+    }
+  } else {
+    $isMatch = $names -contains ([string]$enumProcess.Name)
+  }
+  if ($isMatch) {
+    $matched += @{ pid = [int]$enumProcess.ProcessId; name = [string]$enumProcess.Name; executablePath = $enumExePath; commandLine = [string]$enumProcess.CommandLine }
+  }
+}
+`;
+
+export const ELEVATED_WORKER_SCRIPT = String.raw`
 param([Parameter(Mandatory = $true)][string]$Root)
 $ErrorActionPreference = 'Stop'
 $readyPath = Join-Path $Root 'ready'
@@ -329,6 +380,12 @@ while ($true) {
           try { Get-Process -Id ([int]$body.data.pid) -ErrorAction Stop | Out-Null } catch { $running = $false }
           $response = @{ ok = $true; running = $running }
         }
+        'enumerate' {
+          $roots = @($body.data.roots | ForEach-Object { [string]$_ } | Where-Object { $_ })
+          $names = @($body.data.names | ForEach-Object { [string]$_ } | Where-Object { $_ })
+{{ENUMERATE_PROCESSES_PS}}
+          $response = @{ ok = $true; processes = $matched }
+        }
         'start' {
           $executablePath = [string]$body.data.executablePath
           $workingDirectory = [System.IO.Path]::GetDirectoryName($executablePath)
@@ -374,7 +431,23 @@ while ($true) {
   }
   Start-Sleep -Milliseconds 80
 }
-`;
+`.replace("{{ENUMERATE_PROCESSES_PS}}", () => ENUMERATE_PROCESSES_PS);
+
+/** Per-action response ceilings. write/install-package retry locked files for
+ *  up to ~45s inside the worker and start waits up to 12s for the spawned
+ *  process, so they get generous budgets; everything else answers in well
+ *  under a second, so a long wait there means the worker loop is gone. */
+const WORKER_ACTION_TIMEOUT_MS: Record<string, number> = {
+  write: 120_000,
+  "install-package": 120_000,
+  start: 30_000,
+  enumerate: 45_000,
+  close: 15_000,
+  terminate: 15_000,
+  "is-running": 15_000,
+  shutdown: 15_000
+};
+const WORKER_REQUEST_TIMEOUT_DEFAULT_MS = 30_000;
 
 function workerStartCommand(scriptPath: string, root: string): string {
   const scriptArgument = `-NoProfile -NoLogo -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "${scriptPath}" -Root "${root}"`;
@@ -392,6 +465,11 @@ export class WindowsCompanionExecutor implements CompanionExecutor {
   private readonly scriptPath: string;
   private workerStarted = false;
   private workerClosed = false;
+  /** Latched after one unanswered request: the worker loop is gone, so every
+   *  later operation fails instantly instead of stalling for its full
+   *  timeout. Cleared only by creating a new executor (one per batch). */
+  private workerBroken = false;
+  private workerBrokenReason?: string;
   private workerPid?: number;
 
   constructor(logger?: CompanionLogger) {
@@ -435,6 +513,11 @@ export class WindowsCompanionExecutor implements CompanionExecutor {
   }
 
   private async request(action: string, data: Record<string, unknown> = {}, logger?: CompanionLogger): Promise<Record<string, unknown>> {
+    if (this.workerBroken) {
+      const error = new Error(`提权执行器已失效（${this.workerBrokenReason}），已跳过 ${action}`);
+      writeLog(logger, "elevated.operation.skipped", { action, reason: this.workerBrokenReason });
+      throw error;
+    }
     await this.ensureStarted();
     const id = crypto.randomUUID();
     const requestPath = path.join(this.root, `request-${id}.json`);
@@ -444,7 +527,8 @@ export class WindowsCompanionExecutor implements CompanionExecutor {
     fs.writeFileSync(temporary, JSON.stringify({ id, action, data }), { encoding: "utf8", flag: "wx" });
     fs.renameSync(temporary, requestPath);
     try {
-      const deadline = Date.now() + 90_000;
+      const timeoutMs = WORKER_ACTION_TIMEOUT_MS[action] ?? WORKER_REQUEST_TIMEOUT_DEFAULT_MS;
+      const deadline = Date.now() + timeoutMs;
       while (true) {
         if (fs.existsSync(resultPath)) {
           const response = JSON.parse(fs.readFileSync(resultPath, "utf8")) as Record<string, unknown>;
@@ -453,7 +537,14 @@ export class WindowsCompanionExecutor implements CompanionExecutor {
           writeLog(logger, "elevated.operation.success", { action, id, response });
           return response;
         }
-        if (Date.now() >= deadline) throw new Error(`管理员权限操作超时：${action}`);
+        if (Date.now() >= deadline) {
+          // One unanswered request means the worker loop is gone (crashed,
+          // killed, or watching the wrong directory). Latch it so every later
+          // operation fails instantly instead of stalling again.
+          this.workerBroken = true;
+          this.workerBrokenReason = `操作 ${action} 超时`;
+          throw new Error(`管理员权限操作超时：${action}`);
+        }
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
     } catch (error) {
@@ -502,6 +593,22 @@ export class WindowsCompanionExecutor implements CompanionExecutor {
     return response.running === true;
   }
 
+  async enumerateProcesses(filter: HostProcessFilter, logger?: CompanionLogger): Promise<HostProcessInfo[]> {
+    const response = await this.request("enumerate", { names: filter.names, roots: filter.roots }, logger);
+    const processes = Array.isArray(response.processes) ? response.processes : [];
+    return processes.flatMap((item): HostProcessInfo[] => {
+      if (!item || typeof item !== "object") return [];
+      const record = item as Record<string, unknown>;
+      if (typeof record.pid !== "number") return [];
+      return [{
+        pid: record.pid,
+        ...(typeof record.name === "string" && record.name ? { name: record.name } : {}),
+        ...(typeof record.executablePath === "string" && record.executablePath ? { executablePath: record.executablePath } : {}),
+        ...(typeof record.commandLine === "string" && record.commandLine ? { commandLine: record.commandLine } : {})
+      }];
+    });
+  }
+
   async startProcess(executablePath: string, args: string[], logger?: CompanionLogger): Promise<void> {
     const response = await this.request("start", { executablePath, args }, logger);
     if (response.running === false) throw new Error("对方软件启动后立即退出，请检查软件本体日志");
@@ -516,6 +623,228 @@ export class WindowsCompanionExecutor implements CompanionExecutor {
     this.log("stop", { pid: this.workerPid });
     fs.rmSync(this.root, { recursive: true, force: true });
   }
+}
+
+type ProcessCommandRunner = (file: string, args: string[]) => Promise<{ stdout: string; stderr: string }>;
+
+function parseHostProcessList(stdout: string): HostProcessInfo[] {
+  if (!stdout.trim()) return [];
+  try {
+    const raw = JSON.parse(stdout) as unknown;
+    const items = Array.isArray(raw) ? raw : [raw];
+    return items.flatMap((item): HostProcessInfo[] => {
+      if (!item || typeof item !== "object") return [];
+      const record = item as Record<string, unknown>;
+      if (typeof record.pid !== "number") return [];
+      return [{
+        pid: record.pid,
+        ...(typeof record.name === "string" && record.name ? { name: record.name } : {}),
+        ...(typeof record.executablePath === "string" && record.executablePath ? { executablePath: record.executablePath } : {}),
+        ...(typeof record.commandLine === "string" && record.commandLine ? { commandLine: record.commandLine } : {})
+      }];
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Lists the processes belonging to a companion installation. Prefers the
+ * elevated worker: its admin token can read every process path, while a
+ * non-elevated query cannot see the ExecutablePath of an elevated host process
+ * — exactly the instances that dodge detection and keep single-instance
+ * mutexes held after a restart. The direct fallback still catches pathless
+ * processes by name.
+ */
+export async function enumerateHostProcesses(
+  filter: HostProcessFilter,
+  platform: SupportedPlatform = process.platform,
+  executor?: CompanionExecutor,
+  commandRunner?: ProcessCommandRunner,
+  logger?: CompanionLogger
+): Promise<HostProcessInfo[]> {
+  if (platform !== "win32") return [];
+  if (executor?.enumerateProcesses) {
+    try {
+      return await executor.enumerateProcesses(filter, logger);
+    } catch (error) {
+      writeLog(logger, "process.enumerate.elevated.failed", { ...filter, error: compactProcessError(error) });
+    }
+  }
+  if (!commandRunner) return [];
+  const script = [
+    `$roots = @(${filter.roots.map(quotePowerShell).join(", ")})`,
+    `$names = @(${filter.names.map(quotePowerShell).join(", ")})`,
+    ENUMERATE_PROCESSES_PS,
+    "$matched | ConvertTo-Json -Compress"
+  ].join("\n");
+  try {
+    const result = await commandRunner("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script]);
+    return parseHostProcessList(result.stdout);
+  } catch (error) {
+    writeLog(logger, "process.enumerate.direct.failed", { ...filter, error: compactProcessError(error) });
+    return [];
+  }
+}
+
+export interface CloseHostProcessesOptions {
+  hostLabel: string;
+  /** Pids that detection already attached to the installation. */
+  initialPids: number[];
+  filter: HostProcessFilter;
+  platform?: SupportedPlatform;
+  /** Process query used for every re-check; injects the elevated worker. */
+  listProcesses?: (filter: HostProcessFilter) => Promise<HostProcessInfo[]>;
+  isProcessRunning: (pid: number) => Promise<boolean>;
+  requestGracefulClose: (pid: number) => Promise<void | boolean>;
+  forceTerminate: (pid: number) => Promise<void>;
+  gracefulCloseTimeoutMs?: number;
+  waitForExitTimeoutMs?: number;
+  waitForExitPollMs?: number;
+  /** Consecutive empty re-checks required before the host counts as fully
+   *  closed. Watchdog-style hosts need a wider window. Default 2. */
+  quietChecks?: number;
+  /** Delay between re-checks, watching for a watchdog relaunch. Default 750ms. */
+  settlePollMs?: number;
+  /** Maximum kill rounds; each round closes everything currently found. Default 4. */
+  maxRounds?: number;
+  onProgress?: (message: string) => void;
+  logger?: CompanionLogger;
+}
+
+export interface CloseHostProcessesOutcome {
+  closedPids: number[];
+  remaining: HostProcessInfo[];
+  failed: boolean;
+  rounds: number;
+}
+
+/** ICC-CE runs a watchdog copy of its own executable (`--watchdog <pid> ...`)
+ *  that relaunches the main app ~2s after it disappears. */
+const HOST_WATCHDOG_MARKER = "--watchdog";
+
+function delayHostClose(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForHostProcessExit(pid: number, isRunning: (pid: number) => Promise<boolean>, timeoutMs: number, pollMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!(await isRunning(pid))) return true;
+    await delayHostClose(pollMs);
+  }
+  return !(await isRunning(pid));
+}
+
+/**
+ * Closes every process belonging to a companion installation, not just the pids
+ * detection happened to attach. Detection runs non-elevated, cannot enumerate
+ * elevated host processes (their Win32_Process ExecutablePath is null), and for
+ * ICC-CE/SecRandom keeps only one pid per candidate — so a detection-pid-only
+ * kill list leaves the real application (or its watchdog) alive, holding the
+ * single-instance mutex; anything restarted afterwards then blocks on a
+ * wait-mutex argument or dies on a singleton check, and the freshly written
+ * plugin is never loaded.
+ *
+ * The loop re-enumerates after every round so watchdog relaunches are killed
+ * too, until `quietChecks` consecutive re-checks come back empty. Processes
+ * flagged "--watchdog" on their command line are terminated first, before they
+ * can undo the round.
+ */
+export async function closeHostProcesses(options: CloseHostProcessesOptions): Promise<CloseHostProcessesOutcome> {
+  const log = (stage: string, data: unknown = {}) => writeLog(options.logger, stage, data);
+  const quietChecks = options.quietChecks ?? 2;
+  const settlePollMs = options.settlePollMs ?? 750;
+  const maxRounds = options.maxRounds ?? 4;
+  const gracefulCloseTimeoutMs = options.gracefulCloseTimeoutMs ?? 2_000;
+  const waitForExitTimeoutMs = options.waitForExitTimeoutMs ?? 10_000;
+  const waitForExitPollMs = options.waitForExitPollMs ?? 250;
+  const isWindows = (options.platform || process.platform) === "win32";
+  const initialPids = options.initialPids.filter((pid) => Number.isInteger(pid) && pid > 0);
+
+  const enumerate = async (): Promise<HostProcessInfo[]> => {
+    if (!isWindows || !options.listProcesses) return [];
+    try {
+      return await options.listProcesses(options.filter);
+    } catch (error) {
+      log("process.enumerate.failed", { error: error instanceof Error ? error.message : String(error) });
+      return [];
+    }
+  };
+  const isWatchdog = (process: HostProcessInfo) => Boolean(process.commandLine?.includes(HOST_WATCHDOG_MARKER));
+
+  const closeOne = async (pid: number): Promise<boolean> => {
+    options.onProgress?.(`正在关闭 ${options.hostLabel}（进程 ${pid}）`);
+    log("process.close.begin", { pid });
+    let exited = false;
+    try {
+      const closeAccepted = (await options.requestGracefulClose(pid)) !== false;
+      exited = closeAccepted && await waitForHostProcessExit(pid, options.isProcessRunning, gracefulCloseTimeoutMs, waitForExitPollMs);
+      log("process.close.result", { pid, accepted: closeAccepted, exited, method: "graceful" });
+    } catch (error) {
+      log("process.close.failed", { pid, method: "graceful", error: error instanceof Error ? error.message : String(error) });
+    }
+    if (!exited) {
+      options.onProgress?.(`${options.hostLabel} 未能优雅退出，正在强制结束进程 ${pid}`);
+      log("process.terminate.begin", { pid });
+      try {
+        await options.forceTerminate(pid);
+        exited = await waitForHostProcessExit(pid, options.isProcessRunning, waitForExitTimeoutMs, waitForExitPollMs);
+        log("process.terminate.result", { pid, exited });
+      } catch (error) {
+        log("process.terminate.failed", { pid, error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    return exited;
+  };
+
+  const enumerated = await enumerate();
+  log("process.enumerate.result", { ...options.filter, initialPids, processes: enumerated });
+
+  let known = enumerated;
+  let failed = false;
+  let quietCount = 0;
+  let rounds = 0;
+  const closedPids = new Set<number>();
+  while (rounds < maxRounds) {
+    // Detection pids that enumeration missed stay in the kill list as a safety
+    // net; a failing liveness probe must not silently drop them either.
+    const targets: HostProcessInfo[] = [...known];
+    for (const pid of initialPids) {
+      if (targets.some((item) => item.pid === pid)) continue;
+      try {
+        if (await options.isProcessRunning(pid)) targets.push({ pid });
+      } catch {
+        targets.push({ pid });
+      }
+    }
+    if (!targets.length) {
+      quietCount += 1;
+      if (quietCount >= quietChecks) break;
+    } else {
+      quietCount = 0;
+      rounds += 1;
+      targets.sort((left, right) => Number(isWatchdog(right)) - Number(isWatchdog(left)));
+      log("process.close.round", { round: rounds, targets });
+      for (const target of targets) {
+        if (await closeOne(target.pid)) closedPids.add(target.pid);
+        else { failed = true; break; }
+      }
+      if (failed) break;
+    }
+    // Give a surviving watchdog time to fire before the next check, so its
+    // relaunch is caught here instead of racing the package write or restart.
+    await delayHostClose(settlePollMs);
+    known = await enumerate();
+    log("process.settle.check", { round: rounds, quietCount, processes: known });
+  }
+
+  const remaining = await enumerate();
+  if (remaining.length) {
+    failed = true;
+    log("process.close.incomplete", { remaining, closedPids: [...closedPids] });
+  }
+  return { closedPids: [...closedPids], remaining, failed, rounds };
 }
 
 async function writeWithWindowsUac(filePath: string, bytes: Buffer, logger?: CompanionLogger): Promise<string> {

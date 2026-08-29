@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { SelectCombobox } from "./SelectCombobox.js";
 
 type Account = { id: string; name: string; email?: string; source?: string };
 type ClassInfo = { id: string; name: string; status?: string };
@@ -50,8 +51,8 @@ export function SecScoreSettingsPage({ pluginId, pageId }: { pluginId: string; p
     <article className="settings-card">
       <div className="card-heading"><div><strong>SecScore 账号</strong><span>默认账号来自 SecAgent 当前 SECTL OAuth 登录态。</span></div><button className="primary-button" type="button" onClick={() => void oauthLogin()} disabled={Boolean(busy)}>通过 OAuth 登录其它账号</button></div>
       <div className="form-grid">
-        <label>当前账号<select value={state.selectedAccountId} onChange={(event) => void selectAccount(event.target.value)} disabled={Boolean(busy)}><option value="">请选择账号</option>{state.accounts.map((account) => <option key={account.id} value={account.id}>{account.name}{account.email ? `（${account.email}）` : ""}</option>)}</select></label>
-        <label>当前班级<select value={state.selectedClassId} onChange={(event) => void selectClass(event.target.value)} disabled={Boolean(busy) || !state.selectedAccountId}><option value="">请选择班级</option>{state.classes.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+        <label>当前账号<SelectCombobox ariaLabel="当前账号" value={state.selectedAccountId} disabled={Boolean(busy)} options={[{ value: "", label: "请选择账号" }, ...state.accounts.map((account) => ({ value: account.id, label: `${account.name}${account.email ? `（${account.email}）` : ""}` }))]} onChange={(accountId) => void selectAccount(accountId)} /></label>
+        <label>当前班级<SelectCombobox ariaLabel="当前班级" value={state.selectedClassId} disabled={Boolean(busy) || !state.selectedAccountId} options={[{ value: "", label: "请选择班级" }, ...state.classes.map((item) => ({ value: item.id, label: item.name }))]} onChange={(classId) => void selectClass(classId)} /></label>
       </div>
       {!state.accounts.length && <p className="settings-help">当前没有可用的 SECTL session。请先登录 SecAgent 官方服务，或点击 OAuth 登录。</p>}
       {state.selectedAccountId && !state.classes.length && <p className="settings-help">该账号暂未加入任何班级。</p>}

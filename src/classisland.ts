@@ -4,8 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { installCompanionPackage, startCompanionProcessWithSameElevation, type CompanionExecutor, type CompanionLogger, type CompanionPackageSpec } from "./companion-package.js";
-import { DEFAULT_MARKETPLACE_PROXY_URL, marketplaceRequestUrls } from "./marketplace.js";
+import { closeHostProcesses, enumerateHostProcesses, installCompanionPackage, startCompanionProcessWithSameElevation, type CompanionExecutor, type CompanionLogger, type CompanionPackageSpec, type HostProcessFilter, type HostProcessInfo } from "./companion-package.js";
+import { DEFAULT_MARKETPLACE_PROXY_URL, describeDownloadAttempt, marketplaceRequestUrls, type DownloadAttemptLogger } from "./marketplace.js";
 
 export const CLASSISLAND_PLUGIN_REPOSITORY = "SECTL/ClassIsland-SecAgent-Plugin";
 export const CLASSISLAND_PLUGIN_ID = "classisland.secagent";
@@ -55,7 +55,7 @@ export interface ClassIslandInstallResult {
   version?: string;
 }
 
-export type ClassIslandInstallPhase = "downloading" | "verifying" | "installing" | "restarting";
+export type ClassIslandInstallPhase = "downloading" | "verifying" | "installing" | "closing" | "restarting";
 export interface ClassIslandInstallProgress {
   phase: ClassIslandInstallPhase;
   targetIds: string[];
@@ -89,11 +89,16 @@ export interface ClassIslandInstallerOptions extends ClassIslandDiscoveryOptions
   requestGracefulClose?: (pid: number) => Promise<void | boolean>;
   forceTerminateProcess?: (pid: number) => Promise<void>;
   isProcessRunning?: (pid: number) => Promise<boolean>;
+  /** Process query used while closing; defaults to the elevated worker when one
+   *  is available, so elevated host instances are visible to the kill list. */
+  listProcesses?: (filter: HostProcessFilter) => Promise<HostProcessInfo[]>;
   restartProcess?: (executablePath: string, args: string[]) => Promise<void>;
   /** Graceful close is only a brief opportunity; force termination follows. */
   gracefulCloseTimeoutMs?: number;
   waitForExitTimeoutMs?: number;
   waitForExitPollMs?: number;
+  /** Delay between post-kill re-checks for relaunched processes. */
+  closeSettlePollMs?: number;
   waitForPluginTimeoutMs?: number;
   waitForPluginPollMs?: number;
   installPackage?: (destinationPath: string, bytes: Buffer, spec: CompanionPackageSpec) => Promise<string> | string;
@@ -454,7 +459,9 @@ async function probeClassIslandPlugin(fetcher: Fetcher): Promise<boolean> {
   return (await probeClassIslandPluginDetailed(fetcher)).healthy;
 }
 
-async function waitForClassIslandHealth(fetcher: Fetcher, timeoutMs = 15_000, pollMs = 250): Promise<PluginHealthResult> {
+// A cold ClassIsland start takes ~12s on a slow machine before its plugin
+// health endpoint answers, so the wait must comfortably exceed that.
+async function waitForClassIslandHealth(fetcher: Fetcher, timeoutMs = 45_000, pollMs = 250): Promise<PluginHealthResult> {
   const deadline = Date.now() + timeoutMs;
   let last: PluginHealthResult = { healthy: false, reason: "健康检查服务未响应" };
   while (true) {
@@ -594,20 +601,35 @@ function isClassIslandPluginReady(candidate: ClassIslandInstallCandidate): boole
   return Boolean(candidate.installedPluginVersion && (!candidate.isRunning || candidate.pluginHealthy === true));
 }
 
-async function downloadLatestClassIslandPlugin(fetcher: Fetcher, now: () => number, onProgress?: (phase: ClassIslandInstallPhase, message?: string) => void): Promise<{ bytes: Buffer; version: string; sha256: string }> {
+async function downloadLatestClassIslandPlugin(fetcher: Fetcher, now: () => number, onProgress?: (phase: ClassIslandInstallPhase, message?: string) => void, onRoute?: DownloadAttemptLogger): Promise<{ bytes: Buffer; version: string; sha256: string }> {
   onProgress?.("downloading", "正在通过 ghproxy.sectl.cn 下载最新 ClassIsland 插件");
   let release: { tag_name?: unknown; draft?: unknown; prerelease?: unknown; assets?: unknown } | undefined;
   let lastError: unknown;
   for (const directUrl of [CLASSISLAND_RELEASE_API_URL]) {
-    for (const candidate of marketplaceRequestUrls(`${directUrl}?secagent_cache=${now()}`)) {
+    const metadataCandidates = marketplaceRequestUrls(`${directUrl}?secagent_cache=${now()}`);
+    for (let index = 0; index < metadataCandidates.length; index++) {
+      const candidate = metadataCandidates[index];
+      const startedAt = Date.now();
       try {
         const response = await fetcher(candidate, { signal: AbortSignal.timeout(12_000), headers: { Accept: "application/vnd.github+json", "User-Agent": "SecAgent" } });
-        if (!response.ok) { lastError = new Error(`HTTP ${response.status}`); continue; }
+        if (!response.ok) {
+          lastError = new Error(`HTTP ${response.status}`);
+          onRoute?.(describeDownloadAttempt("release-metadata", candidate, startedAt, { status: response.status, error: `HTTP ${response.status}` }, metadataCandidates.slice(index + 1)));
+          continue;
+        }
         const payload = await response.json() as typeof release;
-        if (!payload || typeof payload.tag_name !== "string" || payload.draft === true || payload.prerelease === true || !Array.isArray(payload.assets)) throw new Error("GitHub 最新 Release 信息无效");
+        if (!payload || typeof payload.tag_name !== "string" || payload.draft === true || payload.prerelease === true || !Array.isArray(payload.assets)) {
+          lastError = new Error("GitHub 最新 Release 信息无效");
+          onRoute?.(describeDownloadAttempt("release-metadata", candidate, startedAt, { status: response.status, error: "GitHub 最新 Release 信息无效" }, metadataCandidates.slice(index + 1)));
+          continue;
+        }
+        onRoute?.(describeDownloadAttempt("release-metadata", candidate, startedAt, { status: response.status }, []));
         release = payload;
         break;
-      } catch (error) { lastError = error; }
+      } catch (error) {
+        lastError = error;
+        onRoute?.(describeDownloadAttempt("release-metadata", candidate, startedAt, { error: error instanceof Error ? error.message : String(error) }, metadataCandidates.slice(index + 1)));
+      }
     }
   }
   if (!release) {
@@ -627,17 +649,36 @@ async function downloadLatestClassIslandPlugin(fetcher: Fetcher, now: () => numb
   const digest = typeof asset.digest === "string" ? asset.digest.replace(/^sha256:/i, "") : "";
   if (!/^[a-f0-9]{64}$/i.test(digest)) throw new Error("ClassIsland Release 缺少有效的 SHA-256 校验值");
   const downloadUrl = asset.browser_download_url as string;
-  for (const candidate of marketplaceRequestUrls(downloadUrl)) {
+  const packageCandidates = marketplaceRequestUrls(downloadUrl);
+  for (let index = 0; index < packageCandidates.length; index++) {
+    const candidate = packageCandidates[index];
+    const startedAt = Date.now();
     try {
       const response = await fetcher(candidate, { signal: AbortSignal.timeout(60_000), headers: { "User-Agent": "SecAgent" } });
-      if (!response.ok) { lastError = new Error(`HTTP ${response.status}`); continue; }
+      if (!response.ok) {
+        lastError = new Error(`HTTP ${response.status}`);
+        onRoute?.(describeDownloadAttempt("plugin-package", candidate, startedAt, { status: response.status, error: `HTTP ${response.status}` }, packageCandidates.slice(index + 1)));
+        continue;
+      }
       const bytes = Buffer.from(await response.arrayBuffer());
-      if (bytes.length > MAX_CLASSISLAND_PLUGIN_BYTES) { lastError = new Error("ClassIsland 插件包过大"); continue; }
+      if (bytes.length > MAX_CLASSISLAND_PLUGIN_BYTES) {
+        lastError = new Error("ClassIsland 插件包过大");
+        onRoute?.(describeDownloadAttempt("plugin-package", candidate, startedAt, { status: response.status, bytes: bytes.length, error: "ClassIsland 插件包过大" }, packageCandidates.slice(index + 1)));
+        continue;
+      }
       onProgress?.("verifying", "正在校验 ClassIsland 插件 SHA-256");
       const actual = crypto.createHash("sha256").update(bytes).digest("hex");
-      if (actual.toLowerCase() !== digest.toLowerCase()) { lastError = new Error("ClassIsland 插件 SHA-256 校验失败"); continue; }
+      if (actual.toLowerCase() !== digest.toLowerCase()) {
+        lastError = new Error("ClassIsland 插件 SHA-256 校验失败");
+        onRoute?.(describeDownloadAttempt("plugin-package", candidate, startedAt, { status: response.status, bytes: bytes.length, sha256: actual, error: `SHA-256 校验失败，期望 ${digest}` }, packageCandidates.slice(index + 1)));
+        continue;
+      }
+      onRoute?.(describeDownloadAttempt("plugin-package", candidate, startedAt, { status: response.status, bytes: bytes.length, sha256: actual }, []));
       return { bytes, version: typeof release.tag_name === "string" ? release.tag_name : "unknown", sha256: actual };
-    } catch (error) { lastError = error; }
+    } catch (error) {
+      lastError = error;
+      onRoute?.(describeDownloadAttempt("plugin-package", candidate, startedAt, { error: error instanceof Error ? error.message : String(error) }, packageCandidates.slice(index + 1)));
+    }
   }
   throw new Error(`下载 ClassIsland 插件失败：${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
@@ -665,13 +706,12 @@ async function defaultIsProcessRunning(pid: number): Promise<boolean> {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
-async function waitForProcessExit(pid: number, isProcessRunning: (pid: number) => Promise<boolean>, timeoutMs = 10_000, pollMs = 250): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (!(await isProcessRunning(pid))) return true;
-    await new Promise((resolve) => setTimeout(resolve, pollMs));
-  }
-  return !(await isProcessRunning(pid));
+/** ClassIsland's `--waitMutex` makes a duplicate instance WAIT for the
+ *  single-instance mutex instead of exiting. Inheriting it on restart turns any
+ *  surviving mutex owner into a silent, forever-blocked process that never
+ *  reaches plugin loading. Every other argument is preserved. */
+function classIslandRestartArgs(args: string[]): string[] {
+  return args.filter((arg) => !/^--?waitmutex$/i.test(arg) && !/^-m$/i.test(arg));
 }
 
 export class ClassIslandInstaller {
@@ -712,13 +752,13 @@ export class ClassIslandInstaller {
     if (!valid.length) return [...results, ...missing];
 
     const report = (phase: ClassIslandInstallPhase, message?: string, percent?: number) => {
-      const phasePercent = percent ?? ({ downloading: 18, verifying: 38, installing: 62, restarting: 80 } as const)[phase];
+      const phasePercent = percent ?? ({ downloading: 18, verifying: 38, installing: 62, closing: 72, restarting: 80 } as const)[phase];
       onProgress?.({ phase, targetIds, percent: phasePercent, ...(message ? { message } : {}) });
     };
     const log = (stage: string, data: unknown = {}) => this.options.log?.(`companion.classisland.${stage}`, data);
     log("install.begin", { targetIds, candidates: selected.map((candidate) => ({ id: candidate.id, executablePath: candidate.executablePath, dataRoot: candidate.dataRoot, pluginPackagesPath: candidate.pluginPackagesPath, version: candidate.version, installedPluginVersion: candidate.installedPluginVersion, pluginHealthy: candidate.pluginHealthy, isRunning: candidate.isRunning, pid: candidate.pid, processIds: candidate.processIds })) });
-    const packageData = await downloadLatestClassIslandPlugin(this.fetcher, this.options.now || Date.now, (phase, message) => report(phase, message));
-    log("download.success", { version: packageData.version, bytes: packageData.bytes.length, sha256: packageData.sha256 });
+    const packageData = await downloadLatestClassIslandPlugin(this.fetcher, this.options.now || Date.now, (phase, message) => report(phase, message), (attempt) => log("download.attempt", attempt));
+    log("download.success", { version: packageData.version, bytes: packageData.bytes.length, sha256: packageData.sha256, repository: CLASSISLAND_PLUGIN_REPOSITORY, asset: CLASSISLAND_PLUGIN_ASSET_NAME });
     const api = platformPath(this.platform);
     // Restart with the same token as SecAgent. A normal SecAgent uses the
     // interactive-shell broker; an administrator-launched SecAgent starts the
@@ -729,6 +769,7 @@ export class ClassIslandInstaller {
     const requestClose = this.options.requestGracefulClose || ((pid: number) => executor ? executor.requestGracefulClose(pid, (stage, data) => log(stage, data)) : defaultRequestGracefulClose(pid, this.platform, this.commandRunner));
     const forceTerminate = this.options.forceTerminateProcess || ((pid: number) => executor ? executor.forceTerminate(pid, (stage, data) => log(stage, data)) : defaultForceTerminate(pid, this.platform, this.commandRunner));
     const gracefulCloseTimeoutMs = this.options.gracefulCloseTimeoutMs ?? 2_000;
+    const restartArgsOf = (candidate: ClassIslandInstallCandidate) => classIslandRestartArgs(candidate.launchArgs);
     const exists = this.options.exists || defaultExists;
     const readFile = this.options.readFile || defaultReadFile;
     const installPackage = this.options.installPackage || ((destinationPath: string, bytes: Buffer, spec: CompanionPackageSpec) =>
@@ -758,59 +799,91 @@ export class ClassIslandInstaller {
         for (const candidate of group) results.push({ targetId: candidate.id, ok: true, action: "already-installed", message: `已安装 ClassIsland 插件 v${packageData.version}`, version: packageData.version });
         continue;
       }
+      const pluginPath = api.join(group[0].dataRoot, "Plugins", CLASSISLAND_PLUGIN_ID);
+      // Write the plugin BEFORE closing ClassIsland. ClassIsland scans the plugin
+      // directory only at startup, so files written up front are picked up by
+      // whichever instance starts next — including one relaunched by anything
+      // other than SecAgent. If the write fails (e.g. the currently-loaded plugin
+      // files are locked), fall back to the close-then-write order below.
+      let preinstalled = false;
+      try {
+        report("installing", "正在写入 ClassIsland 插件文件");
+        const actualPluginPath = await installPackage(pluginPath, packageData.bytes, { pluginId: CLASSISLAND_PLUGIN_ID, manifestFileName: "manifest.yml" });
+        preinstalled = true;
+        log("package.preinstall.result", { requestedPath: pluginPath, actualPluginPath, hostRunning: group.some((candidate) => candidate.isRunning) });
+      } catch (error) {
+        log("package.preinstall.failed", { requestedPath: pluginPath, error: error instanceof Error ? error.message : String(error) });
+      }
       const running = group.flatMap((candidate) => {
         const processIds = candidate.processIds?.length ? candidate.processIds : candidate.pid === undefined ? [] : [candidate.pid];
         return processIds.map((pid) => ({ candidate, pid }));
       }).filter((item, index, all) => all.findIndex((other) => other.pid === item.pid) === index);
-      const closed: Array<{ candidate: ClassIslandInstallCandidate; pid: number }> = [];
-      let closeFailed = false;
-      for (const { candidate, pid } of running) {
-        let exited = false;
-        log("process.close.begin", { pid, executablePath: candidate.executablePath });
-        try {
-          const closeAccepted = (await requestClose(pid)) !== false;
-          exited = closeAccepted && await waitForProcessExit(pid, isRunning, gracefulCloseTimeoutMs, this.options.waitForExitPollMs);
-          log("process.close.result", { pid, accepted: closeAccepted, exited, method: "graceful" });
-        } catch (error) {
-          log("process.close.failed", { pid, method: "graceful", error: error instanceof Error ? error.message : String(error) });
-        }
-        if (!exited) {
-          report("restarting", `ClassIsland 未能优雅退出，正在强制结束进程 ${pid}`);
-          log("process.terminate.begin", { pid });
-          try {
-            await forceTerminate(pid);
-            exited = await waitForProcessExit(pid, isRunning, this.options.waitForExitTimeoutMs, this.options.waitForExitPollMs);
-            log("process.terminate.result", { pid, exited });
-          } catch (error) {
-            log("process.terminate.failed", { pid, error: error instanceof Error ? error.message : String(error) });
-          }
-        }
-        if (!exited) { closeFailed = true; break; }
-        closed.push({ candidate, pid });
-      }
-      if (closeFailed) {
+      // Close EVERY process of the installation, not only the pids detection
+      // attached. An elevated ClassIsland.Desktop.exe is invisible to the
+      // non-elevated scan (null Win32_Process.ExecutablePath), survives a
+      // launcher-only kill, and keeps the Global\ClassIsland.Lock mutex — after
+      // which no restarted instance can ever load the plugin.
+      const processFilter: HostProcessFilter = {
+        names: [WINDOWS_CLASSISLAND_EXE, WINDOWS_CLASSISLAND_RUNTIME_EXE],
+        roots: [...new Set(group.map((candidate) => api.dirname(candidate.executablePath)))]
+      };
+      const listProcesses = this.options.listProcesses
+        ? (filter: HostProcessFilter) => this.options.listProcesses!(filter)
+        : (filter: HostProcessFilter) => enumerateHostProcesses(filter, this.platform, executor, this.commandRunner, (stage, data) => log(stage, data));
+      const closeOutcome = await closeHostProcesses({
+        hostLabel: "ClassIsland",
+        initialPids: running.map((item) => item.pid),
+        filter: processFilter,
+        platform: this.platform,
+        listProcesses,
+        isProcessRunning: isRunning,
+        requestGracefulClose: requestClose,
+        forceTerminate,
+        gracefulCloseTimeoutMs,
+        waitForExitTimeoutMs: this.options.waitForExitTimeoutMs,
+        waitForExitPollMs: this.options.waitForExitPollMs,
+        settlePollMs: this.options.closeSettlePollMs,
+        onProgress: (message) => report("closing", message),
+        logger: (stage, data) => log(stage, data)
+      });
+      log("process.close.summary", { closedPids: closeOutcome.closedPids, remaining: closeOutcome.remaining, failed: closeOutcome.failed, rounds: closeOutcome.rounds });
+      const closed = running.filter((item) => closeOutcome.closedPids.includes(item.pid));
+      if (closeOutcome.failed) {
         const restarted = new Set<string>();
         for (const { candidate } of closed) {
           if (restarted.has(candidate.id)) continue;
           restarted.add(candidate.id);
-          await restart(candidate.executablePath, candidate.launchArgs).catch(() => undefined);
+          await restart(candidate.executablePath, restartArgsOf(candidate)).catch(() => undefined);
         }
-        for (const candidate of group) results.push({ targetId: candidate.id, ok: false, action: "failed", message: "ClassIsland 无法退出，强制结束也失败，未安装插件；请手动关闭后重试" });
+        for (const candidate of group) results.push({
+          targetId: candidate.id,
+          ok: false,
+          action: "failed",
+          message: closeOutcome.remaining.length
+            ? `ClassIsland 进程 ${closeOutcome.remaining.map((item) => item.pid).join("、")} 无法退出（${closeOutcome.remaining.map((item) => item.name || item.executablePath || `pid ${item.pid}`).join("、")}），请手动关闭后重试`
+            : preinstalled
+              ? "插件文件已写入，但 ClassIsland 无法自动退出；请手动重启 ClassIsland 后重新检测"
+              : "ClassIsland 无法退出，强制结束也失败，未安装插件；请手动关闭后重试"
+        });
         continue;
       }
-      const pluginPath = api.join(group[0].dataRoot, "Plugins", CLASSISLAND_PLUGIN_ID);
       try {
-        report("installing", "正在解压安装 ClassIsland 插件");
-        const actualPluginPath = await installPackage(pluginPath, packageData.bytes, { pluginId: CLASSISLAND_PLUGIN_ID, manifestFileName: "manifest.yml" });
-        log("package.install.result", { requestedPath: pluginPath, actualPluginPath });
+        if (!preinstalled) {
+          report("installing", "正在解压安装 ClassIsland 插件");
+          const actualPluginPath = await installPackage(pluginPath, packageData.bytes, { pluginId: CLASSISLAND_PLUGIN_ID, manifestFileName: "manifest.yml" });
+          log("package.install.result", { requestedPath: pluginPath, actualPluginPath });
+        }
         const launchCandidate = closed[0]?.candidate || group[0];
-        const restarting = closed.length > 0;
+        // "重启" vs "启动": the host was running when we started, even if its
+        // process died between detection and the close loop.
+        const restarting = running.length > 0;
+        const launchArgs = restartArgsOf(launchCandidate);
         report("restarting", restarting ? "正在重新启动 ClassIsland" : "正在启动 ClassIsland");
-        log("process.restart.begin", { executablePath: launchCandidate.executablePath, args: launchCandidate.launchArgs, wasRunning: restarting, closedPids: closed.map((item) => item.pid) });
+        log("process.restart.begin", { executablePath: launchCandidate.executablePath, args: launchArgs, inheritedArgs: launchCandidate.launchArgs, wasRunning: restarting, closedPids: closed.map((item) => item.pid) });
         let launchFailed = false;
-        try { await restart(launchCandidate.executablePath, launchCandidate.launchArgs); log("process.restart.success", { executablePath: launchCandidate.executablePath, args: launchCandidate.launchArgs }); }
+        try { await restart(launchCandidate.executablePath, launchArgs); log("process.restart.success", { executablePath: launchCandidate.executablePath, args: launchArgs }); }
         catch (error) { launchFailed = true; log("process.restart.failed", { executablePath: launchCandidate.executablePath, error: error instanceof Error ? error.message : String(error) }); }
-        if (!launchFailed) report("verifying", "正在确认 ClassIsland 插件已加载", 94);
+        if (!launchFailed) report("verifying", "正在等待 ClassIsland 插件响应", 94);
         const writtenVersion = installedPluginVersion(group[0].dataRoot, this.platform, exists, readFile);
         const verifiedVersion = launchFailed ? undefined : await waitForInstalledPlugin(
           () => installedPluginVersion(group[0].dataRoot, this.platform, exists, readFile),
@@ -824,7 +897,14 @@ export class ClassIslandInstaller {
         const pluginHealthy = health.healthy;
         const verified = Boolean(verifiedVersion) && pluginHealthy;
         const detectedVersion = verified ? verifiedVersion : writtenVersion;
-        log("verification.result", { expectedVersion: packageData.version, writtenVersion, verifiedVersion, detectedVersion, pluginHealthy, healthReason: health.reason, healthStatus: health.status, verified, launchFailed });
+        // Diagnostic snapshot: which ClassIsland processes exist after the
+        // restart (launcher, real ClassIsland.Desktop.exe app, or a duplicate
+        // still stuck on the single-instance mutex).
+        try {
+          const snapshot = await listProcesses(processFilter);
+          log("process.post-restart.snapshot", { processes: snapshot });
+        } catch { /* Diagnostic only. */ }
+        log("verification.result", { expectedVersion: packageData.version, writtenVersion, verifiedVersion, detectedVersion, pluginHealthy, healthReason: health.reason, healthStatus: health.status, healthUrl: CLASSISLAND_HEALTH_URL, verified, launchFailed });
         for (const candidate of group) {
           results.push({
             targetId: candidate.id,
@@ -834,7 +914,9 @@ export class ClassIslandInstaller {
               ? `插件包已写入，但 ClassIsland 自动${restarting ? "重启" : "启动"}失败，请手动启动`
               : verified
                 ? restarting ? `已安装 ClassIsland 插件 v${verifiedVersion}，ClassIsland 已自动重启` : `已安装 ClassIsland 插件 v${verifiedVersion}，ClassIsland 已自动启动`
-                : `插件已解压并启动，但未检测到 ClassIsland 插件（${health.reason}），请查看诊断日志后重试`,
+                : verifiedVersion
+                  ? `插件文件已写入，但 ClassIsland 尚未加载插件（${health.reason}），请重试或手动重启 ClassIsland`
+                  : `插件已解压并启动，但未检测到 ClassIsland 插件（${health.reason}），请查看诊断日志后重试`,
             ...(verified && detectedVersion ? { version: detectedVersion } : {})
           });
         }
@@ -844,7 +926,7 @@ export class ClassIslandInstaller {
         for (const { candidate } of closed) {
           if (restarted.has(candidate.id)) continue;
           restarted.add(candidate.id);
-          await restart(candidate.executablePath, candidate.launchArgs).catch(() => undefined);
+          await restart(candidate.executablePath, restartArgsOf(candidate)).catch(() => undefined);
         }
         for (const candidate of group) results.push({ targetId: candidate.id, ok: false, action: "failed", message: `安装 ClassIsland 插件失败：${error instanceof Error ? error.message : String(error)}` });
       }

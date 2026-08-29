@@ -225,7 +225,10 @@ async function createCompanionExecutor(): Promise<WindowsCompanionExecutor | und
     logMain("companion.executor.same-token", { elevated: true });
     return undefined;
   }
-  const executor = new WindowsCompanionExecutor(logMain);
+  // The executor logs its own startup stages ("elevated.start.*", "elevated.ready")
+  // unprefixed; route them under "companion." so they land in
+  // companion-install.jsonl next to the operations they explain.
+  const executor = new WindowsCompanionExecutor((stage, data) => logMain(stage.startsWith("companion.") ? stage : `companion.${stage}`, data));
   logMain("companion.executor.created", { elevated: elevation === false ? false : "unknown" });
   return executor;
 }
@@ -853,6 +856,16 @@ ipcMain.handle("official:balance", async () => {
   if (!response.ok || typeof payload.points !== "number") throw new Error(payload.detail || "无法获取 Points 余额");
   return { points: payload.points, balances: (payload.point_balances || []).filter((item) => typeof item.points === "number").map((item) => ({ points: item.points as number, expiresAt: item.expires_at ?? null })), expired: false };
 });
+ipcMain.handle("official:redeem", async (_event, code: string) => {
+  loadConfig(DEFAULT_WORKSPACE);
+  const token = process.env.SECTL_OFFICIAL_TOKEN;
+  const baseUrl = (process.env.SECTL_OFFICIAL_API_URL || "").replace(/\/$/, "");
+  if (!token || !baseUrl) throw new Error("尚未登录 SecAgent 官方服务");
+  const response = await fetch(`${baseUrl}/redeem`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ code }) });
+  const payload = await response.json().catch(() => ({})) as { points_added?: number; expires_at?: string | null; balance?: number; point_balances?: Array<{ points?: number; expires_at?: string | null }>; detail?: string };
+  if (!response.ok || typeof payload.points_added !== "number") throw new Error(payload.detail || "兑换失败，请稍后重试");
+  return { pointsAdded: payload.points_added, expiresAt: payload.expires_at ?? null, balance: typeof payload.balance === "number" ? payload.balance : null, balances: (payload.point_balances || []).filter((item) => typeof item.points === "number").map((item) => ({ points: item.points as number, expiresAt: item.expires_at ?? null })) };
+});
 ipcMain.handle("official:login", async (_event, email: string, password: string) => {
   loadConfig(DEFAULT_WORKSPACE);
   const baseUrl = (process.env.SECTL_OFFICIAL_API_URL || "").replace(/\/$/, "");
@@ -1227,7 +1240,7 @@ ipcMain.on("wake:context", (_event, payload: unknown) => {
 ipcMain.handle("wake:close", () => { closeWakeWindow(); return { ok: true }; });
 ipcMain.on("wake:interactive", (_event, interactive: boolean) => { if (wakeWindow && !wakeWindow.isDestroyed()) wakeWindow.setIgnoreMouseEvents(!interactive); });
 ipcMain.handle("speech:start", (event) => {
-  try { return startSpeech(wakeWindow?.webContents.id === event.sender.id ? wakeWindow : windowRef, { betterRecognition: readSettings(DEFAULT_WORKSPACE).speech.betterRecognition === true }); }
+  try { return startSpeech(wakeWindow?.webContents.id === event.sender.id ? wakeWindow : windowRef); }
   catch (error) { recordTelemetryFailure({ type: "speech.failed", error, context: { phase: "start" } }); throw error; }
 });
 ipcMain.handle("speech:stop", () => { stopSpeech(); return { ok: true }; });

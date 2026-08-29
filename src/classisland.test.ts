@@ -204,6 +204,8 @@ test("downloads through ghproxy first, verifies the asset, and installs to the s
       exists: (candidate) => fs.existsSync(candidate),
       installPackage: async (destinationPath) => destinationPath,
       restartProcess: async () => { writeClassIslandManifest(root); },
+      listProcesses: async () => [],
+      closeSettlePollMs: 1,
       now: () => 123
     });
     const [target] = await installer.detect();
@@ -237,7 +239,7 @@ test("falls back from the proxy to direct GitHub for both release metadata and t
       if (url.includes("api.github.com")) return new Response(JSON.stringify({ tag_name: "0.1.0.1", assets: [{ name: CLASSISLAND_PLUGIN_ASSET_NAME, browser_download_url: "https://github.com/SECTL/ClassIsland-SecAgent-Plugin/releases/download/0.1.0.1/ClassIsland.SecAgent.Plugin.cipx", digest: `sha256:${digest}`, size: bytes.length }] }), { status: 200 });
       return new Response(bytes, { status: 200 });
     };
-    const installer = new ClassIslandInstaller({ platform: "win32", executablePaths: [exe], runningProcesses: [], versionOf: () => "2.1.1.0", fetcher, exists: (candidate) => fs.existsSync(candidate), installPackage: async (destinationPath) => destinationPath, restartProcess: async () => { writeClassIslandManifest(root); } });
+    const installer = new ClassIslandInstaller({ platform: "win32", executablePaths: [exe], runningProcesses: [], versionOf: () => "2.1.1.0", fetcher, exists: (candidate) => fs.existsSync(candidate), installPackage: async (destinationPath) => destinationPath, restartProcess: async () => { writeClassIslandManifest(root); }, listProcesses: async () => [], closeSettlePollMs: 1 });
     const [target] = await installer.detect();
     const [result] = await installer.install([target.id]);
     assert.equal(result.ok, true);
@@ -271,7 +273,7 @@ test("uses the GitHub release page digest when the REST API is rate limited", as
       if (url.includes("expanded_assets")) return new Response(`<li><a href="/SECTL/ClassIsland-SecAgent-Plugin/releases/download/0.1.0.1/${CLASSISLAND_PLUGIN_ASSET_NAME}"><span>${CLASSISLAND_PLUGIN_ASSET_NAME}</span></a><span>sha256:${digest}</span></li>`, { status: 200 });
       return new Response(bytes, { status: 200 });
     };
-    const installer = new ClassIslandInstaller({ platform: "win32", executablePaths: [exe], runningProcesses: [], versionOf: () => "2.1.1.0", fetcher, exists: (candidate) => fs.existsSync(candidate), installPackage: async (destinationPath) => destinationPath, restartProcess: async () => { writeClassIslandManifest(root); } });
+    const installer = new ClassIslandInstaller({ platform: "win32", executablePaths: [exe], runningProcesses: [], versionOf: () => "2.1.1.0", fetcher, exists: (candidate) => fs.existsSync(candidate), installPackage: async (destinationPath) => destinationPath, restartProcess: async () => { writeClassIslandManifest(root); }, listProcesses: async () => [], closeSettlePollMs: 1 });
     const [target] = await installer.detect();
     const [result] = await installer.install([target.id]);
     assert.equal(result.ok, true);
@@ -340,7 +342,9 @@ test("restarts a running ClassIsland and starts an idle instance after installin
       requestGracefulClose: async () => undefined,
       isProcessRunning: async () => false,
       installPackage: async (destinationPath) => destinationPath,
-      restartProcess: async (executablePath, args) => { launches.push({ executablePath, args }); writeClassIslandManifest(root); }
+      restartProcess: async (executablePath, args) => { launches.push({ executablePath, args }); writeClassIslandManifest(root); },
+      listProcesses: async () => [],
+      closeSettlePollMs: 1
     });
     const [runningTarget] = await runningInstaller.detect();
     const [runningResult] = await runningInstaller.install([runningTarget.id]);
@@ -358,7 +362,9 @@ test("restarts a running ClassIsland and starts an idle instance after installin
       fetcher,
       exists: (candidate) => fs.existsSync(candidate),
       installPackage: async (destinationPath) => destinationPath,
-      restartProcess: async (executablePath, args) => { launches.push({ executablePath, args }); writeClassIslandManifest(root); }
+      restartProcess: async (executablePath, args) => { launches.push({ executablePath, args }); writeClassIslandManifest(root); },
+      listProcesses: async () => [],
+      closeSettlePollMs: 1
     });
     const [idleTarget] = await idleInstaller.detect();
     const [idleResult] = await idleInstaller.install([idleTarget.id]);
@@ -390,6 +396,8 @@ test("force-terminates ClassIsland when graceful close fails", async () => {
       isProcessRunning: async () => running,
       installPackage: async (destinationPath) => destinationPath,
       restartProcess: async () => { writeClassIslandManifest(root); },
+      listProcesses: async () => [],
+      closeSettlePollMs: 1,
       fetcher: async (input: string | URL) => {
         const health = classIslandHealthResponse(input);
         if (health) return health;
@@ -408,6 +416,94 @@ test("force-terminates ClassIsland when graceful close fails", async () => {
   }
 });
 
+test("restarts ClassIsland without inheriting the --waitMutex argument", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-classisland-mutex-"));
+  try {
+    const exe = path.win32.join(root, "ClassIsland.exe");
+    fs.writeFileSync(exe, "test executable");
+    fs.writeFileSync(path.win32.join(root, "PackageType"), "folder\n");
+    const bytes = Buffer.from("mutex cipx bytes");
+    const digest = crypto.createHash("sha256").update(bytes).digest("hex");
+    const launches: Array<{ executablePath: string; args: string[] }> = [];
+    const installer = new ClassIslandInstaller({
+      platform: "win32",
+      executablePaths: [exe],
+      runningProcesses: [{ executablePath: exe, pid: 44, commandLine: `"${exe}" --waitMutex --profile demo`, version: "2.1.1.0" }],
+      versionOf: () => "2.1.1.0",
+      exists: (candidate) => fs.existsSync(candidate),
+      requestGracefulClose: async () => undefined,
+      isProcessRunning: async () => false,
+      installPackage: async (destinationPath) => destinationPath,
+      restartProcess: async (executablePath, args) => { launches.push({ executablePath, args }); writeClassIslandManifest(root); },
+      listProcesses: async () => [],
+      closeSettlePollMs: 1,
+      fetcher: async (input: string | URL) => {
+        const health = classIslandHealthResponse(input);
+        if (health) return health;
+        return String(input).includes("api.github.com")
+          ? new Response(JSON.stringify({ tag_name: "0.1.0.1", assets: [{ name: CLASSISLAND_PLUGIN_ASSET_NAME, browser_download_url: "https://github.com/example/plugin.cipx", digest: `sha256:${digest}`, size: bytes.length }] }), { status: 200 })
+          : new Response(bytes, { status: 200 });
+      }
+    });
+    const [target] = await installer.detect();
+    const [result] = await installer.install([target.id]);
+    assert.equal(result.ok, true);
+    assert.deepEqual(launches, [{ executablePath: exe, args: ["--profile", "demo"] }]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("closes a ClassIsland.Desktop.exe instance that detection could not see", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-classisland-orphan-"));
+  try {
+    const exe = path.win32.join(root, "ClassIsland.exe");
+    fs.writeFileSync(exe, "test executable");
+    fs.writeFileSync(path.win32.join(root, "PackageType"), "folder\n");
+    const bytes = Buffer.from("orphan cipx bytes");
+    const digest = crypto.createHash("sha256").update(bytes).digest("hex");
+    const launches: Array<{ executablePath: string; args: string[] }> = [];
+    const closedPids: number[] = [];
+    let enumerateCalls = 0;
+    // The elevated desktop process has a null ExecutablePath, so only its name
+    // identifies it — exactly the orphan that survived the alpha.12 kill list.
+    const listProcesses = async (): Promise<Array<{ pid: number; name: string; commandLine: string }>> => {
+      enumerateCalls += 1;
+      return enumerateCalls === 1
+        ? [{ pid: 555, name: "ClassIsland.Desktop.exe", commandLine: `"${root}\\app-2.1.1.1-0\\ClassIsland.Desktop.exe"` }]
+        : [];
+    };
+    const installer = new ClassIslandInstaller({
+      platform: "win32",
+      executablePaths: [exe],
+      runningProcesses: [{ executablePath: exe, pid: 321, commandLine: `"${exe}"`, version: "2.1.1.0" }],
+      versionOf: () => "2.1.1.0",
+      exists: (candidate) => fs.existsSync(candidate),
+      requestGracefulClose: async (pid) => { closedPids.push(pid); },
+      isProcessRunning: async (pid) => pid === 321 && closedPids.length === 0,
+      installPackage: async (destinationPath) => destinationPath,
+      restartProcess: async (executablePath, args) => { launches.push({ executablePath, args }); writeClassIslandManifest(root); },
+      listProcesses,
+      closeSettlePollMs: 1,
+      fetcher: async (input: string | URL) => {
+        const health = classIslandHealthResponse(input);
+        if (health) return health;
+        return String(input).includes("api.github.com")
+          ? new Response(JSON.stringify({ tag_name: "0.1.0.1", assets: [{ name: CLASSISLAND_PLUGIN_ASSET_NAME, browser_download_url: "https://github.com/example/plugin.cipx", digest: `sha256:${digest}`, size: bytes.length }] }), { status: 200 })
+          : new Response(bytes, { status: 200 });
+      }
+    });
+    const [target] = await installer.detect();
+    const [result] = await installer.install([target.id]);
+    assert.equal(result.ok, true);
+    // Both the detection pid (launcher) and the invisible desktop pid were closed.
+    assert.deepEqual([...closedPids].sort(), [321, 555]);
+    assert.deepEqual(launches, [{ executablePath: exe, args: [] }]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("does not write when a running ClassIsland cannot be force-terminated", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-classisland-"));
   try {
@@ -420,6 +516,9 @@ test("does not write when a running ClassIsland cannot be force-terminated", asy
       exists: (candidate) => fs.existsSync(candidate),
       requestGracefulClose: async () => { throw new Error("still running"); },
       forceTerminateProcess: async () => { throw new Error("access denied"); },
+      isProcessRunning: async () => true,
+      listProcesses: async () => [],
+      closeSettlePollMs: 1,
       fetcher: async (input: string | URL) => String(input).includes("api.github.com")
         ? new Response(JSON.stringify({ tag_name: "0.1.0.1", assets: [{ name: CLASSISLAND_PLUGIN_ASSET_NAME, browser_download_url: "https://github.com/example/plugin.cipx", digest: `sha256:${crypto.createHash("sha256").update("x").digest("hex")}`, size: 1 }] }), { status: 200 })
         : new Response("x", { status: 200 })

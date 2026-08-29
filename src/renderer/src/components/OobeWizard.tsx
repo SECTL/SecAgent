@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { ArrowRight, Check, ChevronDown, ChevronRight } from "lucide-react";
 import { PresetCombobox } from "./PresetCombobox.js";
+import { SelectCombobox } from "./SelectCombobox.js";
 import { emptyProvider } from "../utils.js";
 
 type SourcePath = "official" | "custom";
@@ -19,7 +20,7 @@ function isClassIslandTargetReady(target: ClassIslandInstallCandidate): boolean 
 }
 
 function isSecRandomTargetReady(target: SecRandomInstallCandidate): boolean {
-  return Boolean(target.installedPluginVersion);
+  return Boolean(target.installedPluginVersion && (!target.isRunning || target.pluginHealthy === true));
 }
 
 function isIccceTargetReady(target: IccceInstallCandidate): boolean {
@@ -36,12 +37,13 @@ function companionPluginStatus(
 }
 
 function companionProgressForPhase(phase: string, appName: string, percent?: number): { value: number; label: string } {
-  const value = Math.max(0, Math.min(100, percent ?? ({ downloading: 18, verifying: 38, installing: 62, restarting: 80 } as Record<string, number>)[phase] ?? 0));
+  const value = Math.max(0, Math.min(100, percent ?? ({ downloading: 18, verifying: 38, installing: 62, closing: 72, restarting: 80 } as Record<string, number>)[phase] ?? 0));
   switch (phase) {
     case "downloading": return { value, label: `正在下载 ${appName} 端插件…` };
-    case "verifying": return { value, label: `正在校验 ${appName} 端插件…` };
+    case "verifying": return { value, label: `正在等待 ${appName} 插件响应…` };
     case "installing": return { value, label: `正在写入 ${appName} 端插件…` };
-    case "restarting": return { value, label: `正在重启 ${appName}…` };
+    case "closing": return { value, label: `正在关闭 ${appName}…` };
+    case "restarting": return { value, label: `正在启动 ${appName}…` };
     default: return { value, label: `等待安装 ${appName} 端插件…` };
   }
 }
@@ -69,6 +71,22 @@ export function OobeWizard() {
   const [marketError, setMarketError] = useState("");
   const [installingId, setInstallingId] = useState("");
   const [saProgress, setSaProgress] = useState<Record<string, number>>({});
+  // True while the one-click batch ("install all") is running, including the
+  // SecAgent-half phase. Keeps each card's bar from collapsing between the
+  // SecAgent half finishing and the companion half starting.
+  const [batchActive, setBatchActive] = useState(false);
+  // Monotonic high-water marks for the companion halves so the visible bar
+  // never regresses mid-install even if a late event carries a lower percent.
+  const [companionHighWater, setCompanionHighWater] = useState<Record<string, number>>({});
+  // After a failed install the card keeps its last progress position (plus the
+  // per-target failure reasons) instead of snapping back to zero.
+  const [cardProgressHold, setCardProgressHold] = useState<Record<string, number>>({});
+  // Latest companion-half percent per pluginId, kept in a ref so failure paths
+  // (which run after awaits) can read the current value without stale closures.
+  const companionPercentRef = useRef<Record<string, number>>({});
+  // Same for the SecAgent-side percent, so a failed connector install can
+  // keep its last progress position on the card.
+  const saPercentRef = useRef<Record<string, number>>({});
   const [batchSecAgentTargets, setBatchSecAgentTargets] = useState<Record<string, boolean>>({});
   const [batchCompanionTargets, setBatchCompanionTargets] = useState<{ classIsland?: string[]; secRandom?: string[]; iccce?: string[] }>({});
   const [classIslandTargets, setClassIslandTargets] = useState<ClassIslandInstallCandidate[]>([]);
@@ -219,17 +237,35 @@ export function OobeWizard() {
 
   useEffect(() => bridge.onClassIslandProgress((progress) => {
     if (progress?.phase) setClassIslandPhase(progress.phase);
-    if (typeof progress?.percent === "number") setClassIslandProgressPercent(progress.percent);
+    if (typeof progress?.percent === "number") {
+      setClassIslandProgressPercent(progress.percent);
+      companionPercentRef.current["classisland-connector"] = progress.percent;
+      setCompanionHighWater((current) => progress.percent! > (current["classisland-connector"] ?? 0)
+        ? { ...current, "classisland-connector": progress.percent! }
+        : current);
+    }
   }), [bridge]);
 
   useEffect(() => bridge.onSecRandomProgress((progress) => {
     if (progress?.phase) setSecRandomPhase(progress.phase);
-    if (typeof progress?.percent === "number") setSecRandomProgressPercent(progress.percent);
+    if (typeof progress?.percent === "number") {
+      setSecRandomProgressPercent(progress.percent);
+      companionPercentRef.current["secrandom"] = progress.percent;
+      setCompanionHighWater((current) => progress.percent! > (current["secrandom"] ?? 0)
+        ? { ...current, "secrandom": progress.percent! }
+        : current);
+    }
   }), [bridge]);
 
   useEffect(() => bridge.onIccceProgress((progress) => {
     if (progress?.phase) setIcccePhase(progress.phase);
-    if (typeof progress?.percent === "number") setIccceProgressPercent(progress.percent);
+    if (typeof progress?.percent === "number") {
+      setIccceProgressPercent(progress.percent);
+      companionPercentRef.current["iccce-connector"] = progress.percent;
+      setCompanionHighWater((current) => progress.percent! > (current["iccce-connector"] ?? 0)
+        ? { ...current, "iccce-connector": progress.percent! }
+        : current);
+    }
   }), [bridge]);
 
   useEffect(() => {
@@ -358,20 +394,35 @@ export function OobeWizard() {
         : plugin.id === "iccce-connector"
           ? iccceTargets.some((target) => iccceSelectedIds.includes(target.id) && !isIccceTargetReady(target))
           : false;
-    const progressCap = companionPending ? 46 : 94;
     setInstallingId(plugin.id);
-    setSaProgress((current) => ({ ...current, [plugin.id]: 10 }));
-    const progressTimer = window.setInterval(() => setSaProgress((current) => ({
-      ...current,
-      [plugin.id]: Math.min(progressCap, (current[plugin.id] || 10) + 3)
-    })), 180);
+    setCardProgressHold((current) => {
+      const next = { ...current };
+      delete next[plugin.id];
+      return next;
+    });
+    let saPercent = 5;
+    saPercentRef.current[plugin.id] = saPercent;
+    setSaProgress((current) => ({ ...current, [plugin.id]: saPercent }));
+    const progressTimer = window.setInterval(() => {
+      saPercent = Math.min(100, saPercent + 3);
+      saPercentRef.current[plugin.id] = saPercent;
+      setSaProgress((current) => ({ ...current, [plugin.id]: saPercent }));
+    }, 180);
     setError("");
     try {
       setPlugins(await bridge.installMarketplaceVersion(version));
-      setSaProgress((current) => ({ ...current, [plugin.id]: companionPending ? 46 : 100 }));
+      saPercent = 100;
+      saPercentRef.current[plugin.id] = saPercent;
+      setSaProgress((current) => ({ ...current, [plugin.id]: saPercent }));
+      // When the companion half is still pending, the connector completes the
+      // 0-50 half of the card; otherwise it completes the whole bar.
+      setCardProgressHold((current) => ({ ...current, [plugin.id]: companionPending ? 50 : 100 }));
       return true;
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
+      // Keep the last position on the scale the card was showing.
+      const heldPercent = Math.max(5, saPercentRef.current[plugin.id] ?? 5);
+      setCardProgressHold((current) => ({ ...current, [plugin.id]: companionPending ? heldPercent / 2 : heldPercent }));
       return false;
     } finally {
       window.clearInterval(progressTimer);
@@ -457,9 +508,23 @@ export function OobeWizard() {
       setError("所选 ClassIsland 版本低于 2.1.1.0，无法安装联动插件");
       return false;
     }
+    // Holds land on the 50-100 half of the card when the SecAgent connector
+    // half is already in place.
+    const saHalfInstalled = plugins.some((plugin) => plugin.id === "classisland-connector");
+    const holdValue = () => {
+      const percent = Math.max(10, companionPercentRef.current["classisland-connector"] ?? 10);
+      return saHalfInstalled ? 50 + percent / 2 : percent;
+    };
     setInstallingId("classisland-connector:companion");
     setClassIslandPhase("downloading");
     setClassIslandProgressPercent(10);
+    setCompanionHighWater((current) => ({ ...current, "classisland-connector": 10 }));
+    companionPercentRef.current["classisland-connector"] = 10;
+    setCardProgressHold((current) => {
+      const next = { ...current };
+      delete next["classisland-connector"];
+      return next;
+    });
     setError("");
     try {
       const results = await bridge.installClassIslandCompanion(selectedTargets.map((target) => target.id));
@@ -470,10 +535,16 @@ export function OobeWizard() {
       }));
       await refreshCompanionTargets();
       const failures = results.filter((result) => !result.ok);
-      if (failures.length) setError(failures.map((result) => result.message).join("；"));
+      if (failures.length) {
+        setCardProgressHold((current) => ({ ...current, "classisland-connector": holdValue() }));
+        setError(failures.map((result) => result.message).join("；"));
+      } else {
+        setCardProgressHold((current) => ({ ...current, "classisland-connector": 100 }));
+      }
       return failures.length === 0;
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
+      setCardProgressHold((current) => ({ ...current, "classisland-connector": holdValue() }));
       return false;
     } finally {
       setInstallingId("");
@@ -492,9 +563,21 @@ export function OobeWizard() {
       setError("所选 SecRandom 版本低于 3.0.0-alpha.1，无法安装联动插件");
       return false;
     }
+    const saHalfInstalled = plugins.some((plugin) => plugin.id === "secrandom");
+    const holdValue = () => {
+      const percent = Math.max(10, companionPercentRef.current["secrandom"] ?? 10);
+      return saHalfInstalled ? 50 + percent / 2 : percent;
+    };
     setInstallingId("secrandom:companion");
     setSecRandomPhase("downloading");
     setSecRandomProgressPercent(10);
+    setCompanionHighWater((current) => ({ ...current, "secrandom": 10 }));
+    companionPercentRef.current["secrandom"] = 10;
+    setCardProgressHold((current) => {
+      const next = { ...current };
+      delete next["secrandom"];
+      return next;
+    });
     setError("");
     try {
       const results = await bridge.installSecRandomCompanion(selectedTargets.map((target) => target.id));
@@ -505,10 +588,16 @@ export function OobeWizard() {
       }));
       await refreshCompanionTargets();
       const failures = results.filter((result) => !result.ok);
-      if (failures.length) setError(failures.map((result) => result.message).join("；"));
+      if (failures.length) {
+        setCardProgressHold((current) => ({ ...current, "secrandom": holdValue() }));
+        setError(failures.map((result) => result.message).join("；"));
+      } else {
+        setCardProgressHold((current) => ({ ...current, "secrandom": 100 }));
+      }
       return failures.length === 0;
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
+      setCardProgressHold((current) => ({ ...current, "secrandom": holdValue() }));
       return false;
     } finally {
       setInstallingId("");
@@ -527,9 +616,21 @@ export function OobeWizard() {
       setError("所选 ICC-CE 安装目标不兼容");
       return false;
     }
+    const saHalfInstalled = plugins.some((plugin) => plugin.id === "iccce-connector");
+    const holdValue = () => {
+      const percent = Math.max(10, companionPercentRef.current["iccce-connector"] ?? 10);
+      return saHalfInstalled ? 50 + percent / 2 : percent;
+    };
     setInstallingId("iccce-connector:companion");
     setIcccePhase("downloading");
     setIccceProgressPercent(10);
+    setCompanionHighWater((current) => ({ ...current, "iccce-connector": 10 }));
+    companionPercentRef.current["iccce-connector"] = 10;
+    setCardProgressHold((current) => {
+      const next = { ...current };
+      delete next["iccce-connector"];
+      return next;
+    });
     setError("");
     try {
       const results = await bridge.installIccceCompanion(selectedTargets.map((target) => target.id));
@@ -540,10 +641,16 @@ export function OobeWizard() {
       }));
       await refreshCompanionTargets();
       const failures = results.filter((result) => !result.ok);
-      if (failures.length) setError(failures.map((result) => result.message).join("；"));
+      if (failures.length) {
+        setCardProgressHold((current) => ({ ...current, "iccce-connector": holdValue() }));
+        setError(failures.map((result) => result.message).join("；"));
+      } else {
+        setCardProgressHold((current) => ({ ...current, "iccce-connector": 100 }));
+      }
       return failures.length === 0;
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
+      setCardProgressHold((current) => ({ ...current, "iccce-connector": holdValue() }));
       return false;
     } finally {
       setInstallingId("");
@@ -594,51 +701,91 @@ export function OobeWizard() {
       return;
     }
     setBatchSecAgentTargets(batchSecAgentTargets);
-    for (const task of tasks) await task();
-    if (!Object.values(batchTargets).some((targetIds) => targetIds?.length)) {
-      setBatchSecAgentTargets({});
-      return;
-    }
-    setInstallingId("companions:batch");
-    setBatchCompanionTargets(batchTargets);
-    setClassIslandPhase(batchTargets.classIsland ? "downloading" : "idle");
-    setSecRandomPhase(batchTargets.secRandom ? "downloading" : "idle");
-    setIcccePhase(batchTargets.iccce ? "downloading" : "idle");
+    setBatchActive(true);
     try {
-      const result = await bridge.installAllCompanions(batchTargets);
-      const applyResults = <T extends { targetId: string }>(
-        results: T[],
-        setResults: (value: (current: Record<string, T>) => Record<string, T>) => void
-      ) => {
-        setResults((current) => ({ ...current, ...Object.fromEntries(results.map((item) => [item.targetId, item])) }));
-      };
-      applyResults(result.classIsland, setClassIslandResults);
-      applyResults(result.secRandom, setSecRandomResults);
-      applyResults(result.iccce, setIccceResults);
-      setClassIslandTargets((current) => current.map((target) => {
-        const item = result.classIsland.find((candidate) => candidate.targetId === target.id);
-        return item?.ok && item.version ? { ...target, installedPluginVersion: item.version } : target;
+      for (const task of tasks) await task();
+      if (!Object.values(batchTargets).some((targetIds) => targetIds?.length)) return;
+      setInstallingId("companions:batch");
+      setBatchCompanionTargets(batchTargets);
+      // Seed each companion half so its bar continues from the SecAgent half
+      // (50%) instead of snapping back to zero, and reset the monotonic
+      // high-water marks for this new session.
+      setClassIslandProgressPercent(batchTargets.classIsland ? 10 : 0);
+      setSecRandomProgressPercent(batchTargets.secRandom ? 10 : 0);
+      setIccceProgressPercent(batchTargets.iccce ? 10 : 0);
+      setCompanionHighWater((current) => ({
+        ...current,
+        ...(batchTargets.classIsland ? { "classisland-connector": 10 } : {}),
+        ...(batchTargets.secRandom ? { "secrandom": 10 } : {}),
+        ...(batchTargets.iccce ? { "iccce-connector": 10 } : {})
       }));
-      setSecRandomTargets((current) => current.map((target) => {
-        const item = result.secRandom.find((candidate) => candidate.targetId === target.id);
-        return item?.ok && item.version ? { ...target, installedPluginVersion: item.version } : target;
-      }));
-      setIccceTargets((current) => current.map((target) => {
-        const item = result.iccce.find((candidate) => candidate.targetId === target.id);
-        return item?.ok && item.version ? { ...target, installedPluginVersion: item.version } : target;
-      }));
-      await refreshCompanionTargets();
-      const failures = [...result.classIsland, ...result.secRandom, ...result.iccce].filter((item) => !item.ok);
-      if (failures.length) setError(failures.map((item) => item.message).join("；"));
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      setClassIslandPhase(batchTargets.classIsland ? "downloading" : "idle");
+      setSecRandomPhase(batchTargets.secRandom ? "downloading" : "idle");
+      setIcccePhase(batchTargets.iccce ? "downloading" : "idle");
+      try {
+        const result = await bridge.installAllCompanions(batchTargets);
+        const applyResults = <T extends { targetId: string }>(
+          results: T[],
+          setResults: (value: (current: Record<string, T>) => Record<string, T>) => void
+        ) => {
+          setResults((current) => ({ ...current, ...Object.fromEntries(results.map((item) => [item.targetId, item])) }));
+        };
+        applyResults(result.classIsland, setClassIslandResults);
+        applyResults(result.secRandom, setSecRandomResults);
+        applyResults(result.iccce, setIccceResults);
+        setClassIslandTargets((current) => current.map((target) => {
+          const item = result.classIsland.find((candidate) => candidate.targetId === target.id);
+          return item?.ok && item.version ? { ...target, installedPluginVersion: item.version } : target;
+        }));
+        setSecRandomTargets((current) => current.map((target) => {
+          const item = result.secRandom.find((candidate) => candidate.targetId === target.id);
+          return item?.ok && item.version ? { ...target, installedPluginVersion: item.version } : target;
+        }));
+        setIccceTargets((current) => current.map((target) => {
+          const item = result.iccce.find((candidate) => candidate.targetId === target.id);
+          return item?.ok && item.version ? { ...target, installedPluginVersion: item.version } : target;
+        }));
+        await refreshCompanionTargets();
+        const failures = [...result.classIsland, ...result.secRandom, ...result.iccce].filter((item) => !item.ok);
+        if (failures.length) setError(failures.map((item) => item.message).join("；"));
+        // Failed cards freeze at the last reported position alongside the
+        // failure reasons; completed cards keep the full bar so the card
+        // visibly finishes instead of snapping back to zero.
+        const holdUpdate: Record<string, number> = {};
+        const recordHold = (pluginId: string, results: Array<{ ok: boolean }>) => {
+          const percent = Math.max(10, companionPercentRef.current[pluginId] ?? 10);
+          // The connector half occupies 0-50 whether it ran in this batch or
+          // was already installed before it.
+          const saHalfDone = Boolean(batchSecAgentTargets[pluginId]) || plugins.some((plugin) => plugin.id === pluginId);
+          holdUpdate[pluginId] = results.some((item) => !item.ok)
+            ? (saHalfDone ? 50 + percent / 2 : percent)
+            : 100;
+        };
+        recordHold("classisland-connector", result.classIsland);
+        recordHold("secrandom", result.secRandom);
+        recordHold("iccce-connector", result.iccce);
+        if (Object.keys(holdUpdate).length) setCardProgressHold((current) => ({ ...current, ...holdUpdate }));
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : String(reason));
+        const holdUpdate: Record<string, number> = {};
+        const batchApps: Array<[string, string[] | undefined]> = [["classisland-connector", batchTargets.classIsland], ["secrandom", batchTargets.secRandom], ["iccce-connector", batchTargets.iccce]];
+        for (const [pluginId, targetIds] of batchApps) {
+          if (!targetIds?.length) continue;
+          const percent = Math.max(10, companionPercentRef.current[pluginId] ?? 10);
+          const saHalfDone = Boolean(batchSecAgentTargets[pluginId]) || plugins.some((plugin) => plugin.id === pluginId);
+          holdUpdate[pluginId] = saHalfDone ? 50 + percent / 2 : percent;
+        }
+        if (Object.keys(holdUpdate).length) setCardProgressHold((current) => ({ ...current, ...holdUpdate }));
+      } finally {
+        setInstallingId("");
+        setBatchCompanionTargets({});
+        setClassIslandPhase("idle");
+        setSecRandomPhase("idle");
+        setIcccePhase("idle");
+      }
     } finally {
-      setInstallingId("");
+      setBatchActive(false);
       setBatchSecAgentTargets({});
-      setBatchCompanionTargets({});
-      setClassIslandPhase("idle");
-      setSecRandomPhase("idle");
-      setIcccePhase("idle");
     }
   };
 
@@ -716,7 +863,7 @@ export function OobeWizard() {
         <div className="form-grid">
           <label>提供商名称<input value={provider.name} onChange={(event) => updateProvider({ name: event.target.value })} /></label>
           <label>预设<PresetCombobox value={provider.preset || "custom"} presets={presets} onSelect={applyPreset} /></label>
-          <label>协议<select value={provider.provider} onChange={(event) => updateProvider({ provider: event.target.value as ProviderConfig["provider"] })}><option value="openai-compatible">OpenAI Chat 兼容</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic">Anthropic</option><option value="google">Google Gemini</option></select></label>
+          <label>协议<SelectCombobox ariaLabel="协议" value={provider.provider} options={[{ value: "openai-compatible", label: "OpenAI Chat 兼容" }, { value: "openai-responses", label: "OpenAI Responses" }, { value: "anthropic", label: "Anthropic" }, { value: "google", label: "Google Gemini" }]} onChange={(protocol) => updateProvider({ provider: protocol as ProviderConfig["provider"] })} /></label>
           <label>API Key 环境变量<input value={provider.apiKeyEnv} onChange={(event) => updateProvider({ apiKeyEnv: event.target.value })} /></label>
           <label className="wide-field">Base URL<input value={provider.baseUrl} onChange={(event) => updateProvider({ baseUrl: event.target.value })} /></label>
           <label>Endpoint<input value={provider.endpoint || ""} onChange={(event) => updateProvider({ endpoint: event.target.value })} /></label>
@@ -775,21 +922,21 @@ export function OobeWizard() {
             (isIccce && Boolean(batchCompanionTargets.iccce?.length))
           ));
           const saInstalling = installingId === app.pluginId;
-          const installing = saInstalling || companionInstalling;
           const classIslandInstalledTargetCount = selectedClassIslandTargets.filter(isClassIslandTargetReady).length;
           const classIslandCompanionInstalled = selectedClassIslandTargets.length > 0 && selectedClassIslandTargets.every(isClassIslandTargetReady);
           const classIslandCanInstall = selectedClassIslandTargets.length > 0 && selectedClassIslandTargets.every((target) => target.compatible) && !classIslandCompanionInstalled;
-          const classIslandPhaseLabel = classIslandPhase === "downloading" ? "下载中…" : classIslandPhase === "verifying" ? "校验中…" : classIslandPhase === "installing" ? "安装中…" : classIslandPhase === "restarting" ? "重启中…" : "安装 ClassIsland 端插件";
+          const classIslandPhaseLabel = classIslandPhase === "downloading" ? "下载中…" : classIslandPhase === "verifying" ? "等待插件响应…" : classIslandPhase === "installing" ? "写入中…" : classIslandPhase === "closing" ? "关闭中…" : classIslandPhase === "restarting" ? "启动中…" : "安装 ClassIsland 端插件";
           const secRandomInstalledTargetCount = selectedSecRandomTargets.filter(isSecRandomTargetReady).length;
           const secRandomCompanionInstalled = selectedSecRandomTargets.length > 0 && selectedSecRandomTargets.every(isSecRandomTargetReady);
           const secRandomCanInstall = selectedSecRandomTargets.length > 0 && selectedSecRandomTargets.every((target) => target.compatible) && !secRandomCompanionInstalled;
-          const secRandomPhaseLabel = secRandomPhase === "downloading" ? "下载中…" : secRandomPhase === "verifying" ? "校验中…" : secRandomPhase === "installing" ? "安装中…" : secRandomPhase === "restarting" ? "重启中…" : "安装 SecRandom 端插件";
+          const secRandomPhaseLabel = secRandomPhase === "downloading" ? "下载中…" : secRandomPhase === "verifying" ? "等待插件响应…" : secRandomPhase === "installing" ? "写入中…" : secRandomPhase === "closing" ? "关闭中…" : secRandomPhase === "restarting" ? "启动中…" : "安装 SecRandom 端插件";
            const iccceInstalledTargetCount = selectedIccceTargets.filter(isIccceTargetReady).length;
            const iccceCompanionInstalled = selectedIccceTargets.length > 0 && selectedIccceTargets.every(isIccceTargetReady);
           const iccceCanInstall = selectedIccceTargets.length > 0 && selectedIccceTargets.every((target) => target.compatible) && !iccceCompanionInstalled;
-          const icccePhaseLabel = icccePhase === "downloading" ? "下载中…" : icccePhase === "verifying" ? "校验中…" : icccePhase === "installing" ? "安装中…" : icccePhase === "restarting" ? "重启中…" : "安装 ICC-CE 端插件";
+          const icccePhaseLabel = icccePhase === "downloading" ? "下载中…" : icccePhase === "verifying" ? "等待插件响应…" : icccePhase === "installing" ? "写入中…" : icccePhase === "closing" ? "关闭中…" : icccePhase === "restarting" ? "启动中…" : "安装 ICC-CE 端插件";
           const companionPhase = isClassIsland ? classIslandPhase : isSecRandom ? secRandomPhase : icccePhase;
-          const companionPercent = isClassIsland ? classIslandProgressPercent : isSecRandom ? secRandomProgressPercent : iccceProgressPercent;
+          const rawCompanionPercent = isClassIsland ? classIslandProgressPercent : isSecRandom ? secRandomProgressPercent : iccceProgressPercent;
+          const companionPercent = Math.max(rawCompanionPercent, companionHighWater[app.pluginId] ?? 0);
           const companionProgress = companionInstalling
             ? companionProgressForPhase(companionPhase, app.appName, companionPercent > 0 ? companionPercent : undefined)
             : undefined;
@@ -800,23 +947,37 @@ export function OobeWizard() {
               : isIccce
                 ? selectedIccceTargets.length > 0 && !iccceCompanionInstalled
                 : false;
-          // When both halves are part of this batch, reserve 0-50% for the
-          // SecAgent connector and 50-100% for the companion plugin. If only
-          // one half is being installed it uses the full card background.
-          const bothSidesInOperation = Boolean(batchSecAgentTargets[app.pluginId] && companionPending);
+          // Dual-end cards reserve 0-50% of the background bar for the
+          // SecAgent connector and 50-100% for the companion plugin, so the
+          // bar advances monotonically across both halves. Single-side
+          // plugins use the full card background.
+          const dualEnd = isClassIsland || isSecRandom || isIccce;
           const saProgressValue = saProgress[app.pluginId] || 10;
-          const overallProgress = installing
-            ? saInstalling
-              ? bothSidesInOperation ? saProgressValue / 2 : saProgressValue
-              : companionProgress
-                ? bothSidesInOperation ? 50 + companionProgress.value / 2 : companionProgress.value
-                : undefined
-            : undefined;
+          const saHalfOnHalf = dualEnd && companionPending;
+          const saHalfPresent = Boolean(installed) || Boolean(batchSecAgentTargets[app.pluginId]);
+          const companionOnHalf = dualEnd && saHalfPresent;
+          // Between the SecAgent half finishing and the companion half
+          // starting (the batch may still be working on other apps), the card
+          // holds at 50% instead of collapsing to an empty bar.
+          const holdingBetweenHalves = batchActive && Boolean(batchSecAgentTargets[app.pluginId])
+            && plugins.some((plugin) => plugin.id === app.pluginId)
+            && companionPending && !saInstalling && !companionInstalling;
+          const cardBusy = saInstalling || companionInstalling || holdingBetweenHalves;
+          // While any install runs, every card's install buttons stay disabled
+          // so a batch cannot be interleaved with a per-app install.
+          const installing = cardBusy || Boolean(installingId);
+          const overallProgress = saInstalling
+            ? saHalfOnHalf ? saProgressValue / 2 : saProgressValue
+            : companionInstalling && companionProgress
+              ? companionOnHalf ? 50 + companionProgress.value / 2 : companionProgress.value
+              : holdingBetweenHalves
+                ? 50
+                : cardProgressHold[app.pluginId];
           const cardStyle = {
             animationDelay: `${index * 70}ms`,
             ...(overallProgress !== undefined ? { "--oobe-plugin-progress": `${overallProgress}%` } : {})
           } as CSSProperties;
-          return <article className={`settings-card oobe-plugin-card${isClassIsland ? " oobe-plugin-card-classisland" : isSecRandom ? " oobe-plugin-card-secrandom" : isIccce ? " oobe-plugin-card-iccce" : ""}${installing ? " is-installing" : ""}`} aria-busy={installing} style={cardStyle} key={app.pluginId}>
+          return <article className={`settings-card oobe-plugin-card${isClassIsland ? " oobe-plugin-card-classisland" : isSecRandom ? " oobe-plugin-card-secrandom" : isIccce ? " oobe-plugin-card-iccce" : ""}${cardBusy ? " is-installing" : ""}`} aria-busy={cardBusy} style={cardStyle} key={app.pluginId}>
             <div className="oobe-plugin-main">
               <span className={`oobe-plugin-icon${installed?.icon ? " has-plugin-icon" : ""}`} aria-hidden="true">
                 <img className="oobe-plugin-icon-app" src={app.icon} alt="" />

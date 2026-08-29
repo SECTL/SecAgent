@@ -4,8 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { compareVersions, marketplaceRequestUrls } from "./marketplace.js";
-import { installCompanionPackage, startCompanionProcessWithSameElevation, type CompanionExecutor, type CompanionLogger, type CompanionPackageSpec } from "./companion-package.js";
+import { compareVersions, describeDownloadAttempt, marketplaceRequestUrls, type DownloadAttemptLogger } from "./marketplace.js";
+import { closeHostProcesses, enumerateHostProcesses, installCompanionPackage, startCompanionProcess, startCompanionProcessWithSameElevation, type CompanionExecutor, type CompanionLogger, type CompanionPackageSpec, type HostProcessFilter, type HostProcessInfo } from "./companion-package.js";
 
 export const ICCCE_PLUGIN_REPOSITORY = "SECTL/ICC-CE-SecAgent-Plugin";
 export const ICCCE_PLUGIN_ID = "inkcanvas.iccce.secagent";
@@ -33,6 +33,9 @@ export interface IccceInstallCandidate {
   version?: string;
   installedPluginVersion?: string;
   pluginHealthy?: boolean;
+  /** ICC-CE has the plugin in its disabled list or auto-disabled it after repeated load failures. */
+  pluginDisabled?: boolean;
+  pluginDisableReason?: string;
   packageType?: string;
   isRunning: boolean;
   pid?: number;
@@ -50,7 +53,7 @@ export interface IccceInstallResult {
   version?: string;
 }
 
-export type IccceInstallPhase = "downloading" | "verifying" | "installing" | "restarting";
+export type IccceInstallPhase = "downloading" | "verifying" | "installing" | "closing" | "restarting";
 export interface IccceInstallProgress {
   phase: IccceInstallPhase;
   targetIds: string[];
@@ -84,11 +87,25 @@ export interface IccceInstallerOptions extends IccceDiscoveryOptions {
   requestGracefulClose?: (pid: number) => Promise<void | boolean>;
   forceTerminateProcess?: (pid: number) => Promise<void>;
   isProcessRunning?: (pid: number) => Promise<boolean>;
+  /** Process query used while closing; defaults to the elevated worker when one
+   *  is available, so elevated host instances are visible to the kill list. */
+  listProcesses?: (filter: HostProcessFilter) => Promise<HostProcessInfo[]>;
+  /** Directory listing used for post-install diagnostics (ICC-CE's own logs).
+   *  Reading Program Files needs no elevation, so this stays a plain call. */
+  listDir?: (directory: string) => string[];
   restartProcess?: (executablePath: string, args: string[]) => Promise<void>;
+  /** Replaces the elevated relaunch taken when the host root is write-protected.
+   *  Tests use this to observe the launch without a real elevated worker. */
+  restartElevatedProcess?: (executablePath: string, args: string[]) => Promise<void>;
+  /** Reports whether the current process may create files under a directory.
+   *  Defaults to a real write probe; override in tests. */
+  isDirectoryWritable?: (directoryPath: string) => boolean;
   /** Graceful close is only a brief opportunity; force termination follows. */
   gracefulCloseTimeoutMs?: number;
   waitForExitTimeoutMs?: number;
   waitForExitPollMs?: number;
+  /** Delay between post-kill re-checks for the watchdog relaunch. */
+  closeSettlePollMs?: number;
   waitForPluginTimeoutMs?: number;
   waitForPluginPollMs?: number;
   installPackage?: (destinationPath: string, bytes: Buffer, spec: CompanionPackageSpec) => Promise<string> | string;
@@ -137,6 +154,10 @@ function defaultExists(candidate: string): boolean {
 
 function defaultReadFile(filePath: string): string {
   return fs.readFileSync(filePath, "utf8");
+}
+
+function defaultListDir(directory: string): string[] {
+  try { return fs.readdirSync(directory); } catch { return []; }
 }
 
 function defaultCommandRunner(file: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
@@ -365,7 +386,7 @@ async function probeIcccePlugin(fetcher: Fetcher): Promise<boolean> {
   return (await probeIcccePluginDetailed(fetcher)).healthy;
 }
 
-async function waitForIcccePluginHealth(fetcher: Fetcher, timeoutMs = 15_000, pollMs = 250): Promise<PluginHealthResult> {
+async function waitForIcccePluginHealth(fetcher: Fetcher, timeoutMs = 90_000, pollMs = 250): Promise<PluginHealthResult> {
   const deadline = Date.now() + timeoutMs;
   let last: PluginHealthResult = { healthy: false, reason: "健康检查服务未响应" };
   while (true) {
@@ -411,6 +432,13 @@ export async function discoverIccceInstallations(options: IccceDiscoveryOptions 
     const version = processInfo?.version || await versionOf(executablePath);
     const layout = resolveIccceLayout(executablePath, { platform, home, env });
     const pluginHealthy = processInfo && options.fetcher ? await probeIcccePlugin(options.fetcher) : undefined;
+    const disabledState = readIccePluginDisabledState(layout.packageRoot, platform, exists, readFile);
+    const pluginDisabled = Boolean(disabledState.disabledByUser || disabledState.autoDisabled);
+    const pluginDisableReason = disabledState.autoDisabled
+      ? `ICC-CE 已自动禁用此插件（连续加载失败${disabledState.lastErrorMessage ? `：${disabledState.lastErrorMessage}` : ""}）`
+      : disabledState.disabledByUser
+        ? "ICC-CE 的插件列表已禁用此插件"
+        : undefined;
     const candidate: CachedCandidate = {
       id: hashId(executablePath, layout.packageRoot, platform),
       executablePath,
@@ -420,6 +448,7 @@ export async function discoverIccceInstallations(options: IccceDiscoveryOptions 
       ...(version ? { version } : {}),
       ...(installedPluginVersion(layout, platform, exists, readFile) ? { installedPluginVersion: installedPluginVersion(layout, platform, exists, readFile) } : {}),
       ...(pluginHealthy !== undefined ? { pluginHealthy } : {}),
+      ...(pluginDisabled ? { pluginDisabled, pluginDisableReason } : {}),
       ...(layout.packageType ? { packageType: layout.packageType } : {}),
       isRunning: Boolean(processInfo),
       ...(processInfo ? { pid: processInfo.pid, launchArgs: parseWindowsCommandLine(processInfo.commandLine).slice(1) } : { launchArgs: [] }),
@@ -438,6 +467,232 @@ export async function discoverIccceInstallations(options: IccceDiscoveryOptions 
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+interface IccePluginDisabledState {
+  disabledByUser?: boolean;
+  autoDisabled?: boolean;
+  autoDisabledAt?: string;
+  lastErrorMessage?: string;
+}
+
+/**
+ * Reads ICC-CE's own plugin-disable bookkeeping (read-only) so SecAgent can tell
+ * "files written but host refuses to load" apart from other failure modes.
+ * - <root>\Configs\disabled_plugins.json — JSON array of plugin ids (user or auto disable)
+ * - <root>\Configs\plugin_error_recovery.json — array of records with PluginId/AutoDisabled
+ */
+function readIccePluginDisabledState(rootPath: string, platform: SupportedPlatform, exists: (candidate: string) => boolean, readFile: (filePath: string) => string): IccePluginDisabledState {
+  const api = platformPath(platform);
+  const state: IccePluginDisabledState = {};
+  try {
+    const disabledPath = api.join(rootPath, "Configs", "disabled_plugins.json");
+    if (exists(disabledPath)) {
+      const parsed = JSON.parse(readFile(disabledPath)) as unknown;
+      if (Array.isArray(parsed) && parsed.some((item) => typeof item === "string" && item.toLowerCase() === ICCCE_PLUGIN_ID)) state.disabledByUser = true;
+    }
+  } catch { /* Best effort: unreadable bookkeeping must not break detection. */ }
+  try {
+    const recoveryPath = api.join(rootPath, "Configs", "plugin_error_recovery.json");
+    if (exists(recoveryPath)) {
+      const parsed = JSON.parse(readFile(recoveryPath)) as unknown;
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          if (!item || typeof item !== "object") continue;
+          const record = item as Record<string, unknown>;
+          const pluginId = typeof record.PluginId === "string" ? record.PluginId : typeof record.pluginId === "string" ? record.pluginId : "";
+          if (pluginId.toLowerCase() !== ICCCE_PLUGIN_ID) continue;
+          if (record.AutoDisabled === true || record.autoDisabled === true) {
+            state.autoDisabled = true;
+            if (typeof record.LastErrorMessage === "string" && record.LastErrorMessage) state.lastErrorMessage = record.LastErrorMessage;
+            if (typeof record.AutoDisabledAt === "string") state.autoDisabledAt = record.AutoDisabledAt;
+          }
+        }
+      }
+    }
+  } catch { /* Best effort. */ }
+  return state;
+}
+
+export interface IcceRecoveryRecordSummary {
+  pluginId: string;
+  pluginName?: string;
+  failures: number;
+  autoDisabled: boolean;
+  autoDisabledAt?: string;
+  firstFailureAt?: string;
+  lastFailureAt?: string;
+  lastErrorMessage?: string;
+  lastStackTrace?: string;
+}
+
+export interface IcceHostDiagnostics {
+  recovery?: IcceRecoveryRecordSummary;
+  hostLog?: { file: string; tail: string };
+  pluginLog?: { file: string; tail: string };
+}
+
+function newestLogFileName(names: string[]): string | undefined {
+  // Rotation keeps `<yyyy-MM-dd>.log` plus `<yyyy-MM-dd>.N.log` backups, so the
+  // date prefix makes plain lexicographic order pick the newest day.
+  const logs = names.filter((name) => /\.log$/i.test(name));
+  return logs.length ? logs.sort((left, right) => right.localeCompare(left))[0] : undefined;
+}
+
+function tailLines(content: string, lines: number): string {
+  const split = content.trimEnd().split(/\r?\n/);
+  return split.slice(Math.max(0, split.length - lines)).join("\n");
+}
+
+/**
+ * Reads ICC-CE's own account of what happened to our plugin, so a failed health
+ * check can quote the real error instead of a bare "服务未响应":
+ * - <root>\Configs\plugin_error_recovery.json — the host's load-failure bookkeeping
+ * - <root>\PluginLogs\host\<yyyy-MM-dd>.log — "Loading plugin …" / "Failed to load plugin …"
+ * - <root>\PluginLogs\<plugin-id>\<yyyy-MM-dd>.log — the plugin's own log; its mere
+ *   presence proves the assembly loaded and Initialize ran.
+ */
+function readIcceHostDiagnostics(rootPath: string, platform: SupportedPlatform, exists: (candidate: string) => boolean, readFile: (filePath: string) => string, listDir: (directory: string) => string[]): IcceHostDiagnostics {
+  const api = platformPath(platform);
+  const diagnostics: IcceHostDiagnostics = {};
+  try {
+    const recoveryPath = api.join(rootPath, "Configs", "plugin_error_recovery.json");
+    if (exists(recoveryPath)) {
+      const parsed = JSON.parse(readFile(recoveryPath)) as unknown;
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          if (!item || typeof item !== "object") continue;
+          const record = item as Record<string, unknown>;
+          const pluginId = typeof record.PluginId === "string" ? record.PluginId : typeof record.pluginId === "string" ? record.pluginId : "";
+          if (pluginId.toLowerCase() !== ICCCE_PLUGIN_ID) continue;
+          diagnostics.recovery = {
+            pluginId,
+            ...(typeof record.PluginName === "string" && record.PluginName ? { pluginName: record.PluginName } : {}),
+            failures: Array.isArray(record.FailureTimestamps) ? record.FailureTimestamps.length : 0,
+            autoDisabled: record.AutoDisabled === true || record.autoDisabled === true,
+            ...(typeof record.AutoDisabledAt === "string" ? { autoDisabledAt: record.AutoDisabledAt } : {}),
+            ...(typeof record.FirstFailureAt === "string" ? { firstFailureAt: record.FirstFailureAt } : {}),
+            ...(typeof record.LastFailureAt === "string" ? { lastFailureAt: record.LastFailureAt } : {}),
+            ...(typeof record.LastErrorMessage === "string" && record.LastErrorMessage ? { lastErrorMessage: record.LastErrorMessage } : {}),
+            ...(typeof record.LastStackTrace === "string" && record.LastStackTrace ? { lastStackTrace: record.LastStackTrace } : {})
+          };
+          break;
+        }
+      }
+    }
+  } catch { /* Best-effort diagnostics. */ }
+  const readNewestLogTail = (logDir: string, maxLines: number): { file: string; tail: string } | undefined => {
+    try {
+      const newest = newestLogFileName(listDir(logDir));
+      if (!newest) return undefined;
+      const file = api.join(logDir, newest);
+      if (!exists(file)) return undefined;
+      return { file, tail: tailLines(readFile(file), maxLines) };
+    } catch { return undefined; }
+  };
+  diagnostics.hostLog = readNewestLogTail(api.join(rootPath, "PluginLogs", "host"), 120);
+  diagnostics.pluginLog = readNewestLogTail(api.join(rootPath, "PluginLogs", ICCCE_PLUGIN_ID), 60);
+  return diagnostics;
+}
+
+/** Host log lines start with `[yyyy-MM-dd HH:mm:ss.mmm]` in the host's local time. */
+const ICCCE_LOG_TIMESTAMP_PATTERN = /^\[(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?\]/;
+
+function iccceLogLineTimeMs(line: string): number | undefined {
+  const match = ICCCE_LOG_TIMESTAMP_PATTERN.exec(line);
+  if (!match) return undefined;
+  const [, year, month, day, hour, minute, second] = match;
+  const time = new Date(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second)).getTime();
+  return Number.isNaN(time) ? undefined : time;
+}
+
+/**
+ * Distills the diagnostics into a short hint for the OOBE failure message.
+ * The plugin's own log outranks the host's bookkeeping: if it exists the plugin
+ * did load, and whatever it recorded is the actual reason 18790 is silent.
+ * Only lines written after this attempt's restart may be quoted: rotation keeps
+ * a full day per file, and yesterday's "ALC is still alive" unload errors say
+ * nothing about why a freshly started process never loaded the plugin.
+ */
+function summarizeIcceHostError(diagnostics: IcceHostDiagnostics, restartStartedAtMs: number): string {
+  const isError = (line: string): boolean => /error|fail|失败|异常|incompatible|无法/i.test(line);
+  // Stack-trace continuation lines carry no timestamp; keep them instead of
+  // over-filtering a real error whose first line holds the only stamp. The
+  // cutoff drops to whole seconds because log stamps have no sub-second
+  // resolution — a line written right after the restart still lands in it.
+  const restartSecondMs = Math.floor(restartStartedAtMs / 1000) * 1000;
+  const isFresh = (line: string): boolean => {
+    const time = iccceLogLineTimeMs(line);
+    return time === undefined || time >= restartSecondMs;
+  };
+  const freshLines = (tail: string | undefined): string[] => (tail ? tail.split("\n").filter(isFresh) : []);
+  const pluginLines = freshLines(diagnostics.pluginLog?.tail);
+  const hostLines = freshLines(diagnostics.hostLog?.tail);
+  const candidates: string[] = [];
+  for (const line of pluginLines.filter(isError).slice(0, 2)) candidates.push(`ICC-CE 插件日志：${line.trim()}`);
+  if (diagnostics.recovery?.lastErrorMessage && !diagnostics.recovery.autoDisabled) candidates.push(`ICC-CE 记录的加载错误：${diagnostics.recovery.lastErrorMessage}`);
+  for (const line of hostLines.filter((line) => isError(line) && /secagent/i.test(line)).slice(0, 2)) candidates.push(`ICC-CE 宿主日志：${line.trim()}`);
+  if (!candidates.length && !pluginLines.length && !hostLines.length) candidates.push("ICC-CE 重启后未写入新的插件日志，可能仍在启动或启动受阻");
+  return candidates.join("；").slice(0, 400);
+}
+
+/**
+ * Probes whether this process may create files inside `directoryPath`. A
+ * relaunched ICC-CE needs the same capability under its install root: while
+ * loading plugins it creates PluginConfigs/<id>/ and writes
+ * PluginLogs/host/<date>.log, and its PluginManager catches the failure and
+ * silently drops the plugin (field 2026-08-29: a Program Files install
+ * restarted without the admin token showed no plugin in settings, no host log
+ * for the day, and no health endpoint). A probe failure here therefore means
+ * the host must be relaunched elevated.
+ */
+function iccceRootIsWritable(rootPath: string): boolean {
+  try {
+    const probePath = path.win32.join(rootPath, `.secagent-write-probe-${process.pid}-${Date.now()}`);
+    fs.writeFileSync(probePath, "");
+    fs.rmSync(probePath, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Removes our plugin's stale record from ICC-CE's error-recovery bookkeeping
+ * before restarting the host. Every failed load inside 30 minutes counts toward
+ * the auto-disable threshold (3), and once tripped the host skips the plugin at
+ * every startup until the user resets it manually — so OOBE retries would
+ * permanently bury even a fixed plugin version. Only our own entry is dropped;
+ * other plugins' records are preserved.
+ */
+async function resetIccePluginErrorRecovery(rootPath: string, platform: SupportedPlatform, executor: CompanionExecutor | undefined, log: (stage: string, data?: unknown) => void, exists: (candidate: string) => boolean, readFile: (filePath: string) => string): Promise<void> {
+  const api = platformPath(platform);
+  const recoveryPath = api.join(rootPath, "Configs", "plugin_error_recovery.json");
+  try {
+    if (!exists(recoveryPath)) return;
+    const parsed = JSON.parse(readFile(recoveryPath)) as unknown;
+    if (!Array.isArray(parsed)) return;
+    const isOurs = (item: unknown): boolean => Boolean(item && typeof item === "object" && typeof (item as Record<string, unknown>).PluginId === "string" && ((item as Record<string, unknown>).PluginId as string).toLowerCase() === ICCCE_PLUGIN_ID);
+    const ours = parsed.find(isOurs) as Record<string, unknown> | undefined;
+    if (!ours) return;
+    log("errorrecovery.reset", {
+      path: recoveryPath,
+      removedRecord: {
+        failures: Array.isArray(ours.FailureTimestamps) ? ours.FailureTimestamps.length : 0,
+        autoDisabled: ours.AutoDisabled === true,
+        ...(typeof ours.LastErrorMessage === "string" && ours.LastErrorMessage ? { lastErrorMessage: ours.LastErrorMessage } : {})
+      }
+    });
+    if (!executor) {
+      log("errorrecovery.reset.skipped", { reason: "无可用的管理员权限执行器，无法清理宿主的插件错误记录" });
+      return;
+    }
+    const remaining = parsed.filter((item) => !isOurs(item));
+    await executor.writePackage(recoveryPath, Buffer.from(JSON.stringify(remaining, null, 2), "utf8"), (stage, data) => log(stage, data));
+    log("errorrecovery.reset.success", { path: recoveryPath, remainingRecords: remaining.length });
+  } catch (error) {
+    log("errorrecovery.reset.failed", { path: recoveryPath, error: error instanceof Error ? error.message : String(error) });
+  }
 }
 
 function releaseTagFromPage(url: string | undefined, html: string): string | undefined {
@@ -487,19 +742,34 @@ async function fetchReleasePageMetadata(fetcher: Fetcher, now: () => number): Pr
   return undefined;
 }
 
-async function downloadLatestIcccePlugin(fetcher: Fetcher, now: () => number, onProgress?: (phase: IccceInstallPhase, message?: string) => void): Promise<{ bytes: Buffer; version: string; sha256: string }> {
+async function downloadLatestIcccePlugin(fetcher: Fetcher, now: () => number, onProgress?: (phase: IccceInstallPhase, message?: string) => void, onRoute?: DownloadAttemptLogger): Promise<{ bytes: Buffer; version: string; sha256: string }> {
   onProgress?.("downloading", "正在通过 ghproxy.sectl.cn 下载最新 ICC-CE 插件");
   let release: ReleaseMetadata | undefined;
   let lastError: unknown;
-  for (const candidate of marketplaceRequestUrls(`${ICCCE_RELEASE_API_URL}?secagent_cache=${now()}`)) {
+  const metadataCandidates = marketplaceRequestUrls(`${ICCCE_RELEASE_API_URL}?secagent_cache=${now()}`);
+  for (let index = 0; index < metadataCandidates.length; index++) {
+    const candidate = metadataCandidates[index];
+    const startedAt = Date.now();
     try {
       const response = await fetcher(candidate, { signal: AbortSignal.timeout(12_000), headers: { Accept: "application/vnd.github+json", "User-Agent": "SecAgent" } });
-      if (!response.ok) { lastError = new Error(`HTTP ${response.status}`); continue; }
+      if (!response.ok) {
+        lastError = new Error(`HTTP ${response.status}`);
+        onRoute?.(describeDownloadAttempt("release-metadata", candidate, startedAt, { status: response.status, error: `HTTP ${response.status}` }, metadataCandidates.slice(index + 1)));
+        continue;
+      }
       const payload = await response.json() as ReleaseMetadata;
-      if (!payload || typeof payload.tag_name !== "string" || payload.draft === true || payload.prerelease === true || !Array.isArray(payload.assets)) throw new Error("GitHub 最新 Release 信息无效");
+      if (!payload || typeof payload.tag_name !== "string" || payload.draft === true || payload.prerelease === true || !Array.isArray(payload.assets)) {
+        lastError = new Error("GitHub 最新 Release 信息无效");
+        onRoute?.(describeDownloadAttempt("release-metadata", candidate, startedAt, { status: response.status, error: "GitHub 最新 Release 信息无效" }, metadataCandidates.slice(index + 1)));
+        continue;
+      }
+      onRoute?.(describeDownloadAttempt("release-metadata", candidate, startedAt, { status: response.status }, []));
       release = payload;
       break;
-    } catch (error) { lastError = error; }
+    } catch (error) {
+      lastError = error;
+      onRoute?.(describeDownloadAttempt("release-metadata", candidate, startedAt, { error: error instanceof Error ? error.message : String(error) }, metadataCandidates.slice(index + 1)));
+    }
   }
   if (!release) release = await fetchReleasePageMetadata(fetcher, now);
   if (!release) throw new Error(`无法读取 ICC-CE 侧插件最新 Release：${lastError instanceof Error ? lastError.message : String(lastError)}`);
@@ -513,18 +783,41 @@ async function downloadLatestIcccePlugin(fetcher: Fetcher, now: () => number, on
   } catch {
     throw new Error("ICC-CE Release 资产地址无效");
   }
-  for (const candidate of marketplaceRequestUrls(asset.browser_download_url)) {
+  const packageCandidates = marketplaceRequestUrls(asset.browser_download_url);
+  for (let index = 0; index < packageCandidates.length; index++) {
+    const candidate = packageCandidates[index];
+    const startedAt = Date.now();
     try {
       const response = await fetcher(candidate, { signal: AbortSignal.timeout(60_000), headers: { "User-Agent": "SecAgent" } });
-      if (!response.ok) { lastError = new Error(`HTTP ${response.status}`); continue; }
+      if (!response.ok) {
+        lastError = new Error(`HTTP ${response.status}`);
+        onRoute?.(describeDownloadAttempt("plugin-package", candidate, startedAt, { status: response.status, error: `HTTP ${response.status}` }, packageCandidates.slice(index + 1)));
+        continue;
+      }
       const bytes = Buffer.from(await response.arrayBuffer());
-      if (bytes.length > MAX_ICCCE_PLUGIN_BYTES) { lastError = new Error("ICC-CE 插件包过大"); continue; }
-      if (bytes.length < 4 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) { lastError = new Error("ICC-CE 插件包不是有效的 .icpx 压缩包"); continue; }
+      if (bytes.length > MAX_ICCCE_PLUGIN_BYTES) {
+        lastError = new Error("ICC-CE 插件包过大");
+        onRoute?.(describeDownloadAttempt("plugin-package", candidate, startedAt, { status: response.status, bytes: bytes.length, error: "ICC-CE 插件包过大" }, packageCandidates.slice(index + 1)));
+        continue;
+      }
+      if (bytes.length < 4 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) {
+        lastError = new Error("ICC-CE 插件包不是有效的 .icpx 压缩包");
+        onRoute?.(describeDownloadAttempt("plugin-package", candidate, startedAt, { status: response.status, bytes: bytes.length, error: "ICC-CE 插件包不是有效的 .icpx 压缩包" }, packageCandidates.slice(index + 1)));
+        continue;
+      }
       onProgress?.("verifying", "正在校验 ICC-CE 插件 SHA-256");
       const actual = crypto.createHash("sha256").update(bytes).digest("hex");
-      if (actual.toLowerCase() !== digest.toLowerCase()) { lastError = new Error("ICC-CE 插件 SHA-256 校验失败"); continue; }
+      if (actual.toLowerCase() !== digest.toLowerCase()) {
+        lastError = new Error("ICC-CE 插件 SHA-256 校验失败");
+        onRoute?.(describeDownloadAttempt("plugin-package", candidate, startedAt, { status: response.status, bytes: bytes.length, sha256: actual, error: `SHA-256 校验失败，期望 ${digest}` }, packageCandidates.slice(index + 1)));
+        continue;
+      }
+      onRoute?.(describeDownloadAttempt("plugin-package", candidate, startedAt, { status: response.status, bytes: bytes.length, sha256: actual }, []));
       return { bytes, version: release.tag_name.replace(/^v/i, ""), sha256: actual };
-    } catch (error) { lastError = error; }
+    } catch (error) {
+      lastError = error;
+      onRoute?.(describeDownloadAttempt("plugin-package", candidate, startedAt, { error: error instanceof Error ? error.message : String(error) }, packageCandidates.slice(index + 1)));
+    }
   }
   throw new Error(`下载 ICC-CE 插件失败：${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
@@ -550,15 +843,6 @@ async function defaultForceTerminate(pid: number, platform: SupportedPlatform, c
 
 async function defaultIsProcessRunning(pid: number): Promise<boolean> {
   try { process.kill(pid, 0); return true; } catch { return false; }
-}
-
-async function waitForProcessExit(pid: number, isProcessRunning: (pid: number) => Promise<boolean>, timeoutMs = 10_000, pollMs = 250): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (!(await isProcessRunning(pid))) return true;
-    await new Promise((resolve) => setTimeout(resolve, pollMs));
-  }
-  return !(await isProcessRunning(pid));
 }
 
 export class IccceInstaller {
@@ -598,13 +882,13 @@ export class IccceInstaller {
     if (!valid.length) return [...results, ...missing];
 
     const report = (phase: IccceInstallPhase, message?: string, percent?: number) => {
-      const phasePercent = percent ?? ({ downloading: 18, verifying: 38, installing: 62, restarting: 80 } as const)[phase];
+      const phasePercent = percent ?? ({ downloading: 18, verifying: 38, installing: 62, closing: 72, restarting: 80 } as const)[phase];
       onProgress?.({ phase, targetIds, percent: phasePercent, ...(message ? { message } : {}) });
     };
     const log = (stage: string, data: unknown = {}) => this.options.log?.(`companion.iccce.${stage}`, data);
-    log("install.begin", { targetIds, candidates: selected.map((candidate) => ({ id: candidate.id, executablePath: candidate.executablePath, rootPath: candidate.rootPath, pluginPackagesPath: candidate.pluginPackagesPath, pluginsPath: candidate.pluginsPath, version: candidate.version, installedPluginVersion: candidate.installedPluginVersion, pluginHealthy: candidate.pluginHealthy, isRunning: candidate.isRunning, pid: candidate.pid })) });
-    const packageData = await downloadLatestIcccePlugin(this.fetcher, this.options.now || Date.now, (phase, message) => report(phase, message));
-    log("download.success", { version: packageData.version, bytes: packageData.bytes.length, sha256: packageData.sha256 });
+    log("install.begin", { targetIds, candidates: selected.map((candidate) => ({ id: candidate.id, executablePath: candidate.executablePath, rootPath: candidate.rootPath, pluginPackagesPath: candidate.pluginPackagesPath, pluginsPath: candidate.pluginsPath, version: candidate.version, installedPluginVersion: candidate.installedPluginVersion, pluginHealthy: candidate.pluginHealthy, pluginDisabled: candidate.pluginDisabled, pluginDisableReason: candidate.pluginDisableReason, isRunning: candidate.isRunning, pid: candidate.pid })) });
+    const packageData = await downloadLatestIcccePlugin(this.fetcher, this.options.now || Date.now, (phase, message) => report(phase, message), (attempt) => log("download.attempt", attempt));
+    log("download.success", { version: packageData.version, bytes: packageData.bytes.length, sha256: packageData.sha256, repository: ICCCE_PLUGIN_REPOSITORY, asset: ICCCE_PLUGIN_ASSET_NAME });
     const groups = new Map<string, IccceInstallCandidate[]>();
     for (const candidate of valid) {
       const key = normalizePath(candidate.rootPath, this.platform);
@@ -612,16 +896,21 @@ export class IccceInstaller {
     }
     const restart = this.options.restartProcess || ((executablePath: string, args: string[]) =>
       startCompanionProcessWithSameElevation(executablePath, args, this.platform, (stage, data) => log(stage, data)));
+    const restartElevated = this.options.restartElevatedProcess
+      || ((executablePath: string, args: string[]) => executor
+        ? executor.startProcess(executablePath, args, (stage, data) => log(stage, data))
+        : startCompanionProcess(executablePath, args, this.platform, (stage, data) => log(stage, data)));
     const isRunning = this.options.isProcessRunning || ((pid: number) => executor ? executor.isProcessRunning(pid, (stage, data) => log(stage, data)) : defaultIsProcessRunning(pid));
     const requestClose = this.options.requestGracefulClose || ((pid: number) => executor ? executor.requestGracefulClose(pid, (stage, data) => log(stage, data)) : defaultRequestGracefulClose(pid, this.platform, this.commandRunner));
     const forceTerminate = this.options.forceTerminateProcess || ((pid: number) => executor ? executor.forceTerminate(pid, (stage, data) => log(stage, data)) : defaultForceTerminate(pid, this.platform, this.commandRunner));
     const gracefulCloseTimeoutMs = this.options.gracefulCloseTimeoutMs ?? 2_000;
     const exists = this.options.exists || defaultExists;
     const readFile = this.options.readFile || defaultReadFile;
+    const listDir = this.options.listDir || defaultListDir;
     const installPackage = this.options.installPackage || ((destinationPath: string, bytes: Buffer, spec: CompanionPackageSpec) =>
       installCompanionPackage(destinationPath, bytes, spec, this.platform, executor, (stage, data) => log(stage, data)));
     for (const group of groups.values()) {
-      log("group.begin", { rootPath: group[0].rootPath, targets: group.map((candidate) => candidate.id), pluginPackagesPath: group[0].pluginPackagesPath, pluginsPath: group[0].pluginsPath });
+      log("group.begin", { rootPath: group[0].rootPath, targets: group.map((candidate) => candidate.id), pluginPackagesPath: group[0].pluginPackagesPath, pluginsPath: group[0].pluginsPath, pluginDisabled: group.some((candidate) => candidate.pluginDisabled) });
       const alreadyInstalled = group.every((candidate) => candidate.installedPluginVersion
         && (!candidate.isRunning || candidate.pluginHealthy === true)
         && compareVersions(candidate.installedPluginVersion, packageData.version) >= 0);
@@ -629,71 +918,156 @@ export class IccceInstaller {
         for (const candidate of group) results.push({ targetId: candidate.id, ok: true, action: "already-installed", message: `已安装 ICC-CE 插件 v${packageData.version}`, version: packageData.version });
         continue;
       }
-      const running = group.filter((candidate) => candidate.isRunning && candidate.pid !== undefined);
-      const closed: IccceInstallCandidate[] = [];
-      let closeFailed = false;
-      for (const candidate of running) {
-        let exited = false;
-        log("process.close.begin", { pid: candidate.pid, executablePath: candidate.executablePath });
-        try {
-          const closeAccepted = (await requestClose(candidate.pid!)) !== false;
-          exited = closeAccepted && await waitForProcessExit(candidate.pid!, isRunning, gracefulCloseTimeoutMs, this.options.waitForExitPollMs);
-          log("process.close.result", { pid: candidate.pid, accepted: closeAccepted, exited, method: "graceful" });
-        } catch (error) {
-          log("process.close.failed", { pid: candidate.pid, method: "graceful", error: error instanceof Error ? error.message : String(error) });
-        }
-        if (!exited) {
-          report("restarting", `ICC-CE 未能优雅退出，正在强制结束进程 ${candidate.pid}`);
-          log("process.terminate.begin", { pid: candidate.pid });
-          try {
-            await forceTerminate(candidate.pid!);
-            exited = await waitForProcessExit(candidate.pid!, isRunning, this.options.waitForExitTimeoutMs, this.options.waitForExitPollMs);
-            log("process.terminate.result", { pid: candidate.pid, exited });
-          } catch (error) {
-            log("process.terminate.failed", { pid: candidate.pid, error: error instanceof Error ? error.message : String(error) });
-          }
-        }
-        if (!exited) { closeFailed = true; break; }
-        closed.push(candidate);
+      // Relaunch the host with the privilege its install root demands, not the
+      // privilege SecAgent happens to have. While loading plugins the host
+      // creates PluginConfigs/<id>/ and writes PluginLogs/host/<date>.log under
+      // its root; under a write-protected install (e.g. Program Files) a host
+      // relaunched without the admin token fails both silently — its
+      // PluginManager catches the failure and drops the plugin without a word
+      // (field 2026-08-29: no plugin in settings, no host log for the day, no
+      // health endpoint). The elevated worker that wrote the plugin is still
+      // alive at this point, so the elevated route restores the token without
+      // a second UAC prompt.
+      const rootRequiresElevation = this.platform === "win32"
+        && !(this.options.isDirectoryWritable?.(group[0].rootPath) ?? iccceRootIsWritable(group[0].rootPath));
+      if (rootRequiresElevation) {
+        log("process.restart.elevated", { rootPath: group[0].rootPath, viaExecutor: Boolean(executor) });
       }
-      if (closeFailed) {
-        for (const candidate of closed) await restart(candidate.executablePath, candidate.launchArgs).catch(() => undefined);
-        for (const candidate of group) results.push({ targetId: candidate.id, ok: false, action: "failed", message: "ICC-CE 无法退出，强制结束也失败，未安装插件；请手动关闭后重试" });
+      const relaunch = rootRequiresElevation ? restartElevated : restart;
+      const pluginPath = platformPath(this.platform).join(group[0].pluginsPath, ICCCE_PLUGIN_ID);
+      // Write the plugin BEFORE closing ICC-CE. ICC-CE scans Plugins only once at
+      // startup, and its watchdog relaunches the app ~2s after a force kill — so a
+      // write that happens between kill and relaunch is missed permanently. Files
+      // written up front are found by whichever instance starts next. If the write
+      // fails (e.g. currently-loaded plugin files are locked), fall back to the
+      // close-then-write order below.
+      let preinstalled = false;
+      try {
+        report("installing", "正在写入 ICC-CE 插件文件");
+        const actualPluginPath = await installPackage(pluginPath, packageData.bytes, { pluginId: ICCCE_PLUGIN_ID, manifestFileName: "manifest.json" });
+        preinstalled = true;
+        log("package.preinstall.result", { requestedPath: pluginPath, actualPluginPath, hostRunning: group.some((candidate) => candidate.isRunning) });
+      } catch (error) {
+        log("package.preinstall.failed", { requestedPath: pluginPath, error: error instanceof Error ? error.message : String(error) });
+      }
+      const running = group.filter((candidate) => candidate.isRunning && candidate.pid !== undefined);
+      // Close EVERY process under the installation root, not only the single
+      // pid detection attached. ICC-CE runs a watchdog copy of its own
+      // executable (`--watchdog <pid> <signal>`); it relaunches the main app
+      // ~2s after a force kill, which races our own restart on the
+      // single-instance mutex. The watchdog must die first, and the post-kill
+      // settle window must outlast its relaunch.
+      const processFilter: HostProcessFilter = {
+        names: WINDOWS_ICCCE_EXECUTABLES,
+        roots: [...new Set(group.map((candidate) => candidate.rootPath))]
+      };
+      const listProcesses = this.options.listProcesses
+        ? (filter: HostProcessFilter) => this.options.listProcesses!(filter)
+        : (filter: HostProcessFilter) => enumerateHostProcesses(filter, this.platform, executor, this.commandRunner, (stage, data) => log(stage, data));
+      const closeOutcome = await closeHostProcesses({
+        hostLabel: "ICC-CE",
+        initialPids: running.map((candidate) => candidate.pid!),
+        filter: processFilter,
+        platform: this.platform,
+        listProcesses,
+        isProcessRunning: isRunning,
+        requestGracefulClose: requestClose,
+        forceTerminate,
+        gracefulCloseTimeoutMs,
+        waitForExitTimeoutMs: this.options.waitForExitTimeoutMs,
+        waitForExitPollMs: this.options.waitForExitPollMs,
+        // The watchdog polls its parent every 2s and relaunches on death;
+        // require ~6s of quiet before writing/restarting.
+        quietChecks: 4,
+        settlePollMs: this.options.closeSettlePollMs ?? 1_500,
+        onProgress: (message) => report("closing", message),
+        logger: (stage, data) => log(stage, data)
+      });
+      log("process.close.summary", { closedPids: closeOutcome.closedPids, remaining: closeOutcome.remaining, failed: closeOutcome.failed, rounds: closeOutcome.rounds });
+      const closed = running.filter((candidate) => closeOutcome.closedPids.includes(candidate.pid!));
+      if (closeOutcome.failed) {
+        for (const candidate of closed) await relaunch(candidate.executablePath, candidate.launchArgs).catch(() => undefined);
+        for (const candidate of group) results.push({
+          targetId: candidate.id,
+          ok: false,
+          action: "failed",
+          message: closeOutcome.remaining.length
+            ? `ICC-CE 进程 ${closeOutcome.remaining.map((item) => item.pid).join("、")} 无法退出（可能被看门狗反复拉起），请手动关闭后重试`
+            : preinstalled
+              ? "插件文件已写入，但 ICC-CE 无法自动退出；请手动重启 ICC-CE 后重新检测"
+              : "ICC-CE 无法退出，强制结束也失败，未安装插件；请手动关闭后重试"
+        });
         continue;
       }
-      const pluginPath = platformPath(this.platform).join(group[0].pluginsPath, ICCCE_PLUGIN_ID);
       try {
-        report("installing", "正在解压安装 ICC-CE 插件");
-        const actualPluginPath = await installPackage(pluginPath, packageData.bytes, { pluginId: ICCCE_PLUGIN_ID, manifestFileName: "manifest.json" });
-        log("package.install.result", { requestedPath: pluginPath, actualPluginPath });
+        if (!preinstalled) {
+          report("installing", "正在解压安装 ICC-CE 插件");
+          const actualPluginPath = await installPackage(pluginPath, packageData.bytes, { pluginId: ICCCE_PLUGIN_ID, manifestFileName: "manifest.json" });
+          log("package.install.result", { requestedPath: pluginPath, actualPluginPath });
+        }
         const launchCandidate = closed[0] || group[0];
-        const restarting = closed.length > 0;
+        // Clear our plugin's stale load-failure record before the restart: the
+        // host auto-disables a plugin after 3 failures in 30 minutes and then
+        // never tries to load it again, which would bury this fresh install.
+        await resetIccePluginErrorRecovery(group[0].rootPath, this.platform, executor, log, exists, readFile);
+        // "重启" vs "启动": the host was running when we started, even if its
+        // process died between detection and the close loop.
+        const restarting = running.length > 0;
         report("restarting", restarting ? "正在重新启动 ICC-CE" : "正在启动 ICC-CE");
         log("process.restart.begin", { executablePath: launchCandidate.executablePath, args: launchCandidate.launchArgs, wasRunning: restarting });
         let launchFailed = false;
-        try { await restart(launchCandidate.executablePath, launchCandidate.launchArgs); log("process.restart.success", { executablePath: launchCandidate.executablePath }); }
+        // Freshness cutoff for the host-log hint below: lines older than this
+        // restart describe earlier attempts (often earlier days) and must not
+        // be quoted as this failure's cause.
+        const restartStartedAtMs = Date.now();
+        try { await relaunch(launchCandidate.executablePath, launchCandidate.launchArgs); log("process.restart.success", { executablePath: launchCandidate.executablePath }); }
         catch (error) { launchFailed = true; log("process.restart.failed", { executablePath: launchCandidate.executablePath, error: error instanceof Error ? error.message : String(error) }); }
-        if (!launchFailed) report("verifying", "正在确认 ICC-CE 插件已加载", 94);
+        if (!launchFailed) report("verifying", "正在等待 ICC-CE 插件响应", 94);
         const installedLayout: ResolvedIccceLayout = {
           packageRoot: group[0].rootPath,
           pluginPackagesPath: group[0].pluginPackagesPath,
           pluginsPath: group[0].pluginsPath,
           ...(group[0].packageType ? { packageType: group[0].packageType } : {})
         };
+        // ICC-CE defers plugin loading behind its startup tasks and a slow cold
+        // start (JIT + native deps), so allow a longer wait than the shared
+        // default. 45s proved too short in the field (2026-08-29: 45s after a
+        // restart the host had not even created that day's plugin log yet), so
+        // keep polling up to 90s before declaring the plugin not loaded.
+        const verifyTimeoutMs = this.options.waitForPluginTimeoutMs ?? 90_000;
         const writtenVersion = installedPluginVersion(installedLayout, this.platform, exists, readFile);
         const verifiedVersion = launchFailed ? undefined : await waitForInstalledPlugin(
           () => installedPluginVersion(installedLayout, this.platform, exists, readFile),
           packageData.version,
-          this.options.waitForPluginTimeoutMs,
+          verifyTimeoutMs,
           this.options.waitForPluginPollMs
         );
         const health = launchFailed
           ? { healthy: false, reason: "对方软件未成功启动" }
-          : await waitForIcccePluginHealth(this.fetcher, this.options.waitForPluginTimeoutMs, this.options.waitForPluginPollMs);
+          : await waitForIcccePluginHealth(this.fetcher, verifyTimeoutMs, this.options.waitForPluginPollMs);
         const pluginHealthy = health.healthy;
         const verified = Boolean(verifiedVersion) && pluginHealthy;
         const detectedVersion = verified ? verifiedVersion : writtenVersion;
-        log("verification.result", { expectedVersion: packageData.version, writtenVersion, verifiedVersion, detectedVersion, pluginHealthy, healthReason: health.reason, healthStatus: health.status, verified, launchFailed });
+        // Diagnostic snapshot: which ICC-CE processes exist after the restart
+        // (main app plus its watchdog), proving the watchdog race is closed.
+        try {
+          const snapshot = await listProcesses(processFilter);
+          log("process.post-restart.snapshot", { processes: snapshot });
+        } catch { /* Diagnostic only. */ }
+        // Re-read ICC-CE's disable bookkeeping after the restart: repeated load
+        // failures during earlier attempts may have auto-disabled the plugin.
+        const postDisabledState = readIccePluginDisabledState(group[0].rootPath, this.platform, exists, readFile);
+        const postDisabled = Boolean(postDisabledState.disabledByUser || postDisabledState.autoDisabled);
+        const postDisableHint = postDisabled
+          ? `；${postDisabledState.autoDisabled ? "ICC-CE 已自动禁用此插件，请在 ICC-CE 设置的插件页重置" : "ICC-CE 的插件列表已禁用此插件，请在 ICC-CE 设置中启用"}后重试`
+          : "";
+        // Pull ICC-CE's own logs and error bookkeeping: when the health check
+        // fails this is the only place the real load error is recorded.
+        const hostDiagnostics = readIcceHostDiagnostics(group[0].rootPath, this.platform, exists, readFile, listDir);
+        log("host.diagnostics", { recovery: hostDiagnostics.recovery, hostLog: hostDiagnostics.hostLog, pluginLog: hostDiagnostics.pluginLog });
+        const hostErrorHint = verified || launchFailed ? "" : summarizeIcceHostError(hostDiagnostics, restartStartedAtMs);
+        const hostErrorHintText = hostErrorHint ? `；${hostErrorHint}` : "";
+        log("verification.result", { expectedVersion: packageData.version, writtenVersion, verifiedVersion, detectedVersion, pluginHealthy, healthReason: health.reason, healthStatus: health.status, healthUrl: ICCCE_PLUGIN_HEALTH_URL, verified, launchFailed, pluginDisabled: postDisabled, pluginDisableReason: postDisabledState.lastErrorMessage, hostError: hostErrorHint || undefined });
         for (const candidate of group) {
           results.push({
             targetId: candidate.id,
@@ -703,13 +1077,15 @@ export class IccceInstaller {
               ? `插件包已写入，但 ICC-CE 自动${restarting ? "重启" : "启动"}失败，请手动启动`
               : verified
                 ? restarting ? `已安装 ICC-CE 插件 v${verifiedVersion}，ICC-CE 已自动重启` : `已安装 ICC-CE 插件 v${verifiedVersion}，ICC-CE 已自动启动`
-                : `插件已解压并启动，但未检测到 ICC-CE 插件（${health.reason}），请查看诊断日志后重试`,
+                : verifiedVersion
+                  ? `插件文件已写入，但 ICC-CE 尚未加载插件（${health.reason}${postDisableHint}${hostErrorHintText}），请重试或手动重启 ICC-CE`
+                  : `插件已解压并启动，但未检测到 ICC-CE 插件（${health.reason}${postDisableHint}${hostErrorHintText}），请查看诊断日志后重试`,
             ...(verified && detectedVersion ? { version: detectedVersion } : {})
           });
         }
       } catch (error) {
         log("install.failed", { error: error instanceof Error ? error.message : String(error) });
-        for (const candidate of closed) await restart(candidate.executablePath, candidate.launchArgs).catch(() => undefined);
+        for (const candidate of closed) await relaunch(candidate.executablePath, candidate.launchArgs).catch(() => undefined);
         for (const candidate of group) results.push({ targetId: candidate.id, ok: false, action: "failed", message: `安装 ICC-CE 插件失败：${error instanceof Error ? error.message : String(error)}` });
       }
     }

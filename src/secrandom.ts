@@ -4,15 +4,24 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { compareVersions, marketplaceRequestUrls } from "./marketplace.js";
-import { installCompanionPackage, startCompanionProcessWithSameElevation, type CompanionExecutor, type CompanionLogger, type CompanionPackageSpec } from "./companion-package.js";
+import { compareVersions, describeDownloadAttempt, marketplaceRequestUrls, type DownloadAttemptLogger } from "./marketplace.js";
+import { closeHostProcesses, enumerateHostProcesses, installCompanionPackage, startCompanionProcessWithSameElevation, type CompanionExecutor, type CompanionLogger, type CompanionPackageSpec, type HostProcessFilter, type HostProcessInfo } from "./companion-package.js";
 
 export const SECRANDOM_PLUGIN_REPOSITORY = "SECTL/SecRandom-SecAgent-Plugin";
 export const SECRANDOM_PLUGIN_ID = "secrandom.secagent";
 export const SECRANDOM_PLUGIN_ASSET_NAME = "SecRandom.SecAgentPlugin.srpx";
 export const MIN_SECRANDOM_VERSION = "3.0.0-alpha.1";
-export const SECRANDOM_RELEASE_API_URL = `https://api.github.com/repos/${SECRANDOM_PLUGIN_REPOSITORY}/releases/latest`;
-const SECRANDOM_RELEASE_PAGE_URL = `https://github.com/${SECRANDOM_PLUGIN_REPOSITORY}/releases/latest`;
+export const SECRANDOM_PLUGIN_HEALTH_URL = "http://127.0.0.1:3910/api/secagent/v1/students";
+// The companion plugin is pinned to a known-good release instead of "latest".
+// The released SecRandom v3.0.0-alpha.2 host (master 8f990fd3) removed all
+// SecAgent integration and ships no IExternalStudentDrawService, so plugin
+// v1.0.1 could not load on it and v1.0.2 bound nothing on 3910. v1.0.3
+// restores the loopback transport, draws through the host's IPluginDrawService
+// facade, and is compiled against exactly 8f990fd3. Move the pin forward only
+// after verifying a newer release still loads on the alpha.2 host.
+export const SECRANDOM_PLUGIN_RELEASE_TAG = "v1.0.3";
+export const SECRANDOM_RELEASE_API_URL = `https://api.github.com/repos/${SECRANDOM_PLUGIN_REPOSITORY}/releases/tags/${SECRANDOM_PLUGIN_RELEASE_TAG}`;
+const SECRANDOM_RELEASE_PAGE_URL = `https://github.com/${SECRANDOM_PLUGIN_REPOSITORY}/releases/tag/${SECRANDOM_PLUGIN_RELEASE_TAG}`;
 
 const SECRANDOM_PLUGIN_VERSION_PATTERN = /^version\s*:\s*["']?([^"'\r\n#]+)["']?/im;
 const SECRANDOM_PLUGIN_ID_PATTERN = /^id\s*:\s*["']?([^"'\r\n#]+)["']?/im;
@@ -35,6 +44,8 @@ export interface SecRandomInstallCandidate {
   pluginPackagesPaths?: string[];
   version?: string;
   installedPluginVersion?: string;
+  pluginHealthy?: boolean;
+  healthReason?: string;
   packageType?: string;
   isRunning: boolean;
   pid?: number;
@@ -52,7 +63,7 @@ export interface SecRandomInstallResult {
   version?: string;
 }
 
-export type SecRandomInstallPhase = "downloading" | "verifying" | "installing" | "restarting";
+export type SecRandomInstallPhase = "downloading" | "verifying" | "installing" | "closing" | "restarting";
 export interface SecRandomInstallProgress {
   phase: SecRandomInstallPhase;
   targetIds: string[];
@@ -75,6 +86,7 @@ export interface SecRandomDiscoveryOptions {
   executablePaths?: string[];
   runningProcesses?: SecRandomRunningProcess[];
   commandRunner?: CommandRunner;
+  fetcher?: Fetcher;
   versionOf?: (executablePath: string) => Promise<string | undefined> | string | undefined;
   exists?: (candidate: string) => boolean;
   readFile?: (filePath: string) => string;
@@ -85,11 +97,16 @@ export interface SecRandomInstallerOptions extends SecRandomDiscoveryOptions {
   requestGracefulClose?: (pid: number) => Promise<void | boolean>;
   forceTerminateProcess?: (pid: number) => Promise<void>;
   isProcessRunning?: (pid: number) => Promise<boolean>;
+  /** Process query used while closing; defaults to the elevated worker when one
+   *  is available, so elevated host instances are visible to the kill list. */
+  listProcesses?: (filter: HostProcessFilter) => Promise<HostProcessInfo[]>;
   restartProcess?: (executablePath: string, args: string[]) => Promise<void>;
   /** Graceful close is only a brief opportunity; force termination follows. */
   gracefulCloseTimeoutMs?: number;
   waitForExitTimeoutMs?: number;
   waitForExitPollMs?: number;
+  /** Delay between post-kill re-checks for relaunched processes. */
+  closeSettlePollMs?: number;
   waitForPluginTimeoutMs?: number;
   waitForPluginPollMs?: number;
   installPackage?: (destinationPath: string, bytes: Buffer, spec: CompanionPackageSpec) => Promise<string> | string;
@@ -339,7 +356,36 @@ function installedPluginVersion(dataRoot: string, platform: SupportedPlatform, e
 }
 
 function isSecRandomPluginReady(candidate: SecRandomInstallCandidate): boolean {
-  return Boolean(candidate.installedPluginVersion);
+  return Boolean(candidate.installedPluginVersion && (!candidate.isRunning || candidate.pluginHealthy === true));
+}
+
+interface SecRandomPluginHealthResult {
+  healthy: boolean;
+  reason: string;
+  status?: number;
+}
+
+async function probeSecRandomPluginDetailed(fetcher: Fetcher): Promise<SecRandomPluginHealthResult> {
+  try {
+    const response = await fetcher(SECRANDOM_PLUGIN_HEALTH_URL, { signal: AbortSignal.timeout(1_500), headers: { Accept: "application/json" } });
+    if (!response.ok) return { healthy: false, reason: `SecRandom 插件接口返回 HTTP ${response.status}`, status: response.status };
+    const payload = await response.json() as { students?: unknown };
+    if (payload && Array.isArray(payload.students)) return { healthy: true, reason: "ok", status: response.status };
+    return { healthy: false, reason: "SecRandom 插件接口返回内容不匹配", status: response.status };
+  } catch { return { healthy: false, reason: "SecRandom 插件接口未响应" }; }
+}
+
+// A slow VM can need well over 15s from restart to a responsive plugin
+// interface, and the plugin itself is known-good in that scenario.
+async function waitForSecRandomHealth(fetcher: Fetcher, timeoutMs = 45_000, pollMs = 250): Promise<SecRandomPluginHealthResult> {
+  const deadline = Date.now() + timeoutMs;
+  let last: SecRandomPluginHealthResult = { healthy: false, reason: "SecRandom 插件接口未响应" };
+  while (true) {
+    last = await probeSecRandomPluginDetailed(fetcher);
+    if (last.healthy) return last;
+    if (Date.now() >= deadline) return last;
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
 }
 
 async function waitForInstalledPlugin(
@@ -423,6 +469,7 @@ export async function discoverSecRandomInstallations(options: SecRandomDiscovery
   const exists = options.exists || defaultExists;
   const readFile = options.readFile || defaultReadFile;
   const commandRunner = options.commandRunner || defaultCommandRunner;
+  const fetcher = options.fetcher;
   const running = options.runningProcesses || await discoverRunningProcesses(platform, commandRunner);
   const externalPaths = platform === "win32" && !options.executablePaths?.length && !options.runningProcesses ? await discoverWindowsExternalPaths(commandRunner, env) : [];
   const inputPaths = [
@@ -442,6 +489,7 @@ export async function discoverSecRandomInstallations(options: SecRandomDiscovery
     const layout = resolveSecRandomLayout(executablePath, { platform, home, env, exists, readFile });
     const compatible = isCompatibleSecRandomVersion(version);
     const installed = installedPluginVersion(layout.dataRoot, platform, exists, readFile);
+    const pluginHealth = processInfo && fetcher ? await probeSecRandomPluginDetailed(fetcher) : undefined;
     const candidate: CachedCandidate = {
       id: hashId(executablePath, layout.dataRoot, platform),
       executablePath,
@@ -451,6 +499,7 @@ export async function discoverSecRandomInstallations(options: SecRandomDiscovery
       ...(layout.pluginPackagesPaths.length > 1 ? { pluginPackagesPaths: layout.pluginPackagesPaths } : {}),
       ...(version ? { version } : {}),
       ...(installed ? { installedPluginVersion: installed } : {}),
+      ...(pluginHealth ? { pluginHealthy: pluginHealth.healthy, healthReason: pluginHealth.reason } : {}),
       ...(layout.packageType ? { packageType: layout.packageType } : {}),
       isRunning: Boolean(processInfo),
       ...(processInfo ? { pid: processInfo.pid, launchArgs: parseWindowsCommandLine(processInfo.commandLine).slice(1) } : { launchArgs: [] }),
@@ -518,24 +567,39 @@ async function fetchReleasePageMetadata(fetcher: Fetcher, now: () => number): Pr
   return undefined;
 }
 
-async function downloadLatestSecRandomPlugin(fetcher: Fetcher, now: () => number, onProgress?: (phase: SecRandomInstallPhase, message?: string) => void): Promise<{ bytes: Buffer; version: string; sha256: string }> {
-  onProgress?.("downloading", "正在通过 ghproxy.sectl.cn 下载最新 SecRandom 插件");
+async function downloadLatestSecRandomPlugin(fetcher: Fetcher, now: () => number, onProgress?: (phase: SecRandomInstallPhase, message?: string) => void, onRoute?: DownloadAttemptLogger): Promise<{ bytes: Buffer; version: string; sha256: string }> {
+  onProgress?.("downloading", `正在通过 ghproxy.sectl.cn 下载 SecRandom 插件 ${SECRANDOM_PLUGIN_RELEASE_TAG}`);
   let release: ReleaseMetadata | undefined;
   let lastError: unknown;
-  for (const candidate of marketplaceRequestUrls(`${SECRANDOM_RELEASE_API_URL}?secagent_cache=${now()}`)) {
+  const metadataCandidates = marketplaceRequestUrls(`${SECRANDOM_RELEASE_API_URL}?secagent_cache=${now()}`);
+  for (let index = 0; index < metadataCandidates.length; index++) {
+    const candidate = metadataCandidates[index];
+    const startedAt = Date.now();
     try {
       const response = await fetcher(candidate, { signal: AbortSignal.timeout(12_000), headers: { Accept: "application/vnd.github+json", "User-Agent": "SecAgent" } });
-      if (!response.ok) { lastError = new Error(`HTTP ${response.status}`); continue; }
+      if (!response.ok) {
+        lastError = new Error(`HTTP ${response.status}`);
+        onRoute?.(describeDownloadAttempt("release-metadata", candidate, startedAt, { status: response.status, error: `HTTP ${response.status}` }, metadataCandidates.slice(index + 1)));
+        continue;
+      }
       const payload = await response.json() as ReleaseMetadata;
-      if (!payload || typeof payload.tag_name !== "string" || payload.draft === true || payload.prerelease === true || !Array.isArray(payload.assets)) throw new Error("GitHub 最新 Release 信息无效");
+      if (!payload || typeof payload.tag_name !== "string" || payload.draft === true || payload.prerelease === true || !Array.isArray(payload.assets)) {
+        lastError = new Error(`GitHub Release（${SECRANDOM_PLUGIN_RELEASE_TAG}）信息无效`);
+        onRoute?.(describeDownloadAttempt("release-metadata", candidate, startedAt, { status: response.status, error: `GitHub Release（${SECRANDOM_PLUGIN_RELEASE_TAG}）信息无效` }, metadataCandidates.slice(index + 1)));
+        continue;
+      }
+      onRoute?.(describeDownloadAttempt("release-metadata", candidate, startedAt, { status: response.status }, []));
       release = payload;
       break;
-    } catch (error) { lastError = error; }
+    } catch (error) {
+      lastError = error;
+      onRoute?.(describeDownloadAttempt("release-metadata", candidate, startedAt, { error: error instanceof Error ? error.message : String(error) }, metadataCandidates.slice(index + 1)));
+    }
   }
   if (!release) release = await fetchReleasePageMetadata(fetcher, now);
-  if (!release) throw new Error(`无法读取 SecRandom 最新 Release：${lastError instanceof Error ? lastError.message : String(lastError)}`);
+  if (!release) throw new Error(`无法读取 SecRandom Release（${SECRANDOM_PLUGIN_RELEASE_TAG}）：${lastError instanceof Error ? lastError.message : String(lastError)}`);
   const asset = release.assets.find((item) => item.name === SECRANDOM_PLUGIN_ASSET_NAME && typeof item.browser_download_url === "string");
-  if (!asset) throw new Error(`最新 SecRandom Release 缺少 ${SECRANDOM_PLUGIN_ASSET_NAME}`);
+  if (!asset) throw new Error(`SecRandom Release（${SECRANDOM_PLUGIN_RELEASE_TAG}）缺少 ${SECRANDOM_PLUGIN_ASSET_NAME}`);
   const digest = typeof asset.digest === "string" ? asset.digest.replace(/^sha256:/i, "") : "";
   if (!/^[a-f0-9]{64}$/i.test(digest)) throw new Error("SecRandom Release 缺少有效的 SHA-256 校验值");
   if (typeof asset.size === "number" && asset.size > MAX_SECRANDOM_PLUGIN_BYTES) throw new Error("SecRandom 插件包过大，已停止安装");
@@ -544,17 +608,36 @@ async function downloadLatestSecRandomPlugin(fetcher: Fetcher, now: () => number
   } catch {
     throw new Error("SecRandom Release 资产地址无效");
   }
-  for (const candidate of marketplaceRequestUrls(asset.browser_download_url)) {
+  const packageCandidates = marketplaceRequestUrls(asset.browser_download_url);
+  for (let index = 0; index < packageCandidates.length; index++) {
+    const candidate = packageCandidates[index];
+    const startedAt = Date.now();
     try {
       const response = await fetcher(candidate, { signal: AbortSignal.timeout(60_000), headers: { "User-Agent": "SecAgent" } });
-      if (!response.ok) { lastError = new Error(`HTTP ${response.status}`); continue; }
+      if (!response.ok) {
+        lastError = new Error(`HTTP ${response.status}`);
+        onRoute?.(describeDownloadAttempt("plugin-package", candidate, startedAt, { status: response.status, error: `HTTP ${response.status}` }, packageCandidates.slice(index + 1)));
+        continue;
+      }
       const bytes = Buffer.from(await response.arrayBuffer());
-      if (bytes.length > MAX_SECRANDOM_PLUGIN_BYTES) { lastError = new Error("SecRandom 插件包过大"); continue; }
+      if (bytes.length > MAX_SECRANDOM_PLUGIN_BYTES) {
+        lastError = new Error("SecRandom 插件包过大");
+        onRoute?.(describeDownloadAttempt("plugin-package", candidate, startedAt, { status: response.status, bytes: bytes.length, error: "SecRandom 插件包过大" }, packageCandidates.slice(index + 1)));
+        continue;
+      }
       onProgress?.("verifying", "正在校验 SecRandom 插件 SHA-256");
       const actual = crypto.createHash("sha256").update(bytes).digest("hex");
-      if (actual.toLowerCase() !== digest.toLowerCase()) { lastError = new Error("SecRandom 插件 SHA-256 校验失败"); continue; }
+      if (actual.toLowerCase() !== digest.toLowerCase()) {
+        lastError = new Error("SecRandom 插件 SHA-256 校验失败");
+        onRoute?.(describeDownloadAttempt("plugin-package", candidate, startedAt, { status: response.status, bytes: bytes.length, sha256: actual, error: `SHA-256 校验失败，期望 ${digest}` }, packageCandidates.slice(index + 1)));
+        continue;
+      }
+      onRoute?.(describeDownloadAttempt("plugin-package", candidate, startedAt, { status: response.status, bytes: bytes.length, sha256: actual }, []));
       return { bytes, version: release.tag_name, sha256: actual };
-    } catch (error) { lastError = error; }
+    } catch (error) {
+      lastError = error;
+      onRoute?.(describeDownloadAttempt("plugin-package", candidate, startedAt, { error: error instanceof Error ? error.message : String(error) }, packageCandidates.slice(index + 1)));
+    }
   }
   throw new Error(`下载 SecRandom 插件失败：${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
@@ -582,15 +665,6 @@ async function defaultIsProcessRunning(pid: number): Promise<boolean> {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
-async function waitForProcessExit(pid: number, isProcessRunning: (pid: number) => Promise<boolean>, timeoutMs = 10_000, pollMs = 250): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (!(await isProcessRunning(pid))) return true;
-    await new Promise((resolve) => setTimeout(resolve, pollMs));
-  }
-  return !(await isProcessRunning(pid));
-}
-
 export class SecRandomInstaller {
   private candidates = new Map<string, SecRandomInstallCandidate>();
   private readonly platform: SupportedPlatform;
@@ -606,13 +680,13 @@ export class SecRandomInstaller {
   }
 
   async detect(): Promise<SecRandomInstallCandidate[]> {
-    const discovered = await discoverSecRandomInstallations({ ...this.options, commandRunner: this.commandRunner, platform: this.platform, executablePaths: [...(this.options.executablePaths || []), ...[...this.candidates.values()].map((candidate) => candidate.executablePath)] });
+    const discovered = await discoverSecRandomInstallations({ ...this.options, fetcher: this.fetcher, commandRunner: this.commandRunner, platform: this.platform, executablePaths: [...(this.options.executablePaths || []), ...[...this.candidates.values()].map((candidate) => candidate.executablePath)] });
     this.candidates = new Map(discovered.map((candidate) => [candidate.id, candidate]));
     return discovered;
   }
 
   async inspect(executablePath: string): Promise<SecRandomInstallCandidate | undefined> {
-    const discovered = await discoverSecRandomInstallations({ ...this.options, commandRunner: this.commandRunner, platform: this.platform, executablePaths: [executablePath] });
+    const discovered = await discoverSecRandomInstallations({ ...this.options, fetcher: this.fetcher, commandRunner: this.commandRunner, platform: this.platform, executablePaths: [executablePath] });
     const candidate = discovered[0];
     if (candidate) this.candidates.set(candidate.id, candidate);
     return candidate;
@@ -629,13 +703,13 @@ export class SecRandomInstaller {
     if (!valid.length) return [...results, ...missing];
 
     const report = (phase: SecRandomInstallPhase, message?: string, percent?: number) => {
-      const phasePercent = percent ?? ({ downloading: 18, verifying: 38, installing: 62, restarting: 80 } as const)[phase];
+      const phasePercent = percent ?? ({ downloading: 18, verifying: 38, installing: 62, closing: 72, restarting: 80 } as const)[phase];
       onProgress?.({ phase, targetIds, percent: phasePercent, ...(message ? { message } : {}) });
     };
     const log = (stage: string, data: unknown = {}) => this.options.log?.(`companion.secrandom.${stage}`, data);
-    log("install.begin", { targetIds, candidates: selected.map((candidate) => ({ id: candidate.id, executablePath: candidate.executablePath, rootPath: candidate.rootPath, dataRoot: candidate.dataRoot, pluginPackagesPath: candidate.pluginPackagesPath, pluginPackagesPaths: candidate.pluginPackagesPaths, version: candidate.version, installedPluginVersion: candidate.installedPluginVersion, isRunning: candidate.isRunning, pid: candidate.pid })) });
-    const packageData = await downloadLatestSecRandomPlugin(this.fetcher, this.options.now || Date.now, (phase, message) => report(phase, message));
-    log("download.success", { version: packageData.version, bytes: packageData.bytes.length, sha256: packageData.sha256 });
+    log("install.begin", { targetIds, candidates: selected.map((candidate) => ({ id: candidate.id, executablePath: candidate.executablePath, rootPath: candidate.rootPath, dataRoot: candidate.dataRoot, pluginPackagesPath: candidate.pluginPackagesPath, pluginPackagesPaths: candidate.pluginPackagesPaths, version: candidate.version, installedPluginVersion: candidate.installedPluginVersion, pluginHealthy: candidate.pluginHealthy, healthReason: candidate.healthReason, isRunning: candidate.isRunning, pid: candidate.pid })) });
+    const packageData = await downloadLatestSecRandomPlugin(this.fetcher, this.options.now || Date.now, (phase, message) => report(phase, message), (attempt) => log("download.attempt", attempt));
+    log("download.success", { version: packageData.version, bytes: packageData.bytes.length, sha256: packageData.sha256, repository: SECRANDOM_PLUGIN_REPOSITORY, asset: SECRANDOM_PLUGIN_ASSET_NAME });
     const api = platformPath(this.platform);
     const groups = new Map<string, SecRandomInstallCandidate[]>();
     for (const candidate of valid) {
@@ -659,52 +733,80 @@ export class SecRandomInstaller {
         for (const candidate of group) results.push({ targetId: candidate.id, ok: true, action: "already-installed", message: `已安装 SecRandom 插件 v${packageData.version}`, version: packageData.version });
         continue;
       }
-      const running = group.filter((candidate) => candidate.isRunning && candidate.pid !== undefined);
-      const closed: SecRandomInstallCandidate[] = [];
-      let closeFailed = false;
-      for (const candidate of running) {
-        let exited = false;
-        log("process.close.begin", { pid: candidate.pid, executablePath: candidate.executablePath });
-        try {
-          const closeAccepted = (await requestClose(candidate.pid!)) !== false;
-          exited = closeAccepted && await waitForProcessExit(candidate.pid!, isRunning, gracefulCloseTimeoutMs, this.options.waitForExitPollMs);
-          log("process.close.result", { pid: candidate.pid, accepted: closeAccepted, exited, method: "graceful" });
-        } catch (error) {
-          log("process.close.failed", { pid: candidate.pid, method: "graceful", error: error instanceof Error ? error.message : String(error) });
-        }
-        if (!exited) {
-          report("restarting", `SecRandom 未能优雅退出，正在强制结束进程 ${candidate.pid}`);
-          log("process.terminate.begin", { pid: candidate.pid });
-          try {
-            await forceTerminate(candidate.pid!);
-            exited = await waitForProcessExit(candidate.pid!, isRunning, this.options.waitForExitTimeoutMs, this.options.waitForExitPollMs);
-            log("process.terminate.result", { pid: candidate.pid, exited });
-          } catch (error) {
-            log("process.terminate.failed", { pid: candidate.pid, error: error instanceof Error ? error.message : String(error) });
-          }
-        }
-        if (!exited) { closeFailed = true; break; }
-        closed.push(candidate);
+      // Write the plugin BEFORE closing SecRandom (it only scans the plugin
+      // directory at startup). If the write fails — typically because the
+      // currently-loaded plugin files are locked — fall back to the
+      // close-then-write order below.
+      const dataRoot = group[0].dataRoot;
+      const pluginPath = api.join(dataRoot, "plugins", SECRANDOM_PLUGIN_ID);
+      let preinstalled = false;
+      try {
+        report("installing", "正在写入 SecRandom 插件文件");
+        const actualPluginPath = await installPackage(pluginPath, packageData.bytes, { pluginId: SECRANDOM_PLUGIN_ID, manifestFileName: "manifest.yml" });
+        preinstalled = true;
+        log("package.preinstall.result", { requestedDataRoot: dataRoot, actualPluginPath, hostRunning: group.some((candidate) => candidate.isRunning) });
+      } catch (error) {
+        log("package.preinstall.failed", { requestedDataRoot: dataRoot, requestedPath: pluginPath, error: error instanceof Error ? error.message : String(error) });
       }
-      if (closeFailed) {
+      const running = group.filter((candidate) => candidate.isRunning && candidate.pid !== undefined);
+      // Close EVERY process of the installation, not only the single pid
+      // detection attached (an elevated SecRandom is invisible to the
+      // non-elevated scan and would keep the single-instance lock alive).
+      const processFilter: HostProcessFilter = {
+        names: [WINDOWS_SECRANDOM_EXE, "SecRandom.exe"],
+        roots: [...new Set(group.map((candidate) => api.dirname(candidate.executablePath)))]
+      };
+      const listProcesses = this.options.listProcesses
+        ? (filter: HostProcessFilter) => this.options.listProcesses!(filter)
+        : (filter: HostProcessFilter) => enumerateHostProcesses(filter, this.platform, executor, this.commandRunner, (stage, data) => log(stage, data));
+      const closeOutcome = await closeHostProcesses({
+        hostLabel: "SecRandom",
+        initialPids: running.map((candidate) => candidate.pid!),
+        filter: processFilter,
+        platform: this.platform,
+        listProcesses,
+        isProcessRunning: isRunning,
+        requestGracefulClose: requestClose,
+        forceTerminate,
+        gracefulCloseTimeoutMs,
+        waitForExitTimeoutMs: this.options.waitForExitTimeoutMs,
+        waitForExitPollMs: this.options.waitForExitPollMs,
+        settlePollMs: this.options.closeSettlePollMs,
+        onProgress: (message) => report("closing", message),
+        logger: (stage, data) => log(stage, data)
+      });
+      log("process.close.summary", { closedPids: closeOutcome.closedPids, remaining: closeOutcome.remaining, failed: closeOutcome.failed, rounds: closeOutcome.rounds });
+      const closed = running.filter((candidate) => closeOutcome.closedPids.includes(candidate.pid!));
+      if (closeOutcome.failed) {
         for (const candidate of closed) await restart(candidate.executablePath, candidate.launchArgs).catch(() => undefined);
-        for (const candidate of group) results.push({ targetId: candidate.id, ok: false, action: "failed", message: "SecRandom 无法退出，强制结束也失败，未安装插件；请手动关闭后重试" });
+        for (const candidate of group) results.push({
+          targetId: candidate.id,
+          ok: false,
+          action: "failed",
+          message: closeOutcome.remaining.length
+            ? `SecRandom 进程 ${closeOutcome.remaining.map((item) => item.pid).join("、")} 无法退出，请手动关闭后重试`
+            : preinstalled
+              ? "插件文件已写入，但 SecRandom 无法自动退出；请手动重启 SecRandom 后重新检测"
+              : "SecRandom 无法退出，强制结束也失败，未安装插件；请手动关闭后重试"
+        });
         continue;
       }
       try {
-        report("installing", "正在解压安装 SecRandom 插件");
-        const dataRoot = group[0].dataRoot;
-        const pluginPath = api.join(dataRoot, "plugins", SECRANDOM_PLUGIN_ID);
-        const actualPluginPath = await installPackage(pluginPath, packageData.bytes, { pluginId: SECRANDOM_PLUGIN_ID, manifestFileName: "manifest.yml" });
-        log("package.install.result", { requestedDataRoot: dataRoot, actualPluginPath, detectedPackageDirectory: group[0].pluginPackagesPath });
+        if (!preinstalled) {
+          report("installing", "正在解压安装 SecRandom 插件");
+          const actualPluginPath = await installPackage(pluginPath, packageData.bytes, { pluginId: SECRANDOM_PLUGIN_ID, manifestFileName: "manifest.yml" });
+          log("package.install.result", { requestedDataRoot: dataRoot, actualPluginPath, detectedPackageDirectory: group[0].pluginPackagesPath });
+        }
         const launchCandidate = closed[0] || group[0];
-        const restarting = closed.length > 0;
+        // "重启" vs "启动": the host was running when we started, even if its
+        // process died between detection and the close loop.
+        const restarting = running.length > 0;
         report("restarting", restarting ? "正在重新启动 SecRandom" : "正在启动 SecRandom");
         log("process.restart.begin", { executablePath: launchCandidate.executablePath, args: launchCandidate.launchArgs, wasRunning: restarting });
         let launchFailed = false;
         try { await restart(launchCandidate.executablePath, launchCandidate.launchArgs); log("process.restart.success", { executablePath: launchCandidate.executablePath }); }
         catch (error) { launchFailed = true; log("process.restart.failed", { executablePath: launchCandidate.executablePath, error: error instanceof Error ? error.message : String(error) }); }
-        if (!launchFailed) report("verifying", "正在确认 SecRandom 插件已加载", 94);
+        if (!launchFailed) report("verifying", "正在等待 SecRandom 插件响应", 94);
         const writtenVersion = installedPluginVersion(dataRoot, this.platform, exists, readFile);
         const verifiedVersion = launchFailed ? undefined : await waitForInstalledPlugin(
           () => installedPluginVersion(dataRoot, this.platform, exists, readFile),
@@ -712,9 +814,18 @@ export class SecRandomInstaller {
           this.options.waitForPluginTimeoutMs,
           this.options.waitForPluginPollMs
         );
-        const verified = Boolean(verifiedVersion);
-        const detectedVersion = verifiedVersion || writtenVersion;
-        log("verification.result", { expectedVersion: packageData.version, writtenVersion, verifiedVersion, detectedVersion, verified, launchFailed });
+        const health = launchFailed
+          ? { healthy: false, reason: "对方软件未成功启动" }
+          : await waitForSecRandomHealth(this.fetcher, this.options.waitForPluginTimeoutMs, this.options.waitForPluginPollMs);
+        const pluginHealthy = health.healthy;
+        const verified = Boolean(verifiedVersion) && pluginHealthy;
+        const detectedVersion = verified ? verifiedVersion : writtenVersion;
+        // Diagnostic snapshot: which SecRandom processes exist after the restart.
+        try {
+          const snapshot = await listProcesses(processFilter);
+          log("process.post-restart.snapshot", { processes: snapshot });
+        } catch { /* Diagnostic only. */ }
+        log("verification.result", { expectedVersion: packageData.version, writtenVersion, verifiedVersion, detectedVersion, pluginHealthy, healthReason: health.reason, healthStatus: health.status, healthUrl: SECRANDOM_PLUGIN_HEALTH_URL, verified, launchFailed });
         for (const candidate of group) {
           results.push({
             targetId: candidate.id,
@@ -724,7 +835,9 @@ export class SecRandomInstaller {
               ? `插件包已写入，但 SecRandom 自动${restarting ? "重启" : "启动"}失败，请手动启动`
               : verified
                 ? restarting ? `已安装 SecRandom 插件 v${verifiedVersion}，SecRandom 已自动重启` : `已安装 SecRandom 插件 v${verifiedVersion}，SecRandom 已自动启动`
-                : "插件已解压并启动，但未检测到 SecRandom 插件，请查看诊断日志后重试",
+                : verifiedVersion
+                  ? `插件文件已写入，但 SecRandom 尚未加载插件（${health.reason}），可重试或手动重启 SecRandom`
+                  : `插件已解压并启动，但未检测到 SecRandom 插件（${health.reason}），请查看诊断日志后重试`,
             ...(detectedVersion ? { version: detectedVersion } : {})
           });
         }

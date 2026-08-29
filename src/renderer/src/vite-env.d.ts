@@ -27,14 +27,14 @@ interface MarketplacePlugin { id: string; format?: "secagent" | "agent"; name: s
 interface DetectedCompanionApp { pluginId: string; appName: string; description: string; icon: string; detected: boolean; evidence?: string }
 interface ClassIslandInstallCandidate { id: string; executablePath: string; rootPath: string; dataRoot: string; pluginPackagesPath: string; version?: string; installedPluginVersion?: string; pluginHealthy?: boolean; packageType?: string; isRunning: boolean; pid?: number; processIds?: number[]; launchArgs: string[]; source: string; compatible: boolean; reason?: string }
 interface ClassIslandInstallResult { targetId: string; ok: boolean; action: "installed" | "already-installed" | "skipped" | "failed"; message: string; version?: string }
-type ClassIslandInstallPhase = "downloading" | "verifying" | "installing" | "restarting";
-interface ClassIslandInstallProgress { phase: "downloading" | "verifying" | "installing" | "restarting"; targetIds: string[]; percent?: number; message?: string }
-interface SecRandomInstallCandidate { id: string; executablePath: string; rootPath: string; dataRoot: string; pluginPackagesPath: string; version?: string; installedPluginVersion?: string; packageType?: string; isRunning: boolean; pid?: number; launchArgs: string[]; source: string; compatible: boolean; reason?: string }
+type ClassIslandInstallPhase = "downloading" | "verifying" | "installing" | "closing" | "restarting";
+interface ClassIslandInstallProgress { phase: "downloading" | "verifying" | "installing" | "closing" | "restarting"; targetIds: string[]; percent?: number; message?: string }
+interface SecRandomInstallCandidate { id: string; executablePath: string; rootPath: string; dataRoot: string; pluginPackagesPath: string; version?: string; installedPluginVersion?: string; pluginHealthy?: boolean; healthReason?: string; packageType?: string; isRunning: boolean; pid?: number; launchArgs: string[]; source: string; compatible: boolean; reason?: string }
 interface SecRandomInstallResult { targetId: string; ok: boolean; action: "installed" | "already-installed" | "skipped" | "failed"; message: string; version?: string }
-interface SecRandomInstallProgress { phase: "downloading" | "verifying" | "installing" | "restarting"; targetIds: string[]; percent?: number; message?: string }
+interface SecRandomInstallProgress { phase: "downloading" | "verifying" | "installing" | "closing" | "restarting"; targetIds: string[]; percent?: number; message?: string }
 interface IccceInstallCandidate { id: string; executablePath: string; rootPath: string; pluginPackagesPath: string; pluginsPath: string; version?: string; installedPluginVersion?: string; pluginHealthy?: boolean; packageType?: string; isRunning: boolean; pid?: number; launchArgs: string[]; source: string; compatible: boolean; reason?: string }
 interface IccceInstallResult { targetId: string; ok: boolean; action: "installed" | "already-installed" | "skipped" | "failed"; message: string; version?: string }
-interface IccceInstallProgress { phase: "downloading" | "verifying" | "installing" | "restarting"; targetIds: string[]; percent?: number; message?: string }
+interface IccceInstallProgress { phase: "downloading" | "verifying" | "installing" | "closing" | "restarting"; targetIds: string[]; percent?: number; message?: string }
 interface OobeProgress { step: "source" | "config" | "plugins"; source?: "official" | "custom"; provider?: Omit<ProviderConfig, "apiKey"> }
 interface Window {
   secagent: {
@@ -53,6 +53,7 @@ interface Window {
     exportDiagnosticLogs(): Promise<{ canceled: boolean; path?: string }>;
     officialStatus(): Promise<{ loggedIn: boolean; email: string }>;
     officialBalance(): Promise<{ points: number | null; balances: Array<{ points: number; expiresAt: string | null }>; expired: boolean }>;
+    officialRedeem(code: string): Promise<{ pointsAdded: number; expiresAt: string | null; balance: number | null; balances: Array<{ points: number; expiresAt: string | null }> }>;
     officialOAuthLogin(): Promise<SettingsPayload>;
     officialLogout(): Promise<{ loggedIn: boolean }>;
     saveSettings(payload: SettingsPayload): Promise<SettingsPayload>;

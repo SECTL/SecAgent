@@ -13,7 +13,6 @@ let speechWindow: BrowserWindow | undefined;
 let pendingRemoteAudio: ArrayBuffer[] = [];
 /** "remote" = backend relay /asr/ws; "local" = bundled sherpa-onnx WASM recognizer; "idle" = none. */
 let mode: "remote" | "local" | "idle" = "idle";
-let enhancedRecognition = false;
 let voiceWakeKws: ReturnType<typeof createKws> | undefined;
 let voiceWakeStream: ReturnType<NonNullable<typeof voiceWakeKws>["createStream"]> | undefined;
 let voiceWakePhrase = "";
@@ -171,9 +170,8 @@ export function stopVoiceWake(): void {
   voiceWakeAwaitingFirstAudio = false;
 }
 
-export function startSpeech(window: BrowserWindow | undefined, options?: { betterRecognition?: boolean }): { ok: true; remote: boolean } {
+export function startSpeech(window: BrowserWindow | undefined): { ok: true; remote: boolean } {
   speechWindow = window;
-  enhancedRecognition = options?.betterRecognition === true;
   if (mode === "local" && localRecognizer) return { ok: true, remote: false };
   if (remoteSocket && (remoteSocket.readyState === WebSocket.OPEN || remoteSocket.readyState === WebSocket.CONNECTING)) {
     // The main chat window and the wake overlay share one ASR connection. If the
@@ -198,7 +196,7 @@ export function startSpeech(window: BrowserWindow | undefined, options?: { bette
           // The relay must receive the start control message before binary
           // audio. Sending the buffered audio first makes the relay discard
           // everything spoken while the WebSocket was connecting.
-          try { socket.send(JSON.stringify({ type: "start", better_recognition: enhancedRecognition })); } catch { /* Socket may close during startup. */ }
+          try { socket.send(JSON.stringify({ type: "start" })); } catch { /* Socket may close during startup. */ }
           for (const pcm of pendingRemoteAudio) socket.send(pcm);
           pendingRemoteAudio = [];
         }

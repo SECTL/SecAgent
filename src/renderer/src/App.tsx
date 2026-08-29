@@ -72,7 +72,6 @@ export function App() {
   const [recording, setRecording] = useState(false);
   const [speechProcessing, setSpeechProcessing] = useState(false);
   const [voiceDropZone, setVoiceDropZone] = useState<"cancel" | "edit">("edit");
-  const [betterRecognition, setBetterRecognition] = useState(false);
   const [speechStatus, setSpeechStatus] = useState("");
   const [messageMenu, setMessageMenu] = useState<{ x: number; y: number; messageId: string; text: string; role: SessionMessage["role"]; selection: string } | null>(null);
   const [quotedText, setQuotedText] = useState("");
@@ -106,11 +105,9 @@ export function App() {
     id: number;
     insert: { start: number; end: number };
     result: string;
-    optimizing: boolean;
     stopped: boolean;
     stopRequested: boolean;
     canceled: boolean;
-    better: boolean;
     resolve?: (result: { text: string; error?: string }) => void;
     settleTimer?: number;
     timeout?: number;
@@ -145,7 +142,7 @@ export function App() {
   const waitForSpeechResult = (session: NonNullable<typeof speechSessionRef.current>) => new Promise<{ text: string; error?: string }>((resolve) => {
     session.resolve = resolve;
     session.timeout = window.setTimeout(() => settleSpeechSession(session, { text: session.result }), 10000);
-    if (session.stopped && !session.optimizing) {
+    if (session.stopped) {
       session.settleTimer = window.setTimeout(() => settleSpeechSession(session, { text: session.result }), 250);
     }
   });
@@ -169,7 +166,6 @@ export function App() {
       ]);
       const customMode = Boolean(savedSettings.customModelMode);
       setCustomModelMode(customMode);
-      setBetterRecognition(savedSettings.speech.betterRecognition === true);
       const defaultReasoning = (savedSettings.defaultReasoningEffort || "high") as ReasoningEffort;
       setDefaultEffort(defaultReasoning);
       setReasoningEffort(defaultReasoning);
@@ -192,7 +188,6 @@ export function App() {
         void bridge.getSettings().then((settings) => {
           const customMode = Boolean(settings.customModelMode);
           setCustomModelMode(customMode);
-          setBetterRecognition(settings.speech.betterRecognition === true);
           setDefaultEffort((settings.defaultReasoningEffort || "high") as ReasoningEffort);
           setSelectedModelId((current) => {
             if (models.some((model) => model.id === (settings.defaultModelId || current))) return settings.defaultModelId || current;
@@ -212,29 +207,11 @@ export function App() {
       const data = event as { type?: string; text?: string; message?: string };
       const speechSession = speechSessionRef.current;
       if (data.type === "ready" && recordingRef.current) setSpeechStatus("正在聆听…");
-      if (data.type === "optimizing" && speechSession) {
-        speechSession.optimizing = true;
-        if (speechSession.settleTimer !== undefined) window.clearTimeout(speechSession.settleTimer);
-        speechSession.settleTimer = undefined;
-        setSpeechStatus("识别优化中…");
-        return;
-      }
       if (data.type === "partial") return;
       if (data.type === "final" && data.text && speechSession) {
         // Keep recognition out of the draft while recording. The complete
         // utterance is inserted only after the pointer is released.
         speechSession.result += data.text;
-        return;
-      }
-      if (data.type === "enhanced" && speechSession) {
-        speechSession.result = data.text || speechSession.result;
-        settleSpeechSession(speechSession, { text: speechSession.result });
-        return;
-      }
-      if (data.type === "enhance_error" && speechSession) {
-        speechSession.optimizing = false;
-        setSpeechStatus("增强识别失败，已使用基础结果");
-        if (speechSession.stopped) speechSession.settleTimer = window.setTimeout(() => settleSpeechSession(speechSession, { text: speechSession.result }), 250);
         return;
       }
       if (data.type === "error") {
@@ -250,9 +227,7 @@ export function App() {
       }
       if (data.type === "stopped" && speechSession) {
         speechSession.stopped = true;
-        // The relay emits stopped before the optional enhanced result. Give
-        // the optimizing event a chance to arrive before committing the text.
-        if (!speechSession.optimizing && !speechSession.better) speechSession.settleTimer = window.setTimeout(() => settleSpeechSession(speechSession, { text: speechSession.result }), 250);
+        speechSession.settleTimer = window.setTimeout(() => settleSpeechSession(speechSession, { text: speechSession.result }), 250);
         return;
       }
     });
@@ -536,11 +511,9 @@ export function App() {
       id: ++speechInputId.current,
       insert: selection,
       result: "",
-      optimizing: false,
       stopped: false,
       stopRequested: false,
-      canceled: false,
-      better: false
+      canceled: false
     };
     speechSessionRef.current = speechSession;
     setVoiceDropZone("edit");
@@ -548,8 +521,7 @@ export function App() {
     setRecordingState(true);
     setSpeechStatus("正在启动语音识别…");
     try {
-      const speechStart = await bridge.startSpeech();
-      speechSession.better = betterRecognition && speechStart.remote === true;
+      await bridge.startSpeech();
       if (speechSession.stopRequested) {
         if (speechSessionRef.current === speechSession) speechSessionRef.current = undefined;
         return false;
@@ -597,7 +569,7 @@ export function App() {
     }
     setRecordingState(false);
     setSpeechProcessing(true);
-    setSpeechStatus(betterRecognition ? "识别优化中…" : "正在识别…");
+    setSpeechStatus("正在识别…");
     const resultPromise = waitForSpeechResult(speechSession);
     try {
       await bridge.stopSpeech();

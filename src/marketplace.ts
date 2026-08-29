@@ -361,6 +361,47 @@ export function marketplaceRequestUrls(directUrl: string): string[] {
   return [`${DEFAULT_MARKETPLACE_PROXY_URL}/${directUrl}`, directUrl];
 }
 
+/** Which network route a request URL uses: the ghproxy mirror or the origin host. */
+export function downloadRouteOfUrl(url: string): "proxy" | "direct" {
+  return url.startsWith(DEFAULT_MARKETPLACE_PROXY_URL) ? "proxy" : "direct";
+}
+
+export interface DownloadAttemptRecord {
+  /** Download stage: release metadata lookup or the plugin package itself. */
+  stage: "release-metadata" | "plugin-package";
+  route: "proxy" | "direct";
+  url: string;
+  status?: number;
+  bytes?: number;
+  sha256?: string;
+  durationMs: number;
+  error?: string;
+  /** Present when this attempt failed and another route will be tried. */
+  fallbackTo?: "proxy" | "direct";
+}
+
+export type DownloadAttemptLogger = (attempt: DownloadAttemptRecord) => void;
+
+/**
+ * Logs one download attempt against the candidate list. Callers invoke this for
+ * every candidate result so failures record the route that broke and the fallback.
+ */
+export function describeDownloadAttempt(stage: DownloadAttemptRecord["stage"], url: string, startedAt: number, outcome: { status?: number; bytes?: number; sha256?: string; error?: string }, remainingCandidates: string[]): DownloadAttemptRecord {
+  const record: DownloadAttemptRecord = {
+    stage,
+    route: downloadRouteOfUrl(url),
+    url,
+    durationMs: Math.max(0, Date.now() - startedAt),
+    ...(outcome.status !== undefined ? { status: outcome.status } : {}),
+    ...(outcome.bytes !== undefined ? { bytes: outcome.bytes } : {}),
+    ...(outcome.sha256 !== undefined ? { sha256: outcome.sha256 } : {}),
+    ...(outcome.error !== undefined ? { error: outcome.error } : {})
+  };
+  const next = remainingCandidates[0];
+  if (outcome.error !== undefined && next) record.fallbackTo = downloadRouteOfUrl(next);
+  return record;
+}
+
 function addCacheBust(url: string): string {
   const separator = url.includes("?") ? "&" : "?";
   return `${url}${separator}secagent_cache=${Date.now()}`;

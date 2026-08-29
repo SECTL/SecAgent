@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import AdmZip from "adm-zip";
-import { installCompanionPackage } from "./companion-package.js";
+import { ELEVATED_WORKER_SCRIPT, installCompanionPackage } from "./companion-package.js";
 
 function archiveBytes(manifestName: string, manifest: string): Buffer {
   const zip = new AdmZip();
@@ -68,4 +69,63 @@ test("rejects an invalid companion package before touching the destination", asy
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("elevated worker script never reassigns the case-insensitive $Root variable", () => {
+  // PowerShell variables are case-insensitive: `$root = ...` or
+  // `foreach ($root in ...)` clobbers the worker's $Root parameter and
+  // silently redirects the whole request loop into a host install
+  // directory — the alpha.13 stall where every elevated operation timed out.
+  assert.equal(/\$root\s*(=|\+=|-=|\+\+|--)/i.test(ELEVATED_WORKER_SCRIPT), false, "script assigns $root (case-insensitive collision with the $Root parameter)");
+  assert.equal(/foreach\s*\(\s*\$root\s+in\b/i.test(ELEVATED_WORKER_SCRIPT), false, "script loops over $root (case-insensitive collision with the $Root parameter)");
+});
+
+test("elevated worker keeps answering after an enumerate request (real protocol run)", { skip: process.platform !== "win32" }, async (t) => {
+  const protocolRoot = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-worker-protocol-"));
+  const fakeInstallRoot = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-worker-install-"));
+  const scriptPath = path.join(protocolRoot, "worker.ps1");
+  fs.writeFileSync(scriptPath, ELEVATED_WORKER_SCRIPT, "utf8");
+  const child = spawn("powershell.exe", [
+    "-NoProfile", "-NoLogo", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+    "-File", scriptPath, "-Root", protocolRoot
+  ], { stdio: ["ignore", "ignore", "ignore"] });
+  t.after(() => {
+    if (child.exitCode === null) child.kill();
+    fs.rmSync(protocolRoot, { recursive: true, force: true });
+    fs.rmSync(fakeInstallRoot, { recursive: true, force: true });
+  });
+  const waitFor = async (predicate: () => boolean, timeoutMs: number): Promise<boolean> => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (predicate()) return true;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return false;
+  };
+  const sendRequest = async (id: string, body: Record<string, unknown>): Promise<Record<string, unknown> | undefined> => {
+    fs.writeFileSync(path.join(protocolRoot, `request-${id}.json`), JSON.stringify({ id, ...body }), "utf8");
+    if (!await waitFor(() => fs.existsSync(path.join(protocolRoot, `result-${id}.json`)), 20_000)) return undefined;
+    const response = JSON.parse(fs.readFileSync(path.join(protocolRoot, `result-${id}.json`), "utf8")) as Record<string, unknown>;
+    fs.rmSync(path.join(protocolRoot, `result-${id}.json`), { force: true });
+    return response;
+  };
+
+  assert.equal(await waitFor(() => fs.existsSync(path.join(protocolRoot, "ready")), 30_000), true, "worker never became ready");
+
+  // enumerate with roots pointing at another directory: this request used to
+  // overwrite $Root (case-insensitive `$root` loop variable) and silence the
+  // worker for every operation that followed.
+  const enumerated = await sendRequest("aaaa0000-0000-0000-0000-000000000001", { action: "enumerate", data: { names: ["DefinitelyNotRunning.exe"], roots: [fakeInstallRoot] } });
+  assert.equal(enumerated?.ok, true, "enumerate was not answered");
+  assert.deepEqual(enumerated?.processes, []);
+  assert.equal(fs.readdirSync(fakeInstallRoot).length, 0, "enumerate leaked a result file into the roots directory");
+
+  // The worker must still watch its protocol directory afterwards.
+  const probe = await sendRequest("aaaa0000-0000-0000-0000-000000000002", { action: "is-running", data: { pid: process.pid } });
+  assert.equal(probe?.ok, true, "worker went silent after the enumerate request");
+  assert.equal(probe?.running, true);
+
+  fs.writeFileSync(path.join(protocolRoot, "request-shutdown.json"), JSON.stringify({ id: "shutdown", action: "shutdown", data: {} }), "utf8");
+  assert.equal(await waitFor(() => child.exitCode !== null, 15_000), true, "worker ignored the shutdown request");
+  assert.equal(child.exitCode, 0);
 });

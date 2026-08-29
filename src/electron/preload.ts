@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld("secagent", {
   exportDiagnosticLogs: () => ipcRenderer.invoke("diagnostics:export-logs"),
   officialStatus: () => ipcRenderer.invoke("official:status"),
   officialBalance: () => ipcRenderer.invoke("official:balance"),
+  officialRedeem: (code: string) => ipcRenderer.invoke("official:redeem", code),
   officialOAuthLogin: () => ipcRenderer.invoke("official:oauth-login"),
   officialLogout: () => ipcRenderer.invoke("official:logout"),
   listSkills: () => ipcRenderer.invoke("settings:skills"),
