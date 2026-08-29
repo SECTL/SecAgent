@@ -21,6 +21,17 @@ function writeClassIslandManifest(root: string, version = "0.1.0.1"): void {
   fs.writeFileSync(path.win32.join(path.win32.dirname(manifestPath), "ClassIsland.SecAgent.Plugin.dll"), "test assembly");
 }
 
+function removeInstalledPlugin(root: string): void {
+  const pluginPath = path.win32.join(root, "data", "Plugins", "classisland.secagent");
+  // On a non-Windows host the win32-joined manifest resolves to flat sibling
+  // entries next to the (empty) plugin directory, so removing only the
+  // directory would leave the manifest behind and detection would still
+  // report the plugin as installed. Remove the file entries explicitly.
+  fs.rmSync(path.win32.join(pluginPath, "manifest.yml"), { force: true });
+  fs.rmSync(path.win32.join(pluginPath, "ClassIsland.SecAgent.Plugin.dll"), { force: true });
+  fs.rmSync(pluginPath, { recursive: true, force: true });
+}
+
 function classIslandHealthResponse(input: string | URL): Response | undefined {
   return String(input) === "http://127.0.0.1:18789/health"
     ? new Response(JSON.stringify({ apiVersion: 1, name: "classisland", status: "ok" }), { status: 200 })
@@ -337,7 +348,7 @@ test("restarts a running ClassIsland and starts an idle instance after installin
     assert.match(runningResult.message, /自动重启/);
     assert.deepEqual(launches, [{ executablePath: exe, args: ["--profile", "school"] }]);
 
-    fs.rmSync(path.win32.join(root, "data", "Plugins", "classisland.secagent"), { recursive: true, force: true });
+    removeInstalledPlugin(root);
     launches.length = 0;
     const idleInstaller = new ClassIslandInstaller({
       platform: "win32",
