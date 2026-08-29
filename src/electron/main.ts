@@ -168,7 +168,13 @@ function writeAutostart(enabled: boolean): void {
 
 function launchWindowsInstaller(installerPath: string): void {
   if (process.platform !== "win32") throw new Error("更新安装仅支持 Windows");
-  const child = spawn(installerPath, ["/SP-", "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"], { detached: true, stdio: "ignore", windowsHide: true });
+  // /FORCECLOSEAPPLICATIONS is essential: without it a still-running SecAgent
+  // (e.g. the user reopening the app while the elevated setup waits at UAC)
+  // makes Restart Manager's RmShutdown fail, and the suppressed prompt in
+  // very-silent mode answers with its default (Abort) - the installer exits
+  // silently having installed nothing. Force the close, and let Restart
+  // Manager bring the app back when the files are in place.
+  const child = spawn(installerPath, ["/SP-", "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/FORCECLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS"], { detached: true, stdio: "ignore", windowsHide: true });
   child.once("error", (error) => {
     logMain("updates.install.process.failed", { error: error.message, path: installerPath });
     recordTelemetryFailure({ type: "update.failed", error, context: { phase: "launch" } });

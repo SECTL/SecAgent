@@ -721,34 +721,43 @@ begin
     replaces. SetCurPage re-shows them via UpdateCurPageButtonState on each
     page change, so this must run on every transition. wpWelcome is exempt:
     CurPageChanged(wpWelcome) fires before ClickToStartPage runs, and the
-    walk needs a focusable NextButton to leave that page. }
-  case CurPageID of
-    wpSelectDir, wpReady, wpPreparing, wpInstalling:
-      begin
-        WizardForm.BackButton.Visible := False;
-        WizardForm.NextButton.Visible := False;
-        WizardForm.CancelButton.Visible := False;
-      end;
-    wpFinished:
-      begin
-        WizardForm.BackButton.Visible := False;
-        WizardForm.NextButton.Visible := False;
-        WizardForm.CancelButton.Visible := False;
-        { When installation completes, Inno repositions RunList relative to
-          the (hidden) stock FinishedLabel via ChangeFinishedLabel, which
-          lands it at design y452 - right under our full-width FinishSubtitle
-          label, whose opaque background then paints over the list's top.
-          Re-assert the design position here; this runs after that code and
-          nothing moves the list afterwards. The restart radios (shown
-          instead of the run list when a restart is needed) are tucked into
-          the same slot. }
-        WizardForm.RunList.SetBounds(UiX(UI_MARGIN), UiY(468),
-          UiX(300), UiY(24));
-        WizardForm.YesRadio.SetBounds(UiX(UI_MARGIN), UiY(462),
-          UiX(300), UiY(20));
-        WizardForm.NoRadio.SetBounds(UiX(UI_MARGIN), UiY(486),
-          UiX(300), UiY(20));
-      end;
+    walk needs a focusable NextButton to leave that page.
+
+    SILENT INSTALLS MUST KEEP THE WALK ALIVE: with /VERYSILENT Inno drives
+    the wizard by clicking NextButton (ClickThroughPages); a hidden button
+    fails CanFocus, the page never advances and the install silently aborts
+    ("Failed to proceed to next wizard page"). So when silent, move the
+    buttons off-screen instead of hiding them - they stay focusable but are
+    never seen. }
+  if WizardSilent then begin
+    { keep the buttons focusable but off-screen so Inno's page walk works }
+    WizardForm.BackButton.Left := WizardForm.ClientWidth + UiX(400);
+    WizardForm.NextButton.Left := WizardForm.ClientWidth + UiX(400);
+    WizardForm.CancelButton.Left := WizardForm.ClientWidth + UiX(400);
+  end else begin
+    case CurPageID of
+      wpSelectDir, wpReady, wpPreparing, wpInstalling, wpFinished:
+        begin
+          WizardForm.BackButton.Visible := False;
+          WizardForm.NextButton.Visible := False;
+          WizardForm.CancelButton.Visible := False;
+        end;
+    end;
+  end;
+  if CurPageID = wpFinished then begin
+    { When installation completes, Inno repositions RunList relative to the
+      (hidden) stock FinishedLabel via ChangeFinishedLabel, which lands it at
+      design y452 - right under our full-width FinishSubtitle label, whose
+      opaque background then paints over the list's top. Re-assert the design
+      position here; this runs after that code and nothing moves the list
+      afterwards. The restart radios (shown instead of the run list when a
+      restart is needed) are tucked into the same slot. }
+    WizardForm.RunList.SetBounds(UiX(UI_MARGIN), UiY(468),
+      UiX(300), UiY(24));
+    WizardForm.YesRadio.SetBounds(UiX(UI_MARGIN), UiY(462),
+      UiX(300), UiY(20));
+    WizardForm.NoRadio.SetBounds(UiX(UI_MARGIN), UiY(486),
+      UiX(300), UiY(20));
   end;
   { and keep the notebooks full-bleed in case anything re-derived them }
   WizardForm.OuterNotebook.SetBounds(0, 0, UiX(UI_WIDTH), UiY(UI_HEIGHT));
