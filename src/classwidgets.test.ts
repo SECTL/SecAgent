@@ -13,14 +13,16 @@ import {
   resolveClassWidgetsLayout
 } from "./classwidgets.js";
 
-function writeCwPluginManifest(pluginsRoot: string, version = "0.1.0"): void {  const pluginPath = path.win32.join(pluginsRoot, "cn.sectl.secagent");
-  fs.mkdirSync(pluginPath, { recursive: true });
+function writeCwPluginManifest(pluginsRoot: string, version = "0.1.0"): void {
   const manifest = JSON.stringify({ id: "cn.sectl.secagent", name: "SecAgent 联动", version, api_version: "~=0.4.2", entry: "main.py" });
-  fs.writeFileSync(path.win32.join(pluginPath, "cwplugin.json"), manifest);
-  fs.writeFileSync(path.win32.join(pluginPath, "main.py"), "print('test')");
-  // POSIX hosts treat the win32-joined and slash-joined spellings as different
-  // entries; write both so the discovery helpers find the manifest everywhere
-  // (on Windows they name the same file).
+  // POSIX hosts treat win32-joined paths (a leading "/" normalized into "\")
+  // as cwd-relative backslash names, while discovery reads manifests through
+  // the win32-joined spelling. Create the directory once via the slash
+  // spelling so both forms land inside it, then write each file in both
+  // spellings — on Windows they name the same files.
+  fs.mkdirSync(`${pluginsRoot}/cn.sectl.secagent`, { recursive: true });
+  fs.writeFileSync(path.win32.join(pluginsRoot, "cn.sectl.secagent", "cwplugin.json"), manifest);
+  fs.writeFileSync(path.win32.join(pluginsRoot, "cn.sectl.secagent", "main.py"), "print('test')");
   fs.writeFileSync(`${pluginsRoot}/cn.sectl.secagent/cwplugin.json`, manifest);
   fs.writeFileSync(`${pluginsRoot}/cn.sectl.secagent/main.py`, "print('test')");
 }
@@ -138,8 +140,9 @@ test("installs the cwplugin package and verifies the entry after restart", async
     const exe = path.win32.join(root, "ClassWidgets.exe");
     fs.writeFileSync(exe, "stub");
     const pluginsRoot = path.win32.join(root, "plugins");
-    fs.mkdirSync(path.win32.join(pluginsRoot, "existing"), { recursive: true });
-    fs.writeFileSync(path.win32.join(pluginsRoot, "existing", "keep"), "");
+    // Slash-spelled mkdir so POSIX creates a real directory that both path
+    // spellings resolve into (see writeCwPluginManifest).
+    fs.mkdirSync(`${pluginsRoot}/existing`, { recursive: true });
     fs.writeFileSync(`${pluginsRoot}/existing/keep`, "");
 
     const manifest = JSON.stringify({ id: "cn.sectl.secagent", name: "SecAgent 联动", version: "0.1.0", api_version: "~=0.4.2", entry: "main.py" });
@@ -189,9 +192,9 @@ test("installs the cwplugin package and verifies the entry after restart", async
         assert.equal(spec.pluginId, "cn.sectl.secagent");
         assert.equal(spec.manifestFileName, "cwplugin.json");
         const pluginDir = path.win32.dirname(destinationPath);
-        fs.mkdirSync(path.win32.join(pluginDir, "cn.sectl.secagent"), { recursive: true });
-        fs.writeFileSync(path.win32.join(pluginDir, "cn.sectl.secagent", "cwplugin.json"), manifest);
+        fs.mkdirSync(`${pluginDir}/cn.sectl.secagent`, { recursive: true });
         fs.writeFileSync(`${pluginDir}/cn.sectl.secagent/cwplugin.json`, manifest);
+        fs.writeFileSync(path.win32.join(pluginDir, "cn.sectl.secagent", "cwplugin.json"), manifest);
         assert.ok(bytes.length > 0);
         return destinationPath;
       },
