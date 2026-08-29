@@ -40,6 +40,7 @@ export interface AgentConfig {
   endpoint?: string;
   anthropicVersion?: string;
   maxTokens: number;
+  /** Always the hardcoded SYSTEM_PROMPT from system-prompt.ts; secagent.yaml cannot override it. */
   systemPrompt: string;
   models?: ModelProfile[];
   providers?: ProviderConfig[];

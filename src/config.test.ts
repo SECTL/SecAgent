@@ -3,7 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { initializeWorkspace, isOnboardingComplete, markOnboardingComplete, oobeProgressPath, readOobeProgress, readSettings, saveOobeProgress, saveSettings, type OobeProgress } from "./config.js";
+import YAML from "yaml";
+import { configPath, initializeWorkspace, isOnboardingComplete, loadConfig, markOnboardingComplete, oobeProgressPath, readOobeProgress, readSettings, saveOobeProgress, saveSettings, type OobeProgress } from "./config.js";
+import { SYSTEM_PROMPT } from "./system-prompt.js";
 
 function temporaryWorkspace(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "secagent-oobe-"));
@@ -46,6 +48,30 @@ test("does not persist a custom provider API key in OOBE progress", () => {
     const raw = JSON.parse(fs.readFileSync(oobeProgressPath(workspace), "utf8")) as { provider?: { apiKey?: string } };
     assert.equal(raw.provider?.apiKey, undefined);
     assert.equal("apiKey" in (readOobeProgress(workspace)?.provider || {}), false);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("hardcodes the system prompt and drops workspace overrides", () => {
+  const workspace = temporaryWorkspace();
+  try {
+    initializeWorkspace(workspace);
+
+    // New workspaces are created without a systemPrompt entry.
+    const file = configPath(workspace);
+    const readAgent = (): { systemPrompt?: string } | undefined => (YAML.parse(fs.readFileSync(file, "utf8")) as { agent?: { systemPrompt?: string } }).agent;
+    assert.equal(readAgent()?.systemPrompt, undefined);
+
+    // A workspace-side agent.systemPrompt is ignored at load time...
+    const raw = YAML.parse(fs.readFileSync(file, "utf8")) as { agent: { systemPrompt?: string } };
+    raw.agent.systemPrompt = "workspace override";
+    fs.writeFileSync(file, YAML.stringify(raw), "utf8");
+    assert.equal(loadConfig(workspace).config.agent.systemPrompt, SYSTEM_PROMPT);
+
+    // ...and the stale key disappears from secagent.yaml when settings are saved.
+    saveSettings(workspace, readSettings(workspace));
+    assert.equal(readAgent()?.systemPrompt, undefined);
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
   }

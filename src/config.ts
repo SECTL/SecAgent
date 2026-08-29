@@ -5,6 +5,7 @@ import { expandPath } from "./paths.js";
 import type { McpServerConfig, ModelProfile, ProviderConfig, ReasoningEffort, SecAgentConfig, TelemetrySettings, UpdatePreferences } from "./types.js";
 import type { GoogleModelInfo } from "./google-models.js";
 import { DEFAULT_WAKE_HOTKEY, normalizeWakeHotkey } from "./wake-hotkey.js";
+import { SYSTEM_PROMPT } from "./system-prompt.js";
 
 export const DEFAULT_GOOGLE_MODEL = "gemini-2.5-flash";
 export const DEFAULT_MAX_TOKENS = 16_384;
@@ -20,11 +21,6 @@ export const PROJECT_ENV_FILE = BUNDLED_ENV_FILES.find((file) => fs.existsSync(f
   ?? path.resolve(process.cwd(), ".env");
 
 if (fs.existsSync(PROJECT_ENV_FILE)) loadEnvFile(PROJECT_ENV_FILE, "project");
-export const DEFAULT_SYSTEM_PROMPT = `你是 SecAgent，一个教育场景操作助手。
-
-根据用户指令选择并使用可用工具，完成任务后用中文简洁说明真实结果。
-
-当讲解数学、推导公式，或需要绘制 2D/3D 数学图示时，先读取系统提示词中列出的 math-visualization Skill，并严格遵循其中的图示格式和教学要求。只要图示有助于理解，就必须在最终正文中实际输出图示标签。`;
 export const DEFAULT_TTS_VOICE = "zh-CN-XiaoxiaoNeural";
 export const DEFAULT_TTS_RATE = "+0%";
 export const DEFAULT_WAKE_PHRASE = "小泽同学";
@@ -37,7 +33,6 @@ const template = (workspace: string): SecAgentConfig => ({
   version: 1,
   workspace,
   agent: {
-    systemPrompt: DEFAULT_SYSTEM_PROMPT,
     models: [{
       id: "default",
       name: "gpt-5",
@@ -207,13 +202,11 @@ export function normalizeAndValidate(raw: SecAgentConfig, workspace: string): Se
       apiKeyEnv: "OPENAI_API_KEY",
       baseUrl: "https://api.openai.com/v1",
       endpoint: "/chat/completions",
-      maxTokens: DEFAULT_MAX_TOKENS,
-      systemPrompt: DEFAULT_SYSTEM_PROMPT
-    };
+      maxTokens: DEFAULT_MAX_TOKENS
+    } as SecAgentConfig["agent"];
   }
-  if (typeof raw.agent.systemPrompt !== "string" || !raw.agent.systemPrompt.trim()) {
-    raw.agent.systemPrompt = DEFAULT_SYSTEM_PROMPT;
-  }
+  // 系统提示词写死在源码 system-prompt.ts 中，忽略工作区 YAML 里的 agent.systemPrompt。
+  raw.agent.systemPrompt = SYSTEM_PROMPT;
   raw.tts = { voice: raw.tts?.voice || DEFAULT_TTS_VOICE, rate: raw.tts?.rate || DEFAULT_TTS_RATE };
   raw.updates = {
     channel: raw.updates?.channel === "preview" ? "preview" : DEFAULT_UPDATE_PREFERENCES.channel,
@@ -376,6 +369,8 @@ export function saveSettings(workspaceInput: string, payload: SettingsPayload): 
   const nextWake = { hotkey: normalizeWakeHotkey(payload.wake?.hotkey || DEFAULT_WAKE_HOTKEY), ...(payload.wake?.modelId ? { modelId: payload.wake.modelId } : {}), voiceEnabled: payload.wake?.voiceEnabled === true, voicePhrase: payload.wake?.voicePhrase?.trim() || DEFAULT_WAKE_PHRASE };
   const canonicalAgent = { ...(raw.agent as unknown as Record<string, unknown>), providers, models } as SecAgentConfig["agent"];
   for (const field of LEGACY_AGENT_MODEL_FIELDS) delete (canonicalAgent as unknown as Record<string, unknown>)[field];
+  // 系统提示词写死在源码中，保存时从工作区配置文件里移除该键。
+  delete (canonicalAgent as { systemPrompt?: unknown }).systemPrompt;
   const candidateAgent = { ...canonicalAgent, models: models.map((model) => ({ ...model })) } as SecAgentConfig["agent"];
   const nextSpeech = { betterRecognition: payload.speech?.betterRecognition === true };
   const currentUpdates = raw.updates || DEFAULT_UPDATE_PREFERENCES;
