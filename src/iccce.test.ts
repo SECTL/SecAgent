@@ -20,6 +20,20 @@ function writeIccceManifest(root: string, version = "0.3.2"): void {
   fs.writeFileSync(manifestPath, JSON.stringify({ Id: "inkcanvas.iccce.secagent", Version: version }));
 }
 
+/** Writes an ICC-CE daily host log findable by the installer on every CI
+ *  platform. Diagnostics list the log directory and then read the newest file
+ *  back through a win32-joined path; on a POSIX runner those two spellings
+ *  resolve to different entries (win32.join normalizes the mkdtemp root's
+ *  leading "/" into "\"), so both forms are written — on Windows they name
+ *  the same file. */
+function writeIcceHostLog(root: string, fileName: string, lines: string[]): void {
+  const logDir = path.win32.join(root, "PluginLogs", "host");
+  fs.mkdirSync(logDir, { recursive: true });
+  const content = lines.join("\n");
+  fs.writeFileSync(path.win32.join(logDir, fileName), content);
+  fs.writeFileSync(`${logDir}/${fileName}`, content);
+}
+
 /** Formats `now` (+offset) the way ICC-CE stamps host log lines and names daily files. */
 function iccceLogStamp(offsetMs = 0): string {
   const time = new Date(Date.now() + offsetMs);
@@ -128,7 +142,11 @@ test("terminates the ICC-CE watchdog first and outlives its relaunch before writ
     const listProcesses = async (filter: HostProcessFilter): Promise<HostProcessInfo[]> => {
       enumerateCalls += 1;
       assert.equal(filter.names.includes("InkCanvasForClass.exe"), true);
-      assert.deepEqual(filter.roots, [root]);
+      // The installer reports roots exactly as resolveIccceLayout derives them
+      // (win32.resolve of the exe's directory). On a POSIX CI runner that form
+      // differs from the mkdtemp root's forward-slash spelling, so derive the
+      // expectation the same way instead of comparing the raw root string.
+      assert.deepEqual(filter.roots, [path.win32.resolve(path.win32.dirname(exe))]);
       if (enumerateCalls === 1) {
         // Watchdog copy of the same exe plus the real app, as StartWatchdogIfNeeded launches them.
         return [
@@ -194,16 +212,15 @@ test("quotes ICC-CE's own plugin load error when the health check fails", async 
         AutoDisabled: false
       }
     ]));
-    fs.mkdirSync(path.win32.join(root, "PluginLogs", "host"), { recursive: true });
     // The host writes its plugin log during startup, so the fixture writes it
     // from the fake restart with current timestamps — the failure hint must only
     // quote lines written after this attempt's restart began.
     const writeHostLog = (): void => {
-      fs.writeFileSync(path.win32.join(root, "PluginLogs", "host", `${iccceLogStamp().slice(0, 10)}.log`), [
+      writeIcceHostLog(root, `${iccceLogStamp().slice(0, 10)}.log`, [
         `[${iccceLogStamp()}] [INFO] [host] Loading plugin: SecAgent 联动`,
         `[${iccceLogStamp()}] [ERROR] [host] Failed to load plugin SecAgent 联动 | System.IO.FileNotFoundException: Could not load file or assembly 'InkCanvas.PluginSdk'.`,
         `[${iccceLogStamp()}] [INFO] [host] Plugin loading complete. Loaded 0 plugins`
-      ].join("\n"));
+      ]);
     };
     const stages: Array<{ stage: string; data: unknown }> = [];
     const installer = new IccceInstaller({
@@ -264,12 +281,11 @@ test("ignores stale host-log errors from a previous day when the health check fa
     // has not written a single line today — no log file for today even exists.
     // The hint must not blame yesterday's "ALC is still alive" noise for a
     // fresh process that simply has not initialized its plugin host yet.
-    fs.mkdirSync(path.win32.join(root, "PluginLogs", "host"), { recursive: true });
-    fs.writeFileSync(path.win32.join(root, "PluginLogs", "host", "2026-08-28.log"), [
+    writeIcceHostLog(root, "2026-08-28.log", [
       "[2026-08-28 12:33:43.553] [INFO] [PluginManager] Plugin loaded: SecAgent 联动 v0.3.2 by SecAgent",
       "[2026-08-28 13:18:49.265] [ERROR] [PluginManager] Plugin ALC for inkcanvas.iccce.secagent is still alive after 10 GC passes; some host reference is pinning it (hot reload will fall back to restart).",
       "[2026-08-28 15:01:26.690] [ERROR] [PluginManager] Plugin ALC for inkcanvas.iccce.secagent is still alive after 10 GC passes; some host reference is pinning it (hot reload will fall back to restart)."
-    ].join("\n"));
+    ]);
     const installer = new IccceInstaller({
       platform: "win32",
       executablePaths: [exe],
