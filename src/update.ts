@@ -54,6 +54,8 @@ export interface UpdateRequestHooks {
   onAttempt?: (attempt: UpdateRequestAttempt) => void;
   onEvent?: (event: { name: string; data?: Record<string, unknown> }) => void;
   publicKey?: string;
+  /** Deadline overrides used by deterministic request tests. */
+  timeoutMs?: Partial<UpdateRequestTimeouts>;
 }
 
 export class UpdateRequestError extends Error {
@@ -95,6 +97,22 @@ export interface DownloadedUpdate {
 
 const VERSION_PATTERN = /^v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:\+[0-9A-Za-z.-]+)?$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/i;
+const UPDATE_HEADER_TIMEOUT_MS = 12_000;
+/** Installers stream for minutes; bound the silence between chunks, not the total transfer. */
+const UPDATE_BODY_IDLE_TIMEOUT_MS = 60_000;
+
+export interface UpdateRequestTimeouts {
+  /** Deadline for receiving response headers on each route. */
+  headerMs: number;
+  /** Maximum silence between body chunks while consuming an installer download. */
+  bodyIdleMs: number;
+}
+
+export const UPDATE_REQUEST_TIMEOUTS: UpdateRequestTimeouts = { headerMs: UPDATE_HEADER_TIMEOUT_MS, bodyIdleMs: UPDATE_BODY_IDLE_TIMEOUT_MS };
+
+function resolveRequestTimeouts(hooks: UpdateRequestHooks): UpdateRequestTimeouts {
+  return { ...UPDATE_REQUEST_TIMEOUTS, ...hooks.timeoutMs };
+}
 
 export function normalizeReleaseVersion(tag: string): string | undefined {
   return VERSION_PATTERN.exec(tag.trim())?.[1];
@@ -175,7 +193,7 @@ export async function downloadUpdate(
   const expectedSha = await expectedSha256(release, fetcher, hooks);
   if (!expectedSha) throw new Error("GitHub Release 缺少有效的 SHA-256 校验值");
   const response = await requestGitHub(release.assetUrl, fetcher, { headers: { "User-Agent": "SecAgent" } }, "asset", hooks);
-  const bytes = await readResponseBytes(response, onProgress);
+  const bytes = await readResponseBytes(response, resolveRequestTimeouts(hooks).bodyIdleMs, onProgress);
   const actualSha = crypto.createHash("sha256").update(bytes).digest("hex");
   if (actualSha.toLowerCase() !== expectedSha.toLowerCase()) throw new Error("更新安装包 SHA-256 校验失败");
 
@@ -324,8 +342,13 @@ async function requestGitHub(url: string, fetcher: Fetcher, init: RequestInit, p
   for (const candidate of marketplaceRequestUrls(url)) {
     const startedAt = Date.now();
     const route = candidate.startsWith(`${DEFAULT_MARKETPLACE_PROXY_URL}/`) ? "proxy" : "direct";
+    // The deadline only covers the wait for response headers: AbortSignal.timeout
+    // would stay attached to the returned Response.body and abort a large
+    // installer mid-stream long after a healthy 200 arrived.
+    const controller = new AbortController();
+    const headerTimer = setTimeout(() => controller.abort(), resolveRequestTimeouts(hooks).headerMs);
     try {
-      const response = await fetcher(candidate, { ...init, signal: AbortSignal.timeout(12_000) });
+      const response = await fetcher(candidate, { ...init, signal: controller.signal });
       const attempt: UpdateRequestAttempt = {
         phase,
         route,
@@ -354,12 +377,14 @@ async function requestGitHub(url: string, fetcher: Fetcher, init: RequestInit, p
       attempts.push(attempt);
       hooks.onAttempt?.(attempt);
       lastError = error;
+    } finally {
+      clearTimeout(headerTimer);
     }
   }
   throw new UpdateRequestError(`无法访问 GitHub 更新服务：${errorMessage(lastError)}`, attempts, lastStatus);
 }
 
-async function readResponseBytes(response: Response, onProgress?: (progress: DownloadProgress) => void): Promise<Buffer> {
+async function readResponseBytes(response: Response, bodyIdleMs: number, onProgress?: (progress: DownloadProgress) => void): Promise<Buffer> {
   const totalHeader = response.headers.get("content-length");
   const totalBytes = totalHeader && Number.isFinite(Number(totalHeader)) ? Number(totalHeader) : undefined;
   if (!response.body) {
@@ -371,7 +396,16 @@ async function readResponseBytes(response: Response, onProgress?: (progress: Dow
   const chunks: Buffer[] = [];
   let downloadedBytes = 0;
   while (true) {
-    const result = await reader.read();
+    let result: ReadableStreamReadResult<Uint8Array>;
+    try {
+      // Bound the silence between chunks instead of the total transfer: a slow
+      // but steadily moving installer download must be allowed to finish.
+      result = await raceWithTimer(reader.read(), bodyIdleMs);
+    } catch (error) {
+      // Resolves (never rejects) the pending read, so no unhandled rejection.
+      await reader.cancel(error).catch(() => undefined);
+      throw error;
+    }
     if (result.done) break;
     const chunk = Buffer.from(result.value);
     chunks.push(chunk);
@@ -379,6 +413,27 @@ async function readResponseBytes(response: Response, onProgress?: (progress: Dow
     onProgress?.({ downloadedBytes, ...(totalBytes ? { totalBytes } : {}) });
   }
   return Buffer.concat(chunks);
+}
+
+function readResponseTimeoutError(): Error {
+  return new Error(`更新下载中断：连接超过 ${Math.round(UPDATE_BODY_IDLE_TIMEOUT_MS / 1000)} 秒没有传输数据`);
+}
+
+async function raceWithTimer<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        // Reject first: cancelling the reader afterwards settles the losing
+        // read promise with {done: true}; rejecting last would let that
+        // resolution win the race and swallow the timeout.
+        timer = setTimeout(() => reject(readResponseTimeoutError()), timeoutMs);
+      })
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function parseChecksum(value: string): string | undefined {

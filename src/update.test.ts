@@ -68,6 +68,128 @@ test("downloads and verifies an installer with the release checksum", async () =
   }
 });
 
+test("allows a slow installer body to finish after the request timeout", async () => {
+  const bytes = Buffer.from("slow installer bytes");
+  const digest = crypto.createHash("sha256").update(bytes).digest("hex");
+  const release = {
+    version: "1.2.0-alpha.2",
+    tag: "v1.2.0-alpha.2",
+    releaseType: "alpha" as const,
+    channel: "preview" as const,
+    htmlUrl: "https://github.com/SECTL/SecAgent/releases/tag/v1.2.0-alpha.2",
+    body: "",
+    assetName: releaseAssetName("1.2.0-alpha.2"),
+    assetUrl: "https://github.com/SECTL/SecAgent/releases/download/v1.2.0-alpha.2/SecAgent-Setup-1.2.0-alpha.2.exe",
+    sha256: digest
+  };
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-update-slow-"));
+  try {
+    const fetcher = async (input: string | URL, init?: RequestInit): Promise<Response> => {
+      if (!String(input).endsWith(".exe")) throw new Error(`unexpected URL ${String(input)}`);
+      const signal = init?.signal;
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const timer = setTimeout(() => {
+            controller.enqueue(bytes);
+            controller.close();
+          }, 30);
+          signal?.addEventListener("abort", () => {
+            clearTimeout(timer);
+            controller.error(signal.reason);
+          }, { once: true });
+        }
+      });
+      return new Response(stream, { headers: { "content-length": String(bytes.length) } });
+    };
+    const result = await downloadUpdate(release, root, fetcher, undefined, { timeoutMs: { headerMs: 10, bodyIdleMs: 500 } });
+    assert.equal(fs.readFileSync(result.pending.path).toString(), bytes.toString());
+    assert.equal(result.pending.sha256, digest);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("aborts a stalled installer body within the asset timeout", async () => {
+  const bytes = Buffer.from("never completed");
+  const digest = crypto.createHash("sha256").update(bytes).digest("hex");
+  const release = {
+    version: "1.2.0-alpha.3",
+    tag: "v1.2.0-alpha.3",
+    releaseType: "alpha" as const,
+    channel: "preview" as const,
+    htmlUrl: "https://github.com/SECTL/SecAgent/releases/tag/v1.2.0-alpha.3",
+    body: "",
+    assetName: releaseAssetName("1.2.0-alpha.3"),
+    assetUrl: "https://github.com/SECTL/SecAgent/releases/download/v1.2.0-alpha.3/SecAgent-Setup-1.2.0-alpha.3.exe",
+    sha256: digest
+  };
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-update-stalled-"));
+  try {
+    const fetcher = async (_input: string | URL, init?: RequestInit): Promise<Response> => {
+      const signal = init?.signal;
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          signal?.addEventListener("abort", () => controller.error(signal.reason), { once: true });
+        }
+      });
+      return new Response(stream, { headers: { "content-length": String(bytes.length) } });
+    };
+    await assert.rejects(
+      downloadUpdate(release, root, fetcher, undefined, { timeoutMs: { headerMs: 10, bodyIdleMs: 20 } }),
+      /没有传输数据/
+    );
+    assert.equal(fs.existsSync(path.join(root, release.assetName)), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("streams an installer across header-deadline chunk gaps", async () => {
+  // Reproduces the alpha.18 download failure: headers arrive fast, but body
+  // chunks keep arriving past the old 12-second request deadline. Chunk gaps
+  // here exceed the header timeout yet stay inside the idle bound.
+  const bytes = Buffer.from("0123456789".repeat(8));
+  const digest = crypto.createHash("sha256").update(bytes).digest("hex");
+  const release = {
+    version: "1.2.0-alpha.4",
+    tag: "v1.2.0-alpha.4",
+    releaseType: "alpha" as const,
+    channel: "preview" as const,
+    htmlUrl: "https://github.com/SECTL/SecAgent/releases/tag/v1.2.0-alpha.4",
+    body: "",
+    assetName: releaseAssetName("1.2.0-alpha.4"),
+    assetUrl: "https://github.com/SECTL/SecAgent/releases/download/v1.2.0-alpha.4/SecAgent-Setup-1.2.0-alpha.4.exe",
+    sha256: digest
+  };
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-update-gaps-"));
+  try {
+    const fetcher = async (input: string | URL, init?: RequestInit): Promise<Response> => {
+      if (!String(input).endsWith(".exe")) throw new Error(`unexpected URL ${String(input)}`);
+      const signal = init?.signal;
+      const stream = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          for (const byte of bytes) {
+            await new Promise((resolve) => setTimeout(resolve, 25));
+            if (signal?.aborted) {
+              controller.error(new Error("aborted mid-stream"));
+              return;
+            }
+            controller.enqueue(Uint8Array.of(byte));
+          }
+          controller.close();
+        }
+      });
+      return new Response(stream, { headers: { "content-length": String(bytes.length) } });
+    };
+    const progress: number[] = [];
+    const result = await downloadUpdate(release, root, fetcher, (item) => progress.push(item.downloadedBytes), { timeoutMs: { headerMs: 10, bodyIdleMs: 500 } });
+    assert.equal(fs.readFileSync(result.pending.path).toString(), bytes.toString());
+    assert.equal(progress[progress.length - 1], bytes.length);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("falls back from the GitHub proxy to direct access", async () => {
   const calls: string[] = [];
   const fetcher = async (input: string | URL): Promise<Response> => {
