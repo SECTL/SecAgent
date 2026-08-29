@@ -433,6 +433,16 @@ while ($true) {
 }
 `.replace("{{ENUMERATE_PROCESSES_PS}}", () => ENUMERATE_PROCESSES_PS);
 
+/** PowerShell 5.1 reads a BOM-less .ps1 with the system ANSI codepage. On
+ *  Western locales the UTF-8 continuation bytes of the Chinese diagnostics
+ *  decode to smart quotes (0x91-0x94 are U+2018-U+201D, valid PowerShell
+ *  string delimiters) which close the literals early and abort parsing at
+ *  startup — the worker never becomes ready. The UTF-8 BOM makes every
+ *  locale read the script as UTF-8. */
+export function elevatedWorkerScriptFileContents(): string {
+  return String.fromCharCode(0xfeff) + ELEVATED_WORKER_SCRIPT;
+}
+
 /** Per-action response ceilings. write/install-package retry locked files for
  *  up to ~45s inside the worker and start waits up to 12s for the spawned
  *  process, so they get generous budgets; everything else answers in well
@@ -475,7 +485,7 @@ export class WindowsCompanionExecutor implements CompanionExecutor {
   constructor(logger?: CompanionLogger) {
     this.logger = logger;
     this.scriptPath = path.join(this.root, "worker.ps1");
-    fs.writeFileSync(this.scriptPath, ELEVATED_WORKER_SCRIPT, { encoding: "utf8", flag: "wx" });
+    fs.writeFileSync(this.scriptPath, elevatedWorkerScriptFileContents(), { encoding: "utf8", flag: "wx" });
   }
 
   private log(stage: string, data: unknown = {}): void {

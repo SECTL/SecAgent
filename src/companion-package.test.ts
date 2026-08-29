@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import AdmZip from "adm-zip";
-import { ELEVATED_WORKER_SCRIPT, installCompanionPackage } from "./companion-package.js";
+import { ELEVATED_WORKER_SCRIPT, elevatedWorkerScriptFileContents, installCompanionPackage } from "./companion-package.js";
 
 function archiveBytes(manifestName: string, manifest: string): Buffer {
   const zip = new AdmZip();
@@ -80,11 +80,21 @@ test("elevated worker script never reassigns the case-insensitive $Root variable
   assert.equal(/foreach\s*\(\s*\$root\s+in\b/i.test(ELEVATED_WORKER_SCRIPT), false, "script loops over $root (case-insensitive collision with the $Root parameter)");
 });
 
+test("elevated worker script file starts with a UTF-8 BOM", () => {
+  // PowerShell 5.1 reads a BOM-less .ps1 with the system ANSI codepage. On
+  // Western locales the UTF-8 continuation bytes of the Chinese diagnostics
+  // decode to smart quotes (U+2018-U+201D), which PowerShell accepts as string
+  // delimiters: the literals close early, parsing aborts at startup, and the
+  // elevated worker never becomes ready. The BOM makes every locale read the
+  // script as UTF-8 — this guards the write helper against regressing.
+  assert.equal(elevatedWorkerScriptFileContents().charCodeAt(0), 0xfeff, "worker script file must start with a UTF-8 BOM");
+});
+
 test("elevated worker keeps answering after an enumerate request (real protocol run)", { skip: process.platform !== "win32" }, async (t) => {
   const protocolRoot = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-worker-protocol-"));
   const fakeInstallRoot = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-worker-install-"));
   const scriptPath = path.join(protocolRoot, "worker.ps1");
-  fs.writeFileSync(scriptPath, ELEVATED_WORKER_SCRIPT, "utf8");
+  fs.writeFileSync(scriptPath, elevatedWorkerScriptFileContents(), "utf8");
   const child = spawn("powershell.exe", [
     "-NoProfile", "-NoLogo", "-NonInteractive", "-ExecutionPolicy", "Bypass",
     "-File", scriptPath, "-Root", protocolRoot
