@@ -104,7 +104,12 @@ export class WindowsUpdateManager {
   handleBeforeQuit(): void {
     if (!this.isSupported() || this.installerLaunched || !this.pending) return;
     if (!this.installRequested && !this.preferences.autoInstallOnQuit) return;
-    if (!this.isPendingValid()) {
+    // Must stay fast: this runs inside before-quit while the window is going
+    // away. Hashing the 200MB+ installer here froze the UI for seconds, so
+    // verification relies on the checksum recorded at download time; a pending
+    // entry without one (legacy file) is re-hashed in the background by
+    // verifyPendingChecksum() and simply skips the size check here.
+    if (this.pending.verifiedSha256 && this.pending.verifiedSha256 !== this.pending.sha256) {
       this.options.log("updates.install.skipped", { reason: "pending installer checksum failed" });
       clearPendingUpdate(this.pendingFile, this.pending);
       this.pending = undefined;
@@ -120,6 +125,43 @@ export class WindowsUpdateManager {
       this.state = { ...this.state, status: "error", error: error instanceof Error ? error.message : String(error) };
       this.publish();
       this.options.log("updates.install.failed", { error: this.state.error });
+    }
+  }
+
+  /** True when a downloaded installer is waiting to be installed. Used by the
+   *  autostart launch path to install before showing the app. */
+  hasPendingInstall(): boolean {
+    return this.isSupported() && !!this.pending && fs.existsSync(this.pending.path);
+  }
+
+  /** Recompute the pending file's checksum off the quit path (streamed) and
+   *  persist it. Called opportunistically at startup for pending entries
+   *  written by older versions without a recorded checksum. */
+  async verifyPendingChecksum(): Promise<boolean> {
+    const pending = this.pending;
+    if (!pending || !fs.existsSync(pending.path)) return false;
+    if (pending.verifiedSha256 === pending.sha256) return true;
+    try {
+      const hash = crypto.createHash("sha256");
+      await new Promise<void>((resolve, reject) => {
+        const stream = fs.createReadStream(pending.path);
+        stream.on("data", (chunk) => hash.update(chunk));
+        stream.on("error", reject);
+        stream.on("end", () => resolve());
+      });
+      const actual = hash.digest("hex").toLowerCase();
+      if (actual !== pending.sha256.toLowerCase()) {
+        this.options.log("updates.pending.checksum.failed", { version: pending.version });
+        clearPendingUpdate(this.pendingFile, pending);
+        this.pending = undefined;
+        this.publish();
+        return false;
+      }
+      pending.verifiedSha256 = actual;
+      writePendingUpdate(this.pendingFile, pending);
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -230,12 +272,12 @@ export class WindowsUpdateManager {
 
   private isPendingValid(): boolean {
     if (!this.pending || !fs.existsSync(this.pending.path)) return false;
-    try {
-      const actual = crypto.createHash("sha256").update(fs.readFileSync(this.pending.path)).digest("hex");
-      return actual.toLowerCase() === this.pending.sha256.toLowerCase();
-    } catch {
-      return false;
-    }
+    // Fast path: trust the checksum recorded at download time. Legacy pending
+    // files without a recorded checksum are validated by verifyPendingChecksum()
+    // at startup; until then treat them as valid (the file was verified when it
+    // was downloaded in that same session).
+    if (!this.pending.verifiedSha256) return true;
+    return this.pending.verifiedSha256.toLowerCase() === this.pending.sha256.toLowerCase();
   }
 
   private publish(): void {

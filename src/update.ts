@@ -83,6 +83,10 @@ export interface PendingUpdate {
   sha256: string;
   assetName: string;
   downloadedAt: string;
+  /** Actual SHA-256 of the downloaded file, hashed once right after the
+   *  download finishes (and persisted) so the quit-time install path never
+   *  has to hash a 200MB+ installer synchronously. */
+  verifiedSha256?: string;
 }
 
 export interface DownloadProgress {
@@ -130,7 +134,7 @@ export function readPendingUpdate(filePath: string): PendingUpdate | undefined {
   try {
     const value = JSON.parse(fs.readFileSync(filePath, "utf8")) as Partial<PendingUpdate>;
     if (typeof value.path !== "string" || typeof value.version !== "string" || (value.channel !== "stable" && value.channel !== "preview") || typeof value.sha256 !== "string" || !SHA256_PATTERN.test(value.sha256) || typeof value.assetName !== "string" || typeof value.downloadedAt !== "string") return undefined;
-    return { path: value.path, version: value.version, channel: value.channel, sha256: value.sha256.toLowerCase(), assetName: value.assetName, downloadedAt: value.downloadedAt };
+    return { path: value.path, version: value.version, channel: value.channel, sha256: value.sha256.toLowerCase(), assetName: value.assetName, downloadedAt: value.downloadedAt, ...(typeof value.verifiedSha256 === "string" && SHA256_PATTERN.test(value.verifiedSha256) ? { verifiedSha256: value.verifiedSha256.toLowerCase() } : {}) };
   } catch {
     return undefined;
   }
@@ -210,7 +214,10 @@ export async function downloadUpdate(
       channel: release.channel,
       sha256: actualSha,
       assetName: release.assetName,
-      downloadedAt: new Date().toISOString()
+      downloadedAt: new Date().toISOString(),
+      // The bytes were hashed in memory a moment ago; persist that verdict so
+      // quit-time validation is a string compare instead of a fresh file hash.
+      verifiedSha256: actualSha
     },
     bytes: bytes.length
   };

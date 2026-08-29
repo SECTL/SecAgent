@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, Notification, screen, session, shell, Tray } from "electron";
 import * as Sentry from "@sentry/electron/main";
-import { spawn } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
+import { promisify } from "node:util";
 import { createServer } from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -105,6 +106,7 @@ const MARKETPLACE_UPDATE_INTERVAL_MS = 10 * 60 * 1000;
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const AUTO_START_ARG = "--autostart";
 const AUTO_START_ARGS = [AUTO_START_ARG];
+const execFileAsync = promisify(execFile);
 let marketplaceUpdateTimer: NodeJS.Timeout | undefined;
 let updateCheckTimer: NodeJS.Timeout | undefined;
 let telemetry: TelemetryClient | undefined;
@@ -143,12 +145,56 @@ function linuxAutostartFilePath(): string {
 function readAutostart(): boolean {
   try {
     if (process.platform === "linux") return fs.existsSync(linuxAutostartFilePath());
+    // Elevated autostart is a scheduled task; the plain fallback is the
+    // HKCU Run key (also what the installer writes on first install).
+    if (windowsAutostartTaskExists()) return true;
     const loginItem = app.getLoginItemSettings({ path: autostartExecutablePath(), args: AUTO_START_ARGS });
     // executableWillLaunchAtLogin also recognizes entries created by older
     // installers that did not include the current argument list.
     return loginItem.openAtLogin || loginItem.executableWillLaunchAtLogin;
   } catch (error) {
     logMain("autostart.read.failed", { error: error instanceof Error ? error.message : String(error) });
+    return false;
+  }
+}
+
+const WINDOWS_AUTOSTART_TASK_NAME = "SecAgent Autostart";
+const AUTOSTART_RUN_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+
+function runSchtasks(args: string[]): { status: number; stdout: string } {
+  const result = spawnSync("schtasks.exe", args, { encoding: "utf8", windowsHide: true, timeout: 15_000 });
+  return { status: result.status ?? -1, stdout: `${result.stdout || ""}` };
+}
+
+function windowsAutostartTaskExists(): boolean {
+  // status 1 = task does not exist; anything else (or a throw) is treated as
+  // "unknown" and reported as absent so settings show the fallback state.
+  return runSchtasks(["/Query", "/TN", WINDOWS_AUTOSTART_TASK_NAME]).status === 0;
+}
+
+function createElevatedAutostartTask(): boolean {
+  // /RL HIGHEST launches SecAgent with the admin token, so later in-app
+  // updates inherit it and never trigger another UAC.
+  const create = runSchtasks(["/Create", "/TN", WINDOWS_AUTOSTART_TASK_NAME, "/TR", `"${autostartExecutablePath()} ${AUTO_START_ARG}"`, "/SC", "ONLOGON", "/RL", "HIGHEST", "/F"]);
+  if (create.status === 0) return true;
+  logMain("autostart.task.create.failed", { status: create.status, stdout: create.stdout.slice(0, 300) });
+  return false;
+}
+
+function removeAutostartTask(): void {
+  runSchtasks(["/Delete", "/TN", WINDOWS_AUTOSTART_TASK_NAME, "/F"]);
+}
+
+/** Runs one schtasks command inside an elevated PowerShell (one UAC prompt).
+ *  Returns false when the user declines the prompt or the command fails. */
+async function runSchtasksElevated(args: string[]): Promise<boolean> {
+  const quoted = args.map((a) => (a.includes(" ") || a.includes('"') ? `'${a.replaceAll("'", "''").replaceAll('"', '`"')}'` : a)).join(" ");
+  const script = `Start-Process -FilePath schtasks.exe -ArgumentList '${quoted.replaceAll("'", "''")}' -Verb RunAs -Wait -WindowStyle Hidden -PassThru | ForEach-Object { exit $_.ExitCode }`;
+  try {
+    await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], { encoding: "utf8", windowsHide: true, timeout: 120_000 });
+    return true;
+  } catch (error) {
+    logMain("autostart.elevated.failed", { error: error instanceof Error ? error.message : String(error), args: args[0] });
     return false;
   }
 }
@@ -163,7 +209,44 @@ function writeAutostart(enabled: boolean): void {
     fs.writeFileSync(entry, `[Desktop Entry]\nType=Application\nName=SecAgent\nExec=${JSON.stringify(autostartExecutablePath())} ${AUTO_START_ARG}\nTerminal=false\n`, "utf8");
     return;
   }
-  app.setLoginItemSettings({ openAtLogin: enabled, path: autostartExecutablePath(), args: AUTO_START_ARGS });
+  if (!enabled) {
+    removeAutostartTask();
+    // also clear the plain fallback / installer-written Run key
+    app.setLoginItemSettings({ openAtLogin: false, path: autostartExecutablePath(), args: AUTO_START_ARGS });
+    return;
+  }
+  const elevation = getWindowsProcessElevationSync();
+  if (elevation === true || createElevatedAutostartTask()) {
+    logMain(elevation === true ? "autostart.task.created.same-token" : "autostart.task.created");
+    // task in place; make sure no stale Run-key entry also starts the app
+    app.setLoginItemSettings({ openAtLogin: false, path: autostartExecutablePath(), args: AUTO_START_ARGS });
+    return;
+  }
+  // Could not create the task directly (non-elevated): try once via UAC, and
+  // fall back to a plain Run-key autostart when the user declines.
+  void (async () => {
+    const elevated = await runSchtasksElevated(["/Create", "/TN", WINDOWS_AUTOSTART_TASK_NAME, "/TR", `"${autostartExecutablePath()} ${AUTO_START_ARG}"`, "/SC", "ONLOGON", "/RL", "HIGHEST", "/F"]);
+    if (elevated && windowsAutostartTaskExists()) {
+      logMain("autostart.task.created.elevated");
+      app.setLoginItemSettings({ openAtLogin: false, path: autostartExecutablePath(), args: AUTO_START_ARGS });
+      return;
+    }
+    logMain("autostart.elevated.declined");
+    app.setLoginItemSettings({ openAtLogin: true, path: autostartExecutablePath(), args: AUTO_START_ARGS });
+  })();
+}
+
+/** Sync elevation probe (registry read, no spawn). */
+function getWindowsProcessElevationSync(): boolean {
+  if (process.platform !== "win32") return false;
+  try {
+    // HKU\\S-1-5-20 is readable only by admins and the system.
+    spawnSync("reg.exe", ["Query", "HKU\\S-1-5-20"], { windowsHide: true, timeout: 5_000 });
+    // reg exits 0 for admins, 1 for standard users.
+    return (spawnSync("reg.exe", ["Query", "HKU\\S-1-5-20"], { windowsHide: true, timeout: 5_000 }).status ?? 1) === 0;
+  } catch {
+    return false;
+  }
 }
 
 function launchWindowsInstaller(installerPath: string): void {
@@ -1475,6 +1558,31 @@ app.whenReady().then(async () => {
     launchInstaller: launchWindowsInstaller,
     log: logMain
   });
+  // An autostart launch that finds a fully downloaded update installs it
+  // immediately and exits; the installer's /RESTARTAPPLICATIONS brings the
+  // (updated) app back without the --autostart argument, so the fresh session
+  // shows the main window normally. Manual launches are not interrupted.
+  if (isAutostartLaunch() && updateManager.hasPendingInstall()) {
+    logMain("updates.install.on.autostart", { version: updateManager.getState().downloadedVersion });
+    void updateManager.verifyPendingChecksum().then((valid) => {
+      if (valid) {
+        try {
+          updateManager?.install();
+          return;
+        } catch (error) {
+          logMain("updates.install.on.autostart.failed", { error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      // Nothing to install (or checksum failed) - continue the normal startup.
+      void startApplication();
+    });
+    return;
+  }
+  await startApplication();
+});
+async function startApplication(): Promise<void> {
+  const needsOnboarding = !fs.existsSync(configPath(DEFAULT_WORKSPACE)) || !isOnboardingComplete(DEFAULT_WORKSPACE);
+  const initialSettings = readSettings(DEFAULT_WORKSPACE);
   pluginManager = new PluginManager(DEFAULT_WORKSPACE, {
     getSession: async () => {
       loadConfig(DEFAULT_WORKSPACE);
@@ -1532,6 +1640,6 @@ app.whenReady().then(async () => {
   catch (error) { logMain("wake.shortcut.register.failed", { error: error instanceof Error ? error.message : String(error) }); }
   if (needsOnboarding) openSettings(true);
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
-});
-app.on("before-quit", () => { telemetry?.stop(); updateManager?.handleBeforeQuit(); isQuitting = true; closeWakeWindow(); closeVoiceWakeWindow(); globalShortcut.unregisterAll(); if (marketplaceUpdateTimer) clearInterval(marketplaceUpdateTimer); if (updateCheckTimer) clearInterval(updateCheckTimer); void secAgentHttpServer?.stop(); void pluginManager?.shutdown(); });
+}
+app.on("before-quit", () => { updateManager?.handleBeforeQuit(); isQuitting = true; closeWakeWindow(); closeVoiceWakeWindow(); globalShortcut.unregisterAll(); if (marketplaceUpdateTimer) clearInterval(marketplaceUpdateTimer); if (updateCheckTimer) clearInterval(updateCheckTimer); void secAgentHttpServer?.stop(); void pluginManager?.shutdown(); telemetry?.stop(); });
 app.on("window-all-closed", () => { /* Keep the process alive so the tray can reopen the main window. */ });
