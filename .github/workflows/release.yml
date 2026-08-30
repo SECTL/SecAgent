@@ -169,3 +169,54 @@ jobs:
             release/*.dmg
             release/*.sha256
           prerelease: ${{ contains(github.ref_name, '-') }}
+
+  # Runs last so the table can list every asset uploaded by the jobs above.
+  release-links:
+    needs: [release, release-desktop]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Append proxy download links to the release body
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          BASE="https://github.com/${{ github.repository }}/releases/download/${TAG}"
+          PROXY="https://ghproxy.sectl.cn"
+
+          # Collect every asset of this release and build a markdown table of
+          # proxied download links (the ghproxy mirror is faster in CN).
+          ASSETS="$(gh api "repos/${{ github.repository }}/releases/tags/${TAG}" --jq '.assets[].name' | sort)"
+          if [ -z "$ASSETS" ]; then
+            echo "no assets found; skipping" >&2
+            exit 0
+          fi
+
+          python3 - "$TAG" "$BASE" "$PROXY" <<'PYEOF' > section.md
+          import sys
+          tag, base, proxy = sys.argv[1], sys.argv[2], sys.argv[3]
+          names = sorted(line.strip() for line in sys.stdin if line.strip())
+          lines = [
+              "<!-- ghproxy-links -->",
+              "## 下载链接（加速镜像）",
+              "",
+              "| 附件 | 下载链接 |",
+              "| --- | --- |",
+          ]
+          for name in names:
+              safe = name.replace("|", "\\|")
+              lines.append(f"| {safe} | {proxy}/{base}/{name} |")
+          lines.append("<!-- ghproxy-links -->")
+          print("\n".join(lines))
+          PYEOF
+
+          BODY="$(gh release view "$TAG" --json body --jq .body)"
+          python3 - "$BODY" <<'PYEOF' > newbody.md
+          import re, sys
+          body, section = sys.argv[1], open("section.md", encoding="utf-8").read().strip()
+          marker = "<!-- ghproxy-links -->"
+          # Replace an existing section (reruns) or append a new one.
+          pattern = re.compile(re.escape(marker) + r".*?" + re.escape(marker), re.DOTALL)
+          print(pattern.sub(section, body) if marker in body else f"{body.rstrip()}\n\n{section}")
+          PYEOF
+          gh release edit "$TAG" --notes-file newbody.md
