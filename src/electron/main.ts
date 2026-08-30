@@ -3,6 +3,7 @@ import * as Sentry from "@sentry/electron/main";
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { createServer } from "node:http";
+import { isIPv4 } from "node:net";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -975,6 +976,27 @@ ipcMain.handle("official:login", async (_event, email: string, password: string)
   const providers = current.providers.some((provider) => provider.id === "sectl-official") ? current.providers : [...current.providers, officialProvider(baseUrl)];
   return saveSettings(DEFAULT_WORKSPACE, { ...current, providers });
 });
+const PUBLIC_IP_ENDPOINTS = [
+  "https://api.ipify.org?format=json",
+  "https://httpbin.org/ip",
+  "https://api64.ipify.org?format=json"
+];
+
+async function resolvePublicIpv4(): Promise<string> {
+  for (const endpoint of PUBLIC_IP_ENDPOINTS) {
+    try {
+      const response = await fetch(endpoint, { signal: AbortSignal.timeout(5_000) });
+      if (!response.ok) continue;
+      const payload = await response.json().catch(() => ({})) as { ip?: unknown; origin?: unknown };
+      const candidate = String(payload.ip ?? payload.origin ?? "").split(",")[0].trim();
+      if (isIPv4(candidate)) return candidate;
+    } catch {
+      // Try the next public-IP provider.
+    }
+  }
+  throw new Error("无法获取本机公网 IPv4，请检查网络连接后重试");
+}
+
 async function runSectlOAuthLogin(): Promise<{ accessToken: string; userId?: string; email?: string; name?: string }> {
   loadConfig(DEFAULT_WORKSPACE);
   const relayUrl = (process.env.SECTL_OFFICIAL_API_URL || "").replace(/\/$/, "");
@@ -1006,7 +1028,8 @@ async function runSectlOAuthLogin(): Promise<{ accessToken: string; userId?: str
     server.listen(port, "127.0.0.1", () => { void shell.openExternal(authorize.toString()); });
     setTimeout(() => { server.close(); reject(new Error("OAuth 登录超时，请重试")); }, 5 * 60 * 1000).unref();
   });
-  const response = await fetch(`${oauthUrl}/api/oauth/token`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ grant_type: "authorization_code", code: callback.code, client_id: clientId, redirect_uri: redirectUri, code_verifier: verifier, device_uuid: crypto.randomUUID() }) });
+  const ipAddress = await resolvePublicIpv4();
+  const response = await fetch(`${oauthUrl}/api/oauth/token`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ grant_type: "authorization_code", code: callback.code, client_id: clientId, redirect_uri: redirectUri, code_verifier: verifier, device_uuid: crypto.randomUUID(), ip_address: ipAddress }) });
   const payload = await response.json().catch(() => ({})) as { access_token?: string; error_description?: string };
   if (!response.ok || !payload.access_token) throw new Error(payload.error_description || "SECTL OAuth 换取令牌失败");
   const relayResponse = await fetch(`${relayUrl}/auth/oauth`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ access_token: payload.access_token, client_id: clientId, platform_id: process.env.SECTL_OFFICIAL_PLATFORM_ID || clientId }) });
@@ -1047,7 +1070,8 @@ ipcMain.handle("official:oauth-login", async () => {
     server.listen(port, "127.0.0.1", () => { void shell.openExternal(authorize.toString()); });
     setTimeout(() => { server.close(); reject(new Error("OAuth 登录超时，请重试")); }, 5 * 60 * 1000).unref();
   });
-  const tokenResponse = await fetch(`${oauthUrl}/api/oauth/token`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ grant_type: "authorization_code", code: callback.code, client_id: clientId, redirect_uri: redirectUri, code_verifier: verifier, device_uuid: crypto.randomUUID() }) });
+  const ipAddress = await resolvePublicIpv4();
+  const tokenResponse = await fetch(`${oauthUrl}/api/oauth/token`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ grant_type: "authorization_code", code: callback.code, client_id: clientId, redirect_uri: redirectUri, code_verifier: verifier, device_uuid: crypto.randomUUID(), ip_address: ipAddress }) });
   const tokenPayload = await tokenResponse.json().catch(() => ({})) as { access_token?: string; error_description?: string };
   if (!tokenResponse.ok || !tokenPayload.access_token) throw new Error(tokenPayload.error_description || "SECTL OAuth 换取令牌失败");
   const relayResponse = await fetch(`${relayUrl}/auth/oauth`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ access_token: tokenPayload.access_token, client_id: clientId, platform_id: process.env.SECTL_OFFICIAL_PLATFORM_ID || clientId }) });
