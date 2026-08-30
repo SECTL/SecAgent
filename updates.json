@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "product": "SecAgent",
-  "generatedAt": "2026-08-30T01:30:57.428Z",
+  "generatedAt": "2026-08-30T02:33:29.036Z",
   "channels": {
     "preview": {
       "channel": "preview",
@@ -13,7 +13,18 @@
       "sha256": "94eff7aeb12f0c9ab39c05ea9d39956ccbb8d3fdc6a862667a42ea0dbe2ecb0e",
       "size": 222955135,
       "publishedAt": "2026-08-30T01:30:57.427Z"
+    },
+    "stable": {
+      "channel": "stable",
+      "version": "0.1.0",
+      "tag": "v0.1.0",
+      "assetName": "SecAgent-Setup-0.1.0.exe",
+      "assetUrl": "https://github.com/SECTL/SecAgent/releases/download/v0.1.0/SecAgent-Setup-0.1.0.exe",
+      "htmlUrl": "https://github.com/SECTL/SecAgent/releases/tag/v0.1.0",
+      "sha256": "af02f4598b19e6af7a254b68f2ba6bb9127e0767c39f62485a13d60422fab694",
+      "size": 222966833,
+      "publishedAt": "2026-08-30T02:33:29.035Z"
     }
   },
-  "signature": "MjshkaLsOGm+lNzSrRug88Y11CKxaTs1OznNXS+8t+iFFEDFI/kF8MavAx/cCLZBesEI7QDrFIWagF3scivwBA=="
+  "signature": "39lujTQI0J6rb9xYA0xvg0tEomwgMp3pc74Zdxt0FEaZjrbwOTn/gG7f2gY4Zkzrodfm2Il8A95Xcg2ZG+/TDA=="
 }
