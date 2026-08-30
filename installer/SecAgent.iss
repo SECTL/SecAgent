@@ -123,7 +123,6 @@ var
   { always-visible chrome }
   HeaderBand: TNewStaticText;
   LogoImage: TBitmapImage;
-  LogoCursorShield: TNewStaticText;
   TitleLabel: TNewStaticText;
   CloseLabel: TNewStaticText;
   VersionLabel: TNewStaticText;
@@ -438,7 +437,7 @@ begin
   HeaderBand.SetBounds(0, 0, UiX(UI_WIDTH), UiY(UI_HEADER_HEIGHT));
   HeaderBand.Caption := ' ';
   HeaderBand.Color := clWhite;
-  HeaderBand.Cursor := crSizeAll;
+  HeaderBand.Cursor := crDefault;
 
   { the logo is a TGraphicControl, so it must live inside the windowed band
     to paint above the notebook }
@@ -448,21 +447,15 @@ begin
   LogoImage.Stretch := True;
   LogoImage.SetBounds(UiX(152), UiY(80), UiX(185), UiY(188));
   LogoImage.PngImage.LoadFromFile(ExpandConstant('{tmp}\logo.png'));
-  { TBitmapImage ignores Cursor in the script build (PS_MINIVCL) and shows
-    the band's crSizeAll. Cover it with a transparent windowed label that
-    honors Cursor, so hovering the brand mark shows the plain arrow - only
-    the empty header area hints at draggability. }
-  LogoCursorShield := TNewStaticText.Create(HeaderBand);
-  LogoCursorShield.Parent := HeaderBand;
-  LogoCursorShield.AutoSize := False;
-  LogoCursorShield.SetBounds(UiX(152), UiY(80), UiX(185), UiY(188));
-  LogoCursorShield.Caption := ' ';
-  LogoCursorShield.Color := clWhite;
-  LogoCursorShield.Cursor := crDefault;
+  { NOTE: do NOT cover the logo with a windowed control to change its hover
+    cursor - TBitmapImage ignores Cursor in the PS_MINIVCL build anyway, and
+    any windowed overlay paints over the bitmap (that is how alpha.25 blanked
+    the logo). The whole band keeps the plain arrow; the drag works wherever
+    the hook accepts the press. }
 
   TitleLabel := MakeLabel(HeaderBand, 342, 130, 320, 96, 'SecAgent', clWhite);
   StyleFont(TitleLabel.Font, 48, clBlack, True);
-  TitleLabel.Cursor := crSizeAll;
+  TitleLabel.Cursor := crDefault;
 
   CloseLabel := MakeLabel(HeaderBand, 760, 8, 56, 56, '×', clWhite);
   CloseLabel.Alignment := taCenter;
@@ -546,7 +539,9 @@ begin
   AutoStartCheck := TNewCheckBox.Create(WizardForm.SelectDirPage);
   AutoStartCheck.Parent := WizardForm.SelectDirPage;
   AutoStartCheck.Caption := '开机自动启动';
-  AutoStartCheck.Checked := False;
+  { default on: WantAutoStart in InitializeWizard is only the pre-UI default;
+    CurStepChanged(ssInstall) snapshots THIS checkbox, so both must agree }
+  AutoStartCheck.Checked := True;
   AutoStartCheck.Color := UI_COLOR_BAND;
   StyleFont(AutoStartCheck.Font, 13, $333333, False);
   AutoStartCheck.SetBounds(UiX(458), UiY(458), UiX(170), UiY(28));

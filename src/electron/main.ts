@@ -210,40 +210,45 @@ function writeAutostart(enabled: boolean): void {
     return;
   }
   if (!enabled) {
+    logMain("autostart.disable.begin", { taskExists: windowsAutostartTaskExists() });
     removeAutostartTask();
     // also clear the plain fallback / installer-written Run key
     app.setLoginItemSettings({ openAtLogin: false, path: autostartExecutablePath(), args: AUTO_START_ARGS });
+    logMain("autostart.disable.done", { taskExists: windowsAutostartTaskExists() });
     return;
   }
-  const elevation = getWindowsProcessElevationSync();
-  if (elevation === true || createElevatedAutostartTask()) {
-    logMain(elevation === true ? "autostart.task.created.same-token" : "autostart.task.created");
+  const autostartTaskArgs = ["/Create", "/TN", WINDOWS_AUTOSTART_TASK_NAME, "/TR", `"${autostartExecutablePath()} ${AUTO_START_ARG}"`, "/SC", "ONLOGON", "/RL", "HIGHEST", "/F"];
+  logMain("autostart.enable.begin", { elevated: getWindowsProcessElevationSync(), exe: autostartExecutablePath() });
+  const create = runSchtasks(autostartTaskArgs);
+  if (create.status === 0 && windowsAutostartTaskExists()) {
+    logMain("autostart.task.created.direct");
     // task in place; make sure no stale Run-key entry also starts the app
     app.setLoginItemSettings({ openAtLogin: false, path: autostartExecutablePath(), args: AUTO_START_ARGS });
     return;
   }
+  logMain("autostart.task.create.failed", { status: create.status, stdout: create.stdout.slice(0, 300) });
   // Could not create the task directly (non-elevated): try once via UAC, and
   // fall back to a plain Run-key autostart when the user declines.
   void (async () => {
-    const elevated = await runSchtasksElevated(["/Create", "/TN", WINDOWS_AUTOSTART_TASK_NAME, "/TR", `"${autostartExecutablePath()} ${AUTO_START_ARG}"`, "/SC", "ONLOGON", "/RL", "HIGHEST", "/F"]);
+    const elevated = await runSchtasksElevated(autostartTaskArgs);
     if (elevated && windowsAutostartTaskExists()) {
       logMain("autostart.task.created.elevated");
       app.setLoginItemSettings({ openAtLogin: false, path: autostartExecutablePath(), args: AUTO_START_ARGS });
       return;
     }
-    logMain("autostart.elevated.declined");
+    logMain("autostart.elevated.declined", { elevatedRan: elevated });
     app.setLoginItemSettings({ openAtLogin: true, path: autostartExecutablePath(), args: AUTO_START_ARGS });
+    logMain("autostart.fallback.runkey");
   })();
 }
 
-/** Sync elevation probe (registry read, no spawn). */
+/** Sync elevation probe (registry read, no spawn). reg.exe exits 0 for
+ *  admins (HKU\S-1-5-20 is admin-readable) and 1 for standard users. */
 function getWindowsProcessElevationSync(): boolean {
   if (process.platform !== "win32") return false;
   try {
-    // HKU\\S-1-5-20 is readable only by admins and the system.
-    spawnSync("reg.exe", ["Query", "HKU\\S-1-5-20"], { windowsHide: true, timeout: 5_000 });
-    // reg exits 0 for admins, 1 for standard users.
-    return (spawnSync("reg.exe", ["Query", "HKU\\S-1-5-20"], { windowsHide: true, timeout: 5_000 }).status ?? 1) === 0;
+    const probe = spawnSync("reg.exe", ["Query", "HKU\\S-1-5-20"], { windowsHide: true, timeout: 5_000 });
+    return (probe.status ?? 1) === 0;
   } catch {
     return false;
   }

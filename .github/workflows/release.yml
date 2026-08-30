@@ -48,7 +48,11 @@ jobs:
         with:
           path: installer/SecAgent.iss
           install_latest: true
-          options: >-
+          # One option per line: the action splits the input on newlines only,
+          # so a folded single-line value would reach ISCC as ONE argument and
+          # /DAppVersion would swallow the rest (it leaked into the compiled
+          # version label in alpha.25).
+          options: |
             /DAppVersion=${{ steps.version.outputs.version }}
             /DSourceDir=${{ github.workspace }}\release\win-unpacked
             /DOutputDir=${{ github.workspace }}\release\inno
