@@ -88,7 +88,7 @@ button:focus:not(:focus-visible) { outline: none; }
 .voice-drop-zone { display: grid; min-height: 58px; place-items: center; align-content: center; gap: 2px; border-radius: 999px; background: #f0eeee; color: #0b0b0b; text-align: center; transition: background .15s ease, color .15s ease, transform .15s ease, box-shadow .15s ease; pointer-events: none; }
 .voice-drop-zone strong { font-size: clamp(16px, 2.2vw, 28px); font-weight: 500; line-height: 1.1; }
 .voice-drop-zone small { color: #777; font-size: 11px; }
-.voice-edit-zone { background: #bdd5fc; }
+.voice-edit-zone { background: #bdd5fc; }.voice-edit-zone.active { box-shadow: 0 0 0 3px rgba(35,137,236,.18); transform: scale(1.02); }
 .voice-cancel-zone.active { background: #dedede; box-shadow: 0 0 0 3px rgba(80,80,80,.12); transform: scale(1.02); }
 .voice-recording-bar { position: relative; display: grid; min-height: 90px; place-items: center; overflow: hidden; border: 1px solid #63c1fb; border-radius: 24px; background: #39a7f4; box-shadow: 0 0 18px rgba(44, 166, 246, .7), inset 0 1px 0 rgba(255,255,255,.25); }
 .voice-recording-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; clip-path: inset(50%); }

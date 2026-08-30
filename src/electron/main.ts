@@ -1392,11 +1392,17 @@ ipcMain.on("wake:context", (_event, payload: unknown) => {
 ipcMain.handle("wake:close", () => { closeWakeWindow(); return { ok: true }; });
 ipcMain.on("wake:interactive", (_event, interactive: boolean) => { if (wakeWindow && !wakeWindow.isDestroyed()) wakeWindow.setIgnoreMouseEvents(!interactive); });
 ipcMain.handle("speech:start", (event) => {
-  try { return startSpeech(wakeWindow?.webContents.id === event.sender.id ? wakeWindow : windowRef); }
+  const target = wakeWindow?.webContents.id === event.sender.id ? wakeWindow : windowRef;
+  logMain("speech.start", { window: target === wakeWindow ? "wake" : "main" });
+  try {
+    const result = startSpeech(target);
+    logMain("speech.start.ready", { window: target === wakeWindow ? "wake" : "main", remote: result.remote });
+    return result;
+  }
   catch (error) { recordTelemetryFailure({ type: "speech.failed", error, context: { phase: "start" } }); throw error; }
 });
-ipcMain.handle("speech:stop", () => { stopSpeech(); return { ok: true }; });
-ipcMain.handle("speech:cancel", () => { cancelSpeech(); return { ok: true }; });
+ipcMain.handle("speech:stop", () => { logMain("speech.stop"); stopSpeech(); return { ok: true }; });
+ipcMain.handle("speech:cancel", () => { logMain("speech.cancel"); cancelSpeech(); return { ok: true }; });
 ipcMain.handle("voice-wake:start", (event, phrase: string) => {
   try {
     return startVoiceWake(voiceWakeWindow?.webContents.id === event.sender.id ? voiceWakeWindow : undefined, phrase, () => {
@@ -1412,6 +1418,11 @@ ipcMain.on("voice-wake:log", (_event, payload: unknown) => {
   const data = payload && typeof payload === "object" ? payload : { detail: String(payload) };
   console.info("[voice-wake] renderer", data);
   logMain("voice-wake.renderer", data);
+});
+ipcMain.on("speech:log", (_event, payload: unknown) => {
+  const data = payload && typeof payload === "object" ? payload : { detail: String(payload) };
+  console.info("[speech] renderer", data);
+  logMain("speech.renderer", data);
 });
 ipcMain.handle("tts:synthesize", async (_event, text: string) => {
   if (typeof text !== "string" || !text.trim()) return "";

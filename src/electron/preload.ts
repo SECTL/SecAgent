@@ -87,6 +87,7 @@ contextBridge.exposeInMainWorld("secagent", {
   logVoiceWake: (event: unknown) => ipcRenderer.send("voice-wake:log", event),
   synthesizeSpeech: (text: string) => ipcRenderer.invoke("tts:synthesize", text),
   logWakeTts: (event: unknown) => ipcRenderer.send("wake:tts-log", event),
+  logSpeech: (event: unknown) => ipcRenderer.send("speech:log", event),
   setWakeContext: (context: unknown) => ipcRenderer.send("wake:context", context),
   closeWake: () => ipcRenderer.invoke("wake:close"),
   setWakeInteractive: (interactive: boolean) => ipcRenderer.send("wake:interactive", interactive),

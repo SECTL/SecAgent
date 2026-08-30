@@ -4,10 +4,14 @@ import type { TraceEvent } from "../constants.js";
 
 type WakeStatus = "listening" | "transcribing" | "submitting" | "streaming" | "completed" | "error";
 
+const WAKE_NO_VOICE_TIMEOUT_MS = 8_000;
+const WAKE_RESULT_GRACE_MS = 2_000;
+const VOICE_RMS_THRESHOLD = 0.008;
+
 function isVoiceActive(samples: Float32Array): boolean {
   let energy = 0;
   for (const sample of samples) energy += sample * sample;
-  return Math.sqrt(energy / Math.max(1, samples.length)) > 0.015;
+  return Math.sqrt(energy / Math.max(1, samples.length)) > VOICE_RMS_THRESHOLD;
 }
 
 function audioBlobUrl(base64: string): string {
@@ -82,6 +86,12 @@ export function WakeOverlay() {
   const statusRef = useRef(status);
   const finalTtsFlushedRef = useRef(false);
   statusRef.current = status;
+
+  const logSpeech = (stage: string, data: Record<string, unknown> = {}) => {
+    const payload = { stage, ...data };
+    console.debug("[wake-speech]", payload);
+    bridge.logSpeech(payload);
+  };
 
   const logTts = (event: Record<string, unknown>) => {
     console.info("[wake-tts]", event);
@@ -205,6 +215,7 @@ export function WakeOverlay() {
   const stopRecording = async () => {
     const audio = audioRef.current;
     audioRef.current = undefined;
+    logSpeech("capture.stopping", { hadAudio: Boolean(audio), status: statusRef.current });
     if (silenceTimerRef.current !== undefined) window.clearInterval(silenceTimerRef.current);
     silenceTimerRef.current = undefined;
     if (listenTimeoutRef.current !== undefined) window.clearTimeout(listenTimeoutRef.current);
@@ -227,7 +238,7 @@ export function WakeOverlay() {
       let settled = false;
       const finish = (text: string) => { if (settled) return; settled = true; finalWaiterRef.current = null; resolve(text); };
       finalWaiterRef.current = finish;
-      window.setTimeout(() => finish(transcriptRef.current), 700);
+      window.setTimeout(() => finish(transcriptRef.current), WAKE_RESULT_GRACE_MS);
     });
     await stopRecording();
     const finalText = (await finalTextPromise).trim() || currentText;
@@ -277,21 +288,41 @@ export function WakeOverlay() {
   const startRecording = async () => {
     if (recording || submittingRef.current) return;
     try {
+      logSpeech("capture.starting", { sessionId: sessionId || undefined });
       setStatus("listening");
       setError("");
       hasVoiceRef.current = false;
       transcriptRef.current = "";
       confirmedTranscriptRef.current = "";
       lastVoiceAtRef.current = 0;
-      await bridge.startSpeech();
+      const speechStart = await bridge.startSpeech();
+      logSpeech("start.ready", { remote: speechStart.remote !== false });
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      logSpeech("microphone.ready", { tracks: stream.getAudioTracks().length, states: stream.getAudioTracks().map((track) => track.readyState) });
       const context = new AudioContext({ sampleRate: 16000 });
+      context.onstatechange = () => logSpeech("audio-context.state", { state: context.state });
+      if (context.state !== "running") await context.resume();
+      if (context.state !== "running") throw new Error(`音频上下文未运行（${context.state}）`);
       const source = context.createMediaStreamSource(stream);
       const processor = context.createScriptProcessor(2048, 1, 1);
+      let audioFrames = 0;
+      let lastAudioLogAt = 0;
+      let voiceLogged = false;
       processor.onaudioprocess = (event) => {
         const samples = new Float32Array(event.inputBuffer.getChannelData(0));
         bridge.sendSpeechAudio(samples);
-        if (isVoiceActive(samples)) {
+        audioFrames += 1;
+        const now = Date.now();
+        const active = isVoiceActive(samples);
+        if (audioFrames === 1 || now - lastAudioLogAt >= 15_000) {
+          lastAudioLogAt = now;
+          let energy = 0;
+          let peak = 0;
+          for (const sample of samples) { energy += sample * sample; peak = Math.max(peak, Math.abs(sample)); }
+          logSpeech("audio.frames", { count: audioFrames, rms: Math.sqrt(energy / Math.max(1, samples.length)), peak, active, contextState: context.state });
+        }
+        if (active) {
+          if (!voiceLogged) { voiceLogged = true; logSpeech("voice.detected", { frame: audioFrames }); }
           if (listenTimeoutRef.current !== undefined) window.clearTimeout(listenTimeoutRef.current);
           listenTimeoutRef.current = undefined;
           hasVoiceRef.current = true;
@@ -301,18 +332,20 @@ export function WakeOverlay() {
       source.connect(processor);
       processor.connect(context.destination);
       audioRef.current = { context, stream, source, processor };
+      logSpeech("capture.ready", { contextState: context.state, sampleRate: context.sampleRate, tracks: stream.getAudioTracks().length });
       setRecording(true);
       listenTimeoutRef.current = window.setTimeout(() => {
         listenTimeoutRef.current = undefined;
         if (!hasVoiceRef.current && !transcriptRef.current.trim() && !submittingRef.current) {
-          console.info("[wake] no voice detected within 2s, closing wake window");
+          logSpeech("capture.no-voice-timeout", { timeoutMs: WAKE_NO_VOICE_TIMEOUT_MS });
           void bridge.closeWake();
         }
-      }, 2000);
+      }, WAKE_NO_VOICE_TIMEOUT_MS);
       silenceTimerRef.current = window.setInterval(() => {
         if (hasVoiceRef.current && transcriptRef.current.trim() && Date.now() - lastVoiceAtRef.current >= 1500) void submitTranscriptRef.current();
       }, 100);
     } catch (reason) {
+      logSpeech("capture.failed", { error: reason instanceof Error ? reason.message : String(reason) });
       setStatus("error");
       setError(`无法打开麦克风：${reason instanceof Error ? reason.message : String(reason)}`);
       await bridge.stopSpeech();
@@ -325,7 +358,10 @@ export function WakeOverlay() {
     void bridge.getSession(sessionId).then(setSession).catch((reason) => { setStatus("error"); setError(String(reason)); });
     const removeSpeech = bridge.onSpeechEvent((event) => {
       const data = event as { type?: string; text?: string; message?: string };
-      if (data.type === "ready") setStatus((current) => current === "listening" ? "listening" : current);
+      if (data.type === "ready") {
+        logSpeech("event.ready");
+        setStatus((current) => current === "listening" ? "listening" : current);
+      }
       if (data.type === "optimizing") setStatus("transcribing");
       if (data.type === "partial" || data.type === "final" || data.type === "enhanced") {
         const text = data.text || "";
@@ -343,6 +379,7 @@ export function WakeOverlay() {
         }
         transcriptRef.current = mergedText;
         setTranscript(mergedText);
+        logSpeech(`event.${data.type}`, { characters: text.length, totalCharacters: mergedText.length });
         if (mergedText.trim()) {
           if (listenTimeoutRef.current !== undefined) window.clearTimeout(listenTimeoutRef.current);
           listenTimeoutRef.current = undefined;
@@ -352,9 +389,18 @@ export function WakeOverlay() {
         }
         // A final event may cover only the last stream segment. The timeout
         // keeps accepting later final/enhanced events before submitting.
-        if (data.type === "enhanced") finalWaiterRef.current?.(mergedText);
       }
-      if (data.type === "error") { setStatus("error"); setError(data.message || "语音识别失败"); }
+      if (data.type === "error") {
+        const message = data.message || "语音识别失败";
+        logSpeech("event.error", { message: message.slice(0, 200) });
+        setStatus("error");
+        setError(message);
+        finalWaiterRef.current?.(transcriptRef.current);
+      }
+      if (data.type === "stopped") {
+        logSpeech("event.stopped", { characters: transcriptRef.current.length });
+        window.setTimeout(() => finalWaiterRef.current?.(transcriptRef.current), 250);
+      }
     });
     const removeRuntime = bridge.onRuntimeEvent((event) => {
       const item = event as TraceEvent & { sessionId?: string };

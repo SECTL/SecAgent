@@ -94,6 +94,10 @@ export class WindowsUpdateManager {
   install(): UpdateState {
     if (!this.isSupported()) return this.getState();
     if (!this.pending || !fs.existsSync(this.pending.path)) throw new Error("没有可安装的更新");
+    if (this.installRequested || this.installerLaunched) {
+      this.options.log("updates.install.skipped", { reason: "already-requested", version: this.pending.version });
+      return this.getState();
+    }
     this.installRequested = true;
     this.state = { ...this.state, status: "installing", error: undefined };
     this.publish();
