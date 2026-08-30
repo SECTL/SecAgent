@@ -192,9 +192,17 @@ jobs:
 
           # Collect every asset of this release and build a markdown table of
           # proxied download links (the ghproxy mirror is faster in CN).
-          ASSETS="$(gh api "repos/${{ github.repository }}/releases/tags/${TAG}" --jq '.assets[].name' | sort)"
+          # `needs` only guarantees the upload JOBS ended; the asset index can
+          # still lag a few seconds, so poll until at least one asset shows up.
+          ASSETS=""
+          for attempt in 1 2 3 4 5 6; do
+            ASSETS="$(gh api "repos/${{ github.repository }}/releases/tags/${TAG}" --jq '.assets[].name' | sort)"
+            if [ -n "$ASSETS" ]; then break; fi
+            echo "attempt $attempt: asset index empty, waiting 20s..." >&2
+            sleep 20
+          done
           if [ -z "$ASSETS" ]; then
-            echo "no assets found; skipping" >&2
+            echo "no assets found after retries; skipping" >&2
             exit 0
           fi
 
