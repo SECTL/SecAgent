@@ -1241,26 +1241,25 @@ ipcMain.handle("companions:install-all", async (event, payload: unknown) => {
     const executor = await createCompanionExecutor();
     logMain("companion.batch.begin", { classIslandIds, secRandomIds, iccceIds, cwIds, elevatedExecutor: Boolean(executor) });
     try {
-      let classIsland: unknown[] = [];
-      let secRandom: unknown[] = [];
-      let iccce: unknown[] = [];
-      let cw: unknown[] = [];
-      if (classIslandIds.length) {
-        try { classIsland = await classIslandInstaller.install(classIslandIds, sendProgress("classisland:progress"), executor); }
-        catch (error) { logMain("companion.batch.classisland.failed", { error: error instanceof Error ? error.message : String(error) }); classIsland = failureResults(classIslandIds, error); }
-      }
-      if (secRandomIds.length) {
-        try { secRandom = await secRandomInstaller.install(secRandomIds, sendProgress("secrandom:progress"), executor); }
-        catch (error) { logMain("companion.batch.secrandom.failed", { error: error instanceof Error ? error.message : String(error) }); secRandom = failureResults(secRandomIds, error); }
-      }
-      if (iccceIds.length) {
-        try { iccce = await iccceInstaller.install(iccceIds, sendProgress("iccce:progress"), executor); }
-        catch (error) { logMain("companion.batch.iccce.failed", { error: error instanceof Error ? error.message : String(error) }); iccce = failureResults(iccceIds, error); }
-      }
-      if (cwIds.length) {
-        try { cw = await classWidgetsInstaller.install(cwIds, sendProgress("cw:progress"), executor); }
-        catch (error) { logMain("companion.batch.classwidgets.failed", { error: error instanceof Error ? error.message : String(error) }); cw = failureResults(cwIds, error); }
-      }
+      // The four installers run concurrently: each has its own download/
+      // package/decompress phases, and the long "waiting for the host app to
+      // come back" health polls overlap instead of adding up. The shared
+      // elevated worker serialises the actually-privileged file operations
+      // through its request directory, so one UAC still covers everything.
+      const runInstaller = async (label: string, ids: string[], install: () => Promise<unknown[]>): Promise<unknown[]> => {
+        if (!ids.length) return [];
+        try { return await install(); }
+        catch (error) {
+          logMain(`companion.batch.${label}.failed`, { error: error instanceof Error ? error.message : String(error) });
+          return failureResults(ids, error);
+        }
+      };
+      const [classIsland, secRandom, iccce, cw] = await Promise.all([
+        runInstaller("classisland", classIslandIds, () => classIslandInstaller.install(classIslandIds, sendProgress("classisland:progress"), executor)),
+        runInstaller("secrandom", secRandomIds, () => secRandomInstaller.install(secRandomIds, sendProgress("secrandom:progress"), executor)),
+        runInstaller("iccce", iccceIds, () => iccceInstaller.install(iccceIds, sendProgress("iccce:progress"), executor)),
+        runInstaller("classwidgets", cwIds, () => classWidgetsInstaller.install(cwIds, sendProgress("cw:progress"), executor))
+      ]);
       const allResults = [...classIsland, ...secRandom, ...iccce, ...cw];
       const failed = allResults.filter((item) => !item || (item as { ok?: unknown }).ok !== true);
       logMain(failed.length ? "companion.batch.completed-with-failures" : "companion.batch.success", {

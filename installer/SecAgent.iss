@@ -123,6 +123,7 @@ var
   { always-visible chrome }
   HeaderBand: TNewStaticText;
   LogoImage: TBitmapImage;
+  LogoCursorShield: TNewStaticText;
   TitleLabel: TNewStaticText;
   CloseLabel: TNewStaticText;
   VersionLabel: TNewStaticText;
@@ -198,6 +199,13 @@ function AutoStartWanted: Boolean;
 begin
   Result := WantAutoStart;
 end;
+
+{ The interactive install's [Run] entry launches SecAgent from the elevated
+  installer process, so the app starts with the inherited admin token - the
+  whole elevated-autostart chain starts here. Silent updates instead relaunch
+  through Restart Manager (/RESTARTAPPLICATIONS), which uses the original
+  user token; those users get their elevation from the autostart scheduled
+  task on the next boot. }
 
 procedure StyleFont(AFont: TFont; ASizePt: Integer; AColor: TColor; ABold: Boolean);
 begin
@@ -440,9 +448,17 @@ begin
   LogoImage.Stretch := True;
   LogoImage.SetBounds(UiX(152), UiY(80), UiX(185), UiY(188));
   LogoImage.PngImage.LoadFromFile(ExpandConstant('{tmp}\logo.png'));
-  { the logo keeps the default arrow cursor: only the empty header area
-    hints at draggability, the brand mark itself should not react to hover }
-  LogoImage.Cursor := crDefault;
+  { TBitmapImage ignores Cursor in the script build (PS_MINIVCL) and shows
+    the band's crSizeAll. Cover it with a transparent windowed label that
+    honors Cursor, so hovering the brand mark shows the plain arrow - only
+    the empty header area hints at draggability. }
+  LogoCursorShield := TNewStaticText.Create(HeaderBand);
+  LogoCursorShield.Parent := HeaderBand;
+  LogoCursorShield.AutoSize := False;
+  LogoCursorShield.SetBounds(UiX(152), UiY(80), UiX(185), UiY(188));
+  LogoCursorShield.Caption := ' ';
+  LogoCursorShield.Color := clWhite;
+  LogoCursorShield.Cursor := crDefault;
 
   TitleLabel := MakeLabel(HeaderBand, 342, 130, 320, 96, 'SecAgent', clWhite);
   StyleFont(TitleLabel.Font, 48, clBlack, True);
@@ -679,7 +695,7 @@ procedure InitializeWizard;
 begin
   WantDesktop := True;
   WantStartMenu := True;
-  WantAutoStart := False;
+  WantAutoStart := True;
 
   ExtractTemporaryFile('logo.png');
   ExtractTemporaryFile('button-primary.png');
