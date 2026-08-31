@@ -1,0 +1,13 @@
+{
+  "apiVersion": 1,
+  "id": "secscore-connector",
+  "name": "SecScore 积分操作",
+  "version": "2.1.6",
+  "main": "main.mjs",
+  "icon": "icon.svg",
+  "description": "让 SecAgent 可以查询 SecScore 班级积分，并执行加分、减分和扣分操作",
+  "permissions": ["agent.tools", "agent.skills", "agent.settings", "network.http"],
+  "settingsPages": [
+    { "id": "secscore", "title": "SecScore 积分操作", "description": "选择 SecScore 账号和班级" }
+  ]
+}
