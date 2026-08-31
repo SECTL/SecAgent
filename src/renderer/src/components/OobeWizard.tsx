@@ -3,6 +3,7 @@ import { ArrowRight, Check, ChevronDown, ChevronRight } from "lucide-react";
 import { PresetCombobox } from "./PresetCombobox.js";
 import { SelectCombobox } from "./SelectCombobox.js";
 import { emptyProvider } from "../utils.js";
+import { filterRecommendedCompanionApps, MANUAL_COMPANION_PLUGIN_IDS } from "../oobe-companion.js";
 
 type SourcePath = "official" | "custom";
 type OobeStep = "source" | "config" | "plugins";
@@ -907,7 +908,25 @@ export function OobeWizard() {
     }
   };
 
-  const recommended = useMemo(() => apps.filter((app) => app.detected || app.pluginId === "classisland-connector" || app.pluginId === "secrandom" || app.pluginId === "iccce-connector" || app.pluginId === "class-widgets"), [apps]);
+  // Only show a card for apps that are actually relevant to this machine:
+  // detected on disk, SecAgent-side plugin already installed, or a manually
+  // added install target. Without this, absent apps (e.g. Class Widgets on a
+  // machine that never had it) appeared under "本机已检测到" and implied they
+  // were installed.
+  const recommended = useMemo(() => filterRecommendedCompanionApps(apps, plugins, {
+    "classisland-connector": classIslandTargets.length,
+    secrandom: secRandomTargets.length,
+    "iccce-connector": iccceTargets.length,
+    "class-widgets": cwTargets.length
+  }), [apps, plugins, classIslandTargets, secRandomTargets, iccceTargets, cwTargets]);
+  // The manual-configuration entry point for dual-end apps that are not
+  // currently shown as a card. This preserves the ability to configure an app
+  // installed in a non-standard location without showing a full card for an
+  // app that is simply absent.
+  const manualAddApps = useMemo(() => apps.filter((app) => (
+    !recommended.some((item) => item.pluginId === app.pluginId) &&
+    MANUAL_COMPANION_PLUGIN_IDS.includes(app.pluginId)
+  )), [apps, recommended]);
   const allDetectedCompanionsInstalled = useMemo(() => {
     const detectedApps = apps.filter((app) => app.detected);
     if (!detectedApps.length) return false;
@@ -1025,8 +1044,8 @@ export function OobeWizard() {
         <span className="oobe-plugin-detection-spinner" aria-hidden="true" />
         <span className="visually-hidden">正在检测本机课堂软件…</span>
       </div> : <section className="oobe-plugin-list">
-        <h2>本机已检测到</h2>
-        {!apps.some((app) => app.detected) && <p className="empty-list">没有自动检测到已适配的课堂应用。你可以在 ClassIsland 卡片中手动选择安装位置，或稍后在设置里处理。</p>}
+        <h2>课堂联动插件</h2>
+        {!recommended.length && manualAddApps.length > 0 && <p className="empty-list">没有自动检测到已适配的课堂应用。你可以为已安装的应用手动选择安装位置，或稍后在设置里处理。</p>}
         {recommended.map((app, index) => {
           const market = marketPlugins.find((plugin) => plugin.id === app.pluginId);
           const installed = plugins.find((plugin) => plugin.id === app.pluginId);
@@ -1201,6 +1220,25 @@ export function OobeWizard() {
             </div>}
           </article>;
         })}
+        {manualAddApps.length > 0 && <div className="oobe-manual-add">
+          <h3>未检测到，可手动添加</h3>
+          <ul className="oobe-manual-add-list">
+            {manualAddApps.map((app) => (
+              <li className="oobe-manual-add-item" key={app.pluginId}>
+                <span className="oobe-plugin-icon" aria-hidden="true"><img className="oobe-plugin-icon-app" src={app.icon} alt="" /></span>
+                <div className="oobe-plugin-copy"><strong>{app.appName}</strong><span>{app.description}</span></div>
+                <button className="secondary-button" type="button" disabled={Boolean(installingId) || busy} onClick={() => {
+                  switch (app.pluginId) {
+                    case "classisland-connector": void pickClassIslandExecutable(); break;
+                    case "secrandom": void pickSecRandomExecutable(); break;
+                    case "iccce-connector": void pickIccceExecutable(); break;
+                    case "class-widgets": void pickClassWidgetsExecutable(); break;
+                  }
+                }}>选择可执行文件</button>
+              </li>
+            ))}
+          </ul>
+        </div>}
       </section>}
       <div className="oobe-actions">
         <button className="secondary-button" type="button" onClick={() => void saveProgress({ step: "config", source: source || undefined, ...(source === "custom" ? { provider } : {}) }).then(() => goToStep("config")).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))}>上一步</button>

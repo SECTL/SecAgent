@@ -424,6 +424,12 @@ html.wake-mode, html.wake-mode body, body.wake-mode { min-width: 0; overflow: hi
 @keyframes oobe-plugin-detection-spin { to { transform: rotate(360deg); } }
 .oobe-plugin-list { max-width: 760px; margin: 0 auto 22px; }
 .oobe-plugin-list h2 { margin: 0 0 10px; font-size: 15px; }
+.oobe-manual-add { display: grid; gap: 8px; padding-top: 6px; }
+.oobe-manual-add h3 { margin: 0 0 2px; font-size: 13px; color: #555; }
+.oobe-manual-add-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.oobe-manual-add-item { display: flex; align-items: center; gap: 12px; padding: 11px 14px; border: 1px solid #e3e3e3; border-radius: 12px; background: #fff; }
+.oobe-manual-add-item .oobe-plugin-copy { flex: 1 1 auto; min-width: 0; }
+.oobe-manual-add-item .secondary-button { flex: 0 0 auto; padding: 7px 10px; font-size: 12px; }
 @property --oobe-plugin-progress { syntax: "<percentage>"; inherits: false; initial-value: 0%; }
 .oobe-plugin-card { --oobe-plugin-progress: 0%; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; position: relative; overflow: hidden; border-radius: 0; box-shadow: none; background: linear-gradient(90deg, rgba(35,137,236,.15) 0 var(--oobe-plugin-progress), #fff var(--oobe-plugin-progress) 100%); transition: --oobe-plugin-progress 420ms cubic-bezier(.2, .8, .2, 1), background 420ms cubic-bezier(.2, .8, .2, 1); }
 .oobe-plugin-card > * { position: relative; z-index: 1; }
