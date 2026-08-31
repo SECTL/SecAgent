@@ -1,0 +1,409 @@
+diff --git a/Plugin.cs b/Plugin.cs
+index 3068750..92e542b 100644
+--- a/Plugin.cs
++++ b/Plugin.cs
+@@ -1,4 +1,5 @@
+-﻿using System.Net;
++﻿using System.Collections;
++using System.Net;
+ using System.Net.Http.Json;
+ using System.Globalization;
+ using System.Reflection;
+@@ -118,6 +119,10 @@ public sealed class HttpApiServer : IDisposable
+     private const string SwapClassesTool = "swap_classisland_classes";
+     private const string ChangeClassTool = "change_classisland_class";
+     private const string ScheduleDayAsTool = "schedule_classisland_day_as";
++    private const string CallIslandCallerTool = "call_island_caller";
++    private const string ListIslandCallerProfilesTool = "list_island_caller_profiles";
++    private const string ReadIslandCallerRosterTool = "read_island_caller_roster";
++    private const string WriteIslandCallerRosterTool = "write_island_caller_roster";
+     private async Task ListenAsync(CancellationToken cancellationToken)
+     {
+         while (!cancellationToken.IsCancellationRequested)
+@@ -197,7 +202,11 @@ public sealed class HttpApiServer : IDisposable
+         Tool(SwapClassesTool, "交换两节课的科目（支持跨天）。temporary=true 时写入临时层课表并标记临时换课，不影响原课表。", SwapClassesSchema(), hidden: false),
+         Tool(ChangeClassTool, "把某一天某一节课临时改成指定科目（占课）。temporary=true 时写入临时层课表。", ChangeClassSchema(), hidden: false),
+         Tool(ScheduleDayAsTool, "把指定日期设为使用另一天/另一星期几的课表（调休），通过预定课表生效。", ScheduleDayAsSchema(), hidden: false),
+-        Tool(UpdateComponentTool, "按组件 ID 修改 ClassIsland 组件的通用高级设置或专属设置。", ComponentUpdateSchema()));
++        Tool(UpdateComponentTool, "按组件 ID 修改 ClassIsland 组件的通用高级设置或专属设置。", ComponentUpdateSchema()),
++        Tool(CallIslandCallerTool, "通过 IslandCaller 插件执行随机点名（抽人）。需要在 ClassIsland 中安装并启用 IslandCaller，且已配置名单；count 为一次点名人数（1-20，默认 1）。", IslandCallerCallSchema(), hidden: false),
++        Tool(ListIslandCallerProfilesTool, "列出 IslandCaller 已配置的名单（名称、ID、是否当前使用/默认）。", EmptySchema()),
++        Tool(ReadIslandCallerRosterTool, "读取 IslandCaller 指定名单的学生成员。", IslandCallerRosterReadSchema()),
++        Tool(WriteIslandCallerRosterTool, "写入/创建 IslandCaller 名单。写入后如果该名单正是当前活动名单会自动热重载；新建名单会自动加入 IslandCaller 设置。", IslandCallerRosterWriteSchema()));
+ 
+     private static JsonObject Tool(string name, string description, JsonObject schema, bool hidden = true) => new()
+     {
+@@ -278,6 +287,56 @@ public sealed class HttpApiServer : IDisposable
+         ["additionalProperties"] = false
+     };
+ 
++    private static JsonObject IslandCallerCallSchema() => new()
++    {
++        ["type"] = "object",
++        ["properties"] = new JsonObject
++        {
++            ["count"] = new JsonObject { ["type"] = "integer", ["minimum"] = 1, ["maximum"] = 20, ["description"] = "点名人数，默认 1。" }
++        },
++        ["additionalProperties"] = false
++    };
++
++    private static JsonObject IslandCallerRosterReadSchema() => new()
++    {
++        ["type"] = "object",
++        ["properties"] = new JsonObject
++        {
++            ["profile_id"] = new JsonObject { ["type"] = "string", ["description"] = "名单 GUID；省略时读取当前活动名单。" }
++        },
++        ["additionalProperties"] = false
++    };
++
++    private static JsonObject IslandCallerRosterWriteSchema() => new()
++    {
++        ["type"] = "object",
++        ["properties"] = new JsonObject
++        {
++            ["profile_id"] = new JsonObject { ["type"] = "string", ["description"] = "名单 GUID；省略时写入当前活动名单。" },
++            ["profile_name"] = new JsonObject { ["type"] = "string", ["description"] = "新建名单时的显示名称（profile_id 未在 IslandCaller 设置中时必填）。" },
++            ["members"] = new JsonObject
++            {
++                ["type"] = "array",
++                ["description"] = "学生成员；id 缺省时自动按 1 起连续编号。",
++                ["items"] = new JsonObject
++                {
++                    ["type"] = "object",
++                    ["properties"] = new JsonObject
++                    {
++                        ["id"] = new JsonObject { ["type"] = "integer" },
++                        ["name"] = new JsonObject { ["type"] = "string" },
++                        ["gender"] = new JsonObject { ["type"] = "integer", ["description"] = "0=男，1=女" },
++                        ["manual_weight"] = new JsonObject { ["type"] = "number", ["description"] = "手动权重，默认 1.0" }
++                    },
++                    ["required"] = new JsonArray("name"),
++                    ["additionalProperties"] = false
++                }
++            }
++        },
++        ["required"] = new JsonArray("members"),
++        ["additionalProperties"] = false
++    };
++
+     private static JsonObject ProfileWriteSchema() => new()
+     {
+         ["type"] = "object",
+@@ -416,6 +475,10 @@ public sealed class HttpApiServer : IDisposable
+             SwapClassesTool => SwapClasses(arguments),
+             ChangeClassTool => ChangeClass(arguments),
+             ScheduleDayAsTool => ScheduleDayAs(arguments),
++            CallIslandCallerTool => CallIslandCaller(arguments),
++            ListIslandCallerProfilesTool => ListIslandCallerProfiles(),
++            ReadIslandCallerRosterTool => ReadIslandCallerRoster(arguments),
++            WriteIslandCallerRosterTool => WriteIslandCallerRoster(arguments),
+             _ => throw new ArgumentException($"未知工具：{name}")
+         };
+     }
+@@ -1581,6 +1644,269 @@ public sealed class HttpApiServer : IDisposable
+         finally { if (File.Exists(temp)) File.Delete(temp); }
+     }
+ 
++    // ---------- IslandCaller 联动工具 ----------
++    // IslandCaller 是与本插件运行在同一 ClassIsland 进程内的第三方插件（HickoryTrail/IslandCaller）。
++    // 为了不与 IslandCaller 建立编译期依赖（其 SDK 版本可能与本插件不同），这里统一通过反射访问其服务。
++
++    private static Type? FindIslandCallerType(string fullName)
++    {
++        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
++        {
++            try
++            {
++                if (assembly.GetName().Name?.IndexOf("IslandCaller", StringComparison.OrdinalIgnoreCase) != 0) continue;
++                var type = assembly.GetType(fullName, throwOnError: false);
++                if (type is not null) return type;
++            }
++            catch { /* 个别程序集可能无法解析，跳过 */ }
++        }
++        return null;
++    }
++
++    private static object? GetIslandCallerService(Type serviceType)
++    {
++        try { return IAppHost.Host?.Services.GetService(serviceType); }
++        catch { return null; }
++    }
++
++    private static JsonObject IslandCallerNotInstalledResult(string feature) => new()
++    {
++        ["ok"] = false, ["installed"] = false, ["message"] = $"未检测到 IslandCaller 插件，无法{feature}。请在 ClassIsland 中安装并启用 IslandCaller 后再试。"
++    };
++
++    private static bool? ReadIslandCallerReady()
++    {
++        var statusType = FindIslandCallerType("IslandCaller.Services.Status");
++        if (statusType is null) return null;
++        var service = GetIslandCallerService(statusType);
++        if (service is null) return null;
++        var property = statusType.GetProperty("IsPluginReady", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
++        return property?.GetValue(service) is true;
++    }
++
++    /// <summary>读取 IslandCaller 短期历史（最近被点到学生的名字，最新在前）。</summary>
++    private static List<string> ReadIslandCallerRecentHistory()
++    {
++        var historyType = FindIslandCallerType("IslandCaller.Services.HistoryService");
++        if (historyType is null) return new List<string>();
++        var service = GetIslandCallerService(historyType);
++        if (service is null) return new List<string>();
++        var field = historyType.GetField("top20List", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
++        if (field?.GetValue(service) is not IList<string> list) return new List<string>();
++        return list.ToList();
++    }
++
++    private static string? ReadIslandCallerActiveProfileId()
++    {
++        var profileServiceType = FindIslandCallerType("IslandCaller.Services.ProfileService");
++        if (profileServiceType is null) return null;
++        var service = GetIslandCallerService(profileServiceType);
++        if (service is null) return null;
++        var property = profileServiceType.GetProperty("ActiveProfileId", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
++        return property?.GetValue(service)?.ToString();
++    }
++
++    private static JsonObject CallIslandCaller(JsonElement arguments)
++    {
++        var count = Math.Clamp(OptionalInt(arguments, "count") ?? 1, 1, 20);
++        var serviceType = FindIslandCallerType("IslandCaller.Services.IslandCallerService.IslandCallerService");
++        if (serviceType is null) return IslandCallerNotInstalledResult("随机点名");
++        var service = GetIslandCallerService(serviceType);
++        if (service is null) return new JsonObject { ["ok"] = false, ["installed"] = true, ["ready"] = false, ["triggered"] = false, ["count"] = count, ["students"] = new JsonArray(), ["message"] = "IslandCaller 服务尚未初始化，请稍后重试。" };
++
++        var ready = ReadIslandCallerReady() ?? false;
++        if (!ready)
++        {
++            return new JsonObject { ["ok"] = false, ["installed"] = true, ["ready"] = false, ["triggered"] = false, ["count"] = count, ["students"] = new JsonArray(), ["message"] = "IslandCaller 尚未就绪（可能没有配置名单或仍在初始化）。请先在 IslandCaller 设置中确认名单已加载。" };
++        }
++
++        var method = serviceType.GetMethod("ShowRandomStudent", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
++        if (method is null) return new JsonObject { ["ok"] = false, ["installed"] = true, ["ready"] = true, ["triggered"] = false, ["count"] = count, ["students"] = new JsonArray(), ["message"] = "IslandCaller 版本不兼容：找不到 ShowRandomStudent 方法。" };
++
++        var before = ReadIslandCallerRecentHistory();
++        try { method.Invoke(service, new object[] { count }); }
++        catch (Exception ex) { return new JsonObject { ["ok"] = false, ["installed"] = true, ["ready"] = true, ["triggered"] = false, ["count"] = count, ["students"] = new JsonArray(), ["message"] = $"调用 IslandCaller 点名失败：{ex.GetBaseException().Message}" }; }
++        var after = ReadIslandCallerRecentHistory();
++        // ShowRandomStudent 先同步抽取（写入短期历史，最新在前），因此本次点名的新增项取历史前部，
++        // 再反转即为抽取顺序。
++        var students = after.Except(before).ToList();
++        if (students.Count < count) students = after.Take(count).ToList();
++        students.Reverse();
++        var array = new JsonArray(students.Select(x => (JsonNode)x).ToArray());
++        var triggered = students.Count > 0;
++        return new JsonObject { ["ok"] = triggered, ["installed"] = true, ["ready"] = true, ["triggered"] = triggered, ["count"] = students.Count, ["students"] = array, ["message"] = triggered ? $"已完成随机点名：{string.Join("、", students)}。" : "随机点名已触发，但未读到被点学生名单（可能名单为空）。" };
++    }
++
++    private static JsonObject ListIslandCallerProfiles()
++    {
++        var settingsType = FindIslandCallerType("IslandCaller.Models.Settings");
++        if (settingsType is null) return IslandCallerNotInstalledResult("读取 IslandCaller 名单设置");
++        var instanceProperty = settingsType.GetProperty("Instance", BindingFlags.Static | BindingFlags.Public);
++        var settings = instanceProperty?.GetValue(null);
++        if (settings is null) return new JsonObject { ["ok"] = false, ["installed"] = true, ["profiles"] = new JsonArray(), ["message"] = "IslandCaller 设置尚未加载。" };
++
++        var profileSetting = settingsType.GetProperty("Profile")?.GetValue(settings);
++        var profileSettingType = profileSetting?.GetType();
++        var profileList = profileSettingType?.GetProperty("ProfileList")?.GetValue(profileSetting) as IDictionary;
++        var defaultProfile = profileSettingType?.GetProperty("DefaultProfile")?.GetValue(profileSetting)?.ToString();
++        var activeProfileId = ReadIslandCallerActiveProfileId();
++        var profiles = new JsonArray();
++        if (profileList is not null)
++        {
++            foreach (DictionaryEntry entry in profileList)
++            {
++                var id = entry.Key.ToString() ?? "";
++                profiles.Add(new JsonObject { ["id"] = id, ["name"] = entry.Value?.ToString() ?? "", ["active"] = id == activeProfileId, ["default"] = id == defaultProfile });
++            }
++        }
++        return new JsonObject { ["ok"] = true, ["installed"] = true, ["default_profile_id"] = defaultProfile, ["active_profile_id"] = activeProfileId, ["profiles"] = profiles };
++    }
++
++    private static JsonObject ReadIslandCallerRoster(JsonElement arguments)
++    {
++        var profileServiceType = FindIslandCallerType("IslandCaller.Services.ProfileService");
++        if (profileServiceType is null) return IslandCallerNotInstalledResult("读取 IslandCaller 名单");
++        var service = GetIslandCallerService(profileServiceType);
++        if (service is null) return new JsonObject { ["ok"] = false, ["installed"] = true, ["message"] = "IslandCaller 名单服务尚未初始化。" };
++
++        Guid? guid = null;
++        var profileId = OptionalString(arguments, "profile_id");
++        if (!string.IsNullOrWhiteSpace(profileId))
++        {
++            if (!Guid.TryParse(profileId, out var parsed)) return new JsonObject { ["ok"] = false, ["installed"] = true, ["message"] = $"profile_id 不是合法的 GUID：{profileId}" };
++            guid = parsed;
++        }
++        else
++        {
++            var active = profileServiceType.GetProperty("ActiveProfileId", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(service);
++            if (active is Guid activeGuid && activeGuid != Guid.Empty) guid = activeGuid;
++            else return new JsonObject { ["ok"] = false, ["installed"] = true, ["message"] = "IslandCaller 当前没有活动的名单。" };
++        }
++
++        try
++        {
++            var getMembers = profileServiceType.GetMethod("GetMembers", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
++            if (getMembers is null) return new JsonObject { ["ok"] = false, ["installed"] = true, ["message"] = "IslandCaller 版本不兼容：找不到 GetMembers 方法。" };
++            if (getMembers.Invoke(service, new object[] { guid.Value }) is not IEnumerable members) return new JsonObject { ["ok"] = false, ["installed"] = true, ["message"] = "IslandCaller 名单数据格式异常。" };
++            var personType = profileServiceType.GetNestedType("Person", BindingFlags.Public);
++            var items = new JsonArray();
++            foreach (var person in members)
++            {
++                items.Add(new JsonObject
++                {
++                    ["id"] = personType?.GetProperty("Id")?.GetValue(person) is { } id ? Convert.ToInt32(id) : 0,
++                    ["name"] = personType?.GetProperty("Name")?.GetValue(person)?.ToString() ?? "",
++                    ["gender"] = personType?.GetProperty("Gender")?.GetValue(person) is { } gender ? Convert.ToInt32(gender) : 0,
++                    ["manual_weight"] = personType?.GetProperty("ManualWeight")?.GetValue(person) is { } weight ? Convert.ToDouble(weight) : 1.0
++                });
++            }
++            return new JsonObject { ["ok"] = true, ["installed"] = true, ["profile_id"] = guid.Value.ToString(), ["count"] = items.Count, ["members"] = items };
++        }
++        catch (Exception ex)
++        {
++            return new JsonObject { ["ok"] = false, ["installed"] = true, ["message"] = $"读取 IslandCaller 名单失败：{ex.GetBaseException().Message}" };
++        }
++    }
++
++    private static JsonObject WriteIslandCallerRoster(JsonElement arguments)
++    {
++        var profileServiceType = FindIslandCallerType("IslandCaller.Services.ProfileService");
++        if (profileServiceType is null) return IslandCallerNotInstalledResult("写入 IslandCaller 名单");
++        var service = GetIslandCallerService(profileServiceType);
++        if (service is null) return new JsonObject { ["ok"] = false, ["installed"] = true, ["message"] = "IslandCaller 名单服务尚未初始化。" };
++
++        Guid guid;
++        var profileId = OptionalString(arguments, "profile_id");
++        if (!string.IsNullOrWhiteSpace(profileId))
++        {
++            if (!Guid.TryParse(profileId, out var parsed)) return new JsonObject { ["ok"] = false, ["installed"] = true, ["message"] = $"profile_id 不是合法的 GUID：{profileId}" };
++            guid = parsed;
++        }
++        else
++        {
++            var active = profileServiceType.GetProperty("ActiveProfileId", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(service);
++            if (active is Guid activeGuid && activeGuid != Guid.Empty) guid = activeGuid;
++            else return new JsonObject { ["ok"] = false, ["installed"] = true, ["message"] = "IslandCaller 当前没有活动的名单。" };
++        }
++
++        if (!arguments.TryGetProperty("members", out var membersElement) || membersElement.ValueKind != JsonValueKind.Array) throw new ArgumentException("members 必须是学生数组。");
++
++        var personType = profileServiceType.GetNestedType("Person", BindingFlags.Public);
++        if (personType is null) return new JsonObject { ["ok"] = false, ["installed"] = true, ["message"] = "IslandCaller 版本不兼容：找不到 Person 类型。" };
++
++        var listType = typeof(List<>).MakeGenericType(personType);
++        var list = (IList)Activator.CreateInstance(listType)!;
++        var index = 1;
++        foreach (var item in membersElement.EnumerateArray())
++        {
++            var person = Activator.CreateInstance(personType);
++            if (person is null) continue;
++            var id = item.TryGetProperty("id", out var idValue) && int.TryParse(idValue.ToString(), out var parsedId) ? parsedId : index;
++            personType.GetProperty("Id")?.SetValue(person, id);
++            personType.GetProperty("Name")?.SetValue(person, item.TryGetProperty("name", out var nameValue) ? nameValue.GetString() ?? "" : "");
++            personType.GetProperty("Gender")?.SetValue(person, item.TryGetProperty("gender", out var genderValue) && int.TryParse(genderValue.ToString(), out var parsedGender) ? parsedGender : 0);
++            personType.GetProperty("ManualWeight")?.SetValue(person, item.TryGetProperty("manual_weight", out var weightValue) && double.TryParse(weightValue.ToString(), out var parsedWeight) ? parsedWeight : 1.0);
++            list.Add(person);
++            index++;
++        }
++
++        try
++        {
++            var saveProfile = profileServiceType.GetMethod("SaveProfile", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new[] { typeof(Guid), listType }, null);
++            if (saveProfile is null) return new JsonObject { ["ok"] = false, ["installed"] = true, ["message"] = "IslandCaller 版本不兼容：找不到 SaveProfile 方法。" };
++            saveProfile.Invoke(service, new object[] { guid, list });
++
++            // 若目标名单尚未在 IslandCaller 设置中登记，则补登记并保存设置（需要 profile_name）。
++            var registered = false;
++            var settingsType = FindIslandCallerType("IslandCaller.Models.Settings");
++            if (settingsType is not null)
++            {
++                var settings = settingsType.GetProperty("Instance", BindingFlags.Static | BindingFlags.Public)?.GetValue(null);
++                var profileSetting = settingsType.GetProperty("Profile")?.GetValue(settings);
++                var profileSettingType = profileSetting?.GetType();
++                var profileList = profileSettingType?.GetProperty("ProfileList")?.GetValue(profileSetting) as IDictionary;
++                if (profileList is not null)
++                {
++                    registered = profileList.Contains(guid);
++                    if (!registered)
++                    {
++                        var profileName = OptionalString(arguments, "profile_name");
++                        if (string.IsNullOrWhiteSpace(profileName)) return new JsonObject { ["ok"] = false, ["installed"] = true, ["written"] = true, ["message"] = $"名单已写入文件，但 {guid} 未在 IslandCaller 设置中登记；请提供 profile_name 以便自动登记该名单。" };
++                        profileList[guid] = profileName;
++                        try { settingsType.GetMethod("Save", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.Invoke(settings, null); registered = true; }
++                        catch { return new JsonObject { ["ok"] = false, ["installed"] = true, ["written"] = true, ["message"] = "名单已写入文件，但保存 IslandCaller 设置失败，请手动在 IslandCaller 中登记该名单。" }; }
++                    }
++                }
++            }
++
++            // 仅当写入的是当前活动名单时热重载，避免切换用户正在使用的名单。
++            var reloaded = false;
++            if (guid.ToString() == ReadIslandCallerActiveProfileId())
++            {
++                var runtimeType = FindIslandCallerType("IslandCaller.Services.ProfileRuntimeService");
++                var runtime = runtimeType is null ? null : GetIslandCallerService(runtimeType);
++                if (runtime is not null)
++                {
++                    var reload = runtime.GetType().GetMethod("Reload", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
++                    var ensureLoaded = runtime.GetType().GetMethod("EnsureLoaded", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
++                    try
++                    {
++                        if (reload is not null) reload.Invoke(runtime, new object[] { guid });
++                        else if (ensureLoaded is not null) ensureLoaded.Invoke(runtime, new object[] { guid });
++                        reloaded = true;
++                    }
++                    catch { reloaded = false; }
++                }
++            }
++
++            return new JsonObject { ["ok"] = true, ["installed"] = true, ["written"] = true, ["registered"] = registered, ["reloaded"] = reloaded, ["profile_id"] = guid.ToString(), ["count"] = list.Count };
++        }
++        catch (Exception ex)
++        {
++            return new JsonObject { ["ok"] = false, ["installed"] = true, ["message"] = $"写入 IslandCaller 名单失败：{ex.GetBaseException().Message}" };
++        }
++    }
++
+     public void Dispose()
+     {
+         try { _cts?.Cancel(); } catch { }
+diff --git a/README.md b/README.md
+index 1aadcaf..bbcbb18 100644
+--- a/README.md
++++ b/README.md
+@@ -6,4 +6,12 @@ ClassIsland 侧插件，为 SecAgent 连接插件提供普通 HTTP JSON 服务
+ 
+ 其中 `get_classisland_schedule` 是默认展示的只读快捷工具，省略日期时查询今天，也可以传入 `YYYY-MM-DD` 查询指定日期的课程、课间和科目安排。
+ 
+-SecAgent 端请安装 `ClassIsland-SecAgent-Connector`；连接插件会自动重试并在服务可用时注册工具和 Skill。
++## IslandCaller 随机点名
++
++如果 ClassIsland 中安装了 [IslandCaller](https://github.com/HickoryTrail/IslandCaller) 插件，本插件会额外提供以下工具（通过反射调用 IslandCaller 服务，无需改 IslandCaller 本体）：
++
++- `call_island_caller`（默认展示）：随机点名，`count` 为人数（1-20，默认 1）。IslandCaller 未安装或未就绪时返回明确原因。
++- `list_island_caller_profiles`：列出已登记的名单。
++- `read_island_caller_roster` / `write_island_caller_roster`：读取/写入名单；写入当前活动名单会自动热重载。
++
++SecAgent 端请安装 `ClassIsland-SecAgent-Connector`；连接插件会自动重试并在服务可用时注册工具和 Skill。连接插件 v1.1.0 起会为“点名/抽人/随机抽X人”等说法注册前置规则，命中后直接调用 `call_island_caller` 并渲染结果。
+diff --git a/manifest.yml b/manifest.yml
+index ccafeb0..c7aac43 100644
+--- a/manifest.yml
++++ b/manifest.yml
+@@ -1,9 +1,9 @@
+-id: classisland.secagent
+-name: SecAgent 联动
+-description: 让 SecAgent 帮你操作 ClassIsland 配置档案、换课、调整设置...
++id: classisland.secagent
++name: SecAgent 联动
++description: 让 SecAgent 帮你操作 ClassIsland 配置档案、换课、调整设置，并通过 IslandCaller 随机点名
+ entranceAssembly: "ClassIsland.SecAgent.Plugin.dll"
+ url: https://github.com/SECTL/ClassIsland-SecAgent-Plugin
+-version: 0.1.0.1
++version: 0.1.0.2
+ apiVersion: 2.0.0.0
+ author: SECTL
+ repoOwner: SECTL

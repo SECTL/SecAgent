@@ -1,0 +1,187 @@
+diff --git a/README.md b/README.md
+index 8cef655..7992f3f 100644
+--- a/README.md
++++ b/README.md
+@@ -3,3 +3,12 @@
+ 这是 SecAgent 侧的 ClassIsland 联动。它连接 ClassIsland 端 SecAgent 联动提供的 http://127.0.0.1:18789 普通 HTTP JSON 服务，动态暴露工具和 classisland Skill。插件安装后会在 SecAgent 设置页导航栏增加“ClassIsland联动”，连接失败时会提示在 ClassIsland 设置页安装并启动对应插件。
+ 
+ 插件同时声明了 `agent.prompts` 权限：每次对话时都会把 ClassIsland 的课表上下文（当前活动、全天课表序列、下一个活动）注入系统提示词末尾，让模型了解当前所处的课表状态。
++
++## IslandCaller 随机点名
++
++若 ClassIsland 中安装了 [IslandCaller](https://github.com/HickoryTrail/IslandCaller) 插件并配置好名单，本插件会自动暴露 `call_island_caller` 等工具：
++
++- 说“点名”“抽人”“抽个学生”“随机抽3人”等会命中前置规则（`agent.pre_rules`），直接触发 IslandCaller 随机点名并展示结果，无需经过大模型工具调用。
++- 模型也可按需调用 `call_island_caller`（点名）、`list_island_caller_profiles`（列出名单）、`read_island_caller_roster` / `write_island_caller_roster`（读写名单）。
++
++注意：`call_island_caller` 需要 IslandCaller 已安装且名单就绪；未就绪时会返回明确原因。若同时安装了 SecRandom 等带“点名”前置规则的其他连接插件，仅先注册的插件会响应（SecAgent 按注册顺序取第一个命中）。
+diff --git a/main.mjs b/main.mjs
+index 9df02ed..76a859f 100644
+--- a/main.mjs
++++ b/main.mjs
+@@ -1,9 +1,53 @@
+ ﻿const BASE_URL = process.env.CLASSISLAND_CONNECTOR_URL || "http://127.0.0.1:18789";
+ const SKILL_PATH = "skills/classisland";
++const PRE_RULE_NAME = "islandcaller_call";
+ 
+ const SCHEDULE_PROMPT = "classisland_schedule_context";
+ let scheduleContext = "";
+ 
++const chineseDigits = { 零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
++
++function parseCount(value) {
++  if (!value) return 1;
++  if (/^\d+$/u.test(value)) return Number(value);
++  let total = 0;
++  let current = 0;
++  for (const char of value) {
++    if (char in chineseDigits) { current = chineseDigits[char]; continue; }
++    if (char === "十" || char === "百") {
++      const unit = char === "十" ? 10 : 100;
++      total += (current || 1) * unit;
++      current = 0;
++      continue;
++    }
++    return NaN;
++  }
++  return total + current;
++}
++
++function renderIslandCallerResult(result) {
++  const data = result && typeof result === "object" ? result : {};
++  const students = Array.isArray(data.students) ? data.students.map(String).filter(Boolean) : [];
++  if (students.length) return `点到 ${students.join("、")}。`;
++  if (typeof data.message === "string" && data.message) return data.message;
++  return "随机点名已完成。";
++}
++
++function parseIslandCallerPreRule(input) {
++  const text = String(input || "").trim().replace(/[。！？!?，,；;]+$/u, "").replace(/\s+/gu, "");
++  const match = text.match(/^(?:请|帮我)?(?:随机)?(点个名|点名|抽个人|抽人|抽个学生|抽学生|抽|随机点名|随机抽选|随机抽取|随机)(?:(\d+|[零〇一二两三四五六七八九十百]+)个?)?人?$/u);
++  if (!match) return undefined;
++  const count = parseCount(match[2]);
++  if (!Number.isInteger(count) || count < 1 || count > 20) return undefined;
++  return {
++    tool: "call_island_caller",
++    arguments: { count },
++    render: renderIslandCallerResult
++  };
++}
++
++export { parseIslandCallerPreRule, renderIslandCallerResult };
++
+ const entryName = (entry) => {
+   if (entry.type === "lesson") return entry.subject || (entry.period ? `第 ${entry.period} 节` : "");
+   if (entry.type === "break") return entry.label || "课间";
+@@ -61,6 +105,20 @@ const refreshScheduleContext = async (request) => {
+ export async function activate(api) {
+   let connected = false;
+   let registeredTools = [];
++  let preRuleRegistered = false;
++
++  const registerPreRule = () => {
++    if (preRuleRegistered) return;
++    if (typeof api.registerPreRule !== "function") return;
++    api.registerPreRule(PRE_RULE_NAME, parseIslandCallerPreRule);
++    preRuleRegistered = true;
++  };
++
++  const unregisterPreRule = () => {
++    if (!preRuleRegistered) return;
++    if (typeof api.unregisterPreRule === "function") api.unregisterPreRule(PRE_RULE_NAME);
++    preRuleRegistered = false;
++  };
+ 
+   const request = async (path, init = {}) => {
+     const response = await api.fetch(`${BASE_URL}${path}`, {
+@@ -76,6 +134,7 @@ export async function activate(api) {
+   };
+ 
+   const unregister = () => {
++    unregisterPreRule();
+     for (const name of registeredTools) api.unregisterTool(name);
+     registeredTools = [];
+     if (connected) api.unregisterSkill("classisland");
+@@ -111,6 +170,7 @@ export async function activate(api) {
+       api.registerSkill(SKILL_PATH);
+       connected = true;
+       await refreshScheduleContext(request);
++      registerPreRule();
+       api.setStatus(`已连接 ClassIsland（${registeredTools.length} 个工具）`);
+     } catch (error) {
+       unregister();
+diff --git a/scripts/build.mjs b/scripts/build.mjs
+index a777219..386eb7e 100644
+--- a/scripts/build.mjs
++++ b/scripts/build.mjs
+@@ -4,6 +4,7 @@ import AdmZip from "adm-zip";
+ 
+ const root = path.resolve(import.meta.dirname, "..");
+ const dist = path.join(root, "dist");
++const version = JSON.parse(fs.readFileSync(path.join(root, "secagent-plugin.json"), "utf8")).version;
+ fs.rmSync(dist, { recursive: true, force: true });
+ fs.mkdirSync(dist, { recursive: true });
+ fs.copyFileSync(path.join(root, "main.mjs"), path.join(dist, "main.mjs"));
+@@ -13,5 +14,5 @@ fs.copyFileSync(path.join(root, "README.md"), path.join(dist, "README.md"));
+ fs.cpSync(path.join(root, "skills"), path.join(dist, "skills"), { recursive: true });
+ const archive = new AdmZip();
+ archive.addLocalFolder(dist);
+-archive.writeZip(path.join(dist, "classisland-connector-1.0.2.zip"));
+-console.log("Created dist/classisland-connector-1.0.2.zip");
++archive.writeZip(path.join(dist, `classisland-connector-${version}.zip`));
++console.log(`Created dist/classisland-connector-${version}.zip`);
+diff --git a/secagent-plugin.json b/secagent-plugin.json
+index 0ad0255..53561e2 100644
+--- a/secagent-plugin.json
++++ b/secagent-plugin.json
+@@ -2,11 +2,11 @@
+   "apiVersion": 1,
+   "id": "classisland-connector",
+   "name": "ClassIsland联动",
+-  "version": "1.0.2",
++  "version": "1.1.0",
+   "main": "main.mjs",
+   "icon": "icon.svg",
+-  "description": "让 SecAgent 帮你操作 ClassIsland 配置档案、换课、调整设置...",
+-  "permissions": ["agent.tools", "agent.skills", "agent.prompts", "network.http"],
++  "description": "让 SecAgent 帮你操作 ClassIsland 配置档案、换课、调整设置，并可通过 IslandCaller 随机点名...",
++  "permissions": ["agent.tools", "agent.skills", "agent.prompts", "agent.pre_rules", "network.http"],
+   "settingsPages": [{
+     "id": "connection",
+     "title": "ClassIsland联动"
+diff --git a/skills/classisland/SKILL.md b/skills/classisland/SKILL.md
+index f854a1f..d93d4d2 100644
+--- a/skills/classisland/SKILL.md
++++ b/skills/classisland/SKILL.md
+@@ -1,6 +1,6 @@
+ ---
+ name: classisland
+-description: 通过普通 HTTP 连接 ClassIsland，查询和修改主设置、主界面组件、档案与时间表；先读取专题说明和当前数据，再执行最小范围写入。（ClassIsland 简称 CI）
++description: 通过普通 HTTP 连接 ClassIsland，查询和修改主设置、主界面组件、档案与时间表，并通过 IslandCaller 随机点名；先读取专题说明和当前数据，再执行最小范围写入。（ClassIsland 简称 CI）
+ ---
+ 
+ # ClassIsland Agent 操作入口
+@@ -50,6 +50,7 @@ description: 通过普通 HTTP 连接 ClassIsland，查询和修改主设置、
+ - `swap_classisland_classes`：交换两节课（支持跨天）。参数 `date_a`/`class_a`/`date_b`/`class_b`（节次序号 1=第1节），`temporary` 默认 true（写入临时层，不影响原课表）。
+ - `change_classisland_class`：把某一天某一节临时改成指定科目（占课）。参数 `date`/`class`/`subject_name`，`temporary` 默认 true。
+ - `schedule_classisland_day_as`：把某一天设为使用另一天/另一星期几的课表（调休）。参数 `date` + `source_date` 或 `source_weekday`（0=周日…6=周六）。
++- `call_island_caller` / `list_island_caller_profiles` / `read_island_caller_roster` / `write_island_caller_roster`：IslandCaller 随机点名及名单读写（见下文「IslandCaller 随机点名」）。
+ 
+ ## 临时层与调休
+ 
+@@ -59,4 +60,15 @@ ClassIsland 用“临时层”课表承载临时换课/占课，改动写入临
+ - 调休（如“这周日上周一的课”）使用 `schedule_classisland_day_as`：`date` 填目标日期，`source_weekday` 填源星期几（1=周一），或 `source_date` 填源日期；服务端会创建预定课表生效。
+ - 任何写操作后调用 `get_classisland_schedule` 重新验证当天课表已生效；不要仅凭口头“已完成”收尾。
+ 
++## IslandCaller 随机点名
++
++如果用户在 ClassIsland 中安装了 IslandCaller 插件并配置好名单，可以使用以下工具：
++
++- `call_island_caller`：随机点名。`count` 为点名人数（1-20，默认 1）。会弹出点名窗口并返回被点到的学生名单；IslandCaller 未安装或未就绪时会返回明确原因，此时不要假装点名成功。
++- `list_island_caller_profiles`：列出 IslandCaller 已登记的名单（ID、名称、是否当前使用/默认）。
++- `read_island_caller_roster`：读取指定名单的学生成员（`profile_id` 可省略，默认当前活动名单）。
++- `write_island_caller_roster`：写入/创建名单。`members` 为 `{name}` 数组（可带 `id`/`gender`/`manual_weight`）；写入当前活动名单会自动热重载，新建名单需提供 `profile_name` 自动登记。
++
++常见表达“点名/抽人/抽个学生/随机抽X人”会命中前置规则直接执行；如果不是用这些固定说法，可主动调用 `call_island_caller`。点名前如不确定是否有名单，先调用 `list_island_caller_profiles` 确认。
++
+ 任何写操作都必须先读后写；若用户只说“改一下组件”但没有明确字段，先询问目标组件和字段，不要猜测。

@@ -1,0 +1,13 @@
+diff --git a/plugins/classisland-connector.json b/plugins/classisland-connector.json
+index 1784b24..264d5fc 100644
+--- a/plugins/classisland-connector.json
++++ b/plugins/classisland-connector.json
+@@ -8,7 +8,7 @@
+   "icon": "https://raw.githubusercontent.com/SECTL/ClassIsland-SecAgent-Connector/main/icon.svg",
+   "readme": "https://raw.githubusercontent.com/SECTL/ClassIsland-SecAgent-Connector/main/README.md",
+   "minHostApiVersion": 1,
+-  "permissions": ["agent.tools", "agent.skills", "agent.prompts", "network.http"],
++  "permissions": ["agent.tools", "agent.skills", "agent.prompts", "agent.pre_rules", "network.http"],
+   "platforms": ["darwin", "linux", "win32"],
+   "release": {
+     "provider": "github",
