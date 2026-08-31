@@ -1,0 +1,60 @@
+name: OpenCode
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+concurrency:
+  group: opencode-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  opencode:
+    if: |
+      contains(github.event.comment.body, '/oc') ||
+      contains(github.event.comment.body, '/opencode')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Discover SecAgent repositories
+        env:
+          GITHUB_TOKEN: ${{ secrets.SECTL_SECAGENT_GITHUB_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          repositories="SECTL/SecAgent"
+          if discovered="$(gh api --paginate 'orgs/SECTL/repos?per_page=100&type=all' \
+            --jq '.[] | select(.name | ascii_downcase | contains("secagent")) | .full_name' \
+            | sort -fu | paste -sd, -)" && [ -n "$discovered" ]; then
+            repositories="$discovered"
+          fi
+          echo "SECTL_SECAGENT_REPOSITORIES=$repositories" >> "$GITHUB_ENV"
+          echo "Allowed SecAgent repositories: $repositories"
+
+      - name: Configure Git credentials
+        env:
+          GITHUB_TOKEN: ${{ secrets.SECTL_SECAGENT_GITHUB_TOKEN || github.token }}
+        run: gh auth setup-git
+
+      - name: Run OpenCode
+        uses: anomalyco/opencode/github@cb7d8b2f5e44876ef98b661dc10590c915af3a9f
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.SECTL_SECAGENT_GITHUB_TOKEN || github.token }}
+        with:
+          model: anthropic/deepseek-v4-flash
+          agent: issue-pr-coder
+          mentions: /oc,/opencode
+          use_github_token: true

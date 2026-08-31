@@ -1,0 +1,41 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "anthropic/deepseek-v4-flash",
+  "provider": {
+    "anthropic": {
+      "options": {
+        "baseURL": "https://api.deepseek.com/anthropic"
+      },
+      "models": {
+        "deepseek-v4-flash": {
+          "name": "DeepSeek V4 Flash"
+        }
+      }
+    }
+  },
+  "default_agent": "issue-pr-coder",
+  "agent": {
+    "issue-pr-coder": {
+      "description": "Investigate issues, review pull requests, and implement requested fixes",
+      "mode": "primary",
+      "prompt": "{file:./prompts/issue-pr-coder.txt}",
+      "steps": 30,
+      "permission": {
+        "read": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "list": "allow",
+        "lsp": "allow",
+        "edit": "allow",
+        "bash": "allow",
+        "webfetch": "allow",
+        "websearch": "allow",
+        "external_directory": "allow",
+        "todowrite": "allow",
+        "question": "allow",
+        "skill": "allow",
+        "task": "allow"
+      }
+    }
+  }
+}
