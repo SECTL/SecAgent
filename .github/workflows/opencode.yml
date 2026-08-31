@@ -58,3 +58,4 @@ jobs:
           agent: issue-pr-coder
           mentions: /oc,/opencode
           use_github_token: true
+          variant: off
