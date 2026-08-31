@@ -10,7 +10,7 @@ import { DEFAULT_MARKETPLACE_PROXY_URL, describeDownloadAttempt, marketplaceRequ
 export const CLASSISLAND_PLUGIN_REPOSITORY = "SECTL/ClassIsland-SecAgent-Plugin";
 export const CLASSISLAND_PLUGIN_ID = "classisland.secagent";
 export const CLASSISLAND_PLUGIN_ASSET_NAME = "ClassIsland.SecAgent.Plugin.cipx";
-export const MIN_CLASSISLAND_VERSION = "2.1.1.0";
+export const MIN_CLASSISLAND_VERSION = "2.0.0.0";
 export const CLASSISLAND_RELEASE_API_URL = `https://api.github.com/repos/${CLASSISLAND_PLUGIN_REPOSITORY}/releases/latest`;
 const CLASSISLAND_RELEASE_PAGE_URL = `https://github.com/${CLASSISLAND_PLUGIN_REPOSITORY}/releases/latest`;
 

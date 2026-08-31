@@ -1,0 +1,3 @@
+id: secrandom.secagent
+entranceAssembly: SecRandom.SecAgentPlugin.dll
+version: 1.0.3

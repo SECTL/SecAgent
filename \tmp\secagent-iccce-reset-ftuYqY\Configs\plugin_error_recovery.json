@@ -1,0 +1,1 @@
+[{"PluginId":"someone.else.plugin","PluginName":"Unrelated","FailureTimestamps":["2026-08-29T03:00:00"],"AutoDisabled":true},{"PluginId":"inkcanvas.iccce.secagent","PluginName":"SecAgent 联动","FailureTimestamps":["2026-08-29T04:00:00"],"LastErrorMessage":"boom","AutoDisabled":true}]

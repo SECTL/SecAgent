@@ -38,12 +38,13 @@ function classIslandHealthResponse(input: string | URL): Response | undefined {
     : undefined;
 }
 
-test("ClassIsland versions enforce the 2.1.1.0 minimum", () => {
-  assert.equal(compareClassIslandVersions("2.1.1.0", "2.1.1.0"), 0);
-  assert.equal(compareClassIslandVersions("2.1.1.1", "2.1.1.0") > 0, true);
-  assert.equal(compareClassIslandVersions("2.1.0.9", "2.1.1.0") < 0, true);
-  assert.equal(isCompatibleClassIslandVersion("2.1.1.0"), true);
-  assert.equal(isCompatibleClassIslandVersion("2.1.0.9"), false);
+test("ClassIsland versions enforce the 2.0.0.0 minimum", () => {
+  assert.equal(compareClassIslandVersions("2.0.0.0", "2.0.0.0"), 0);
+  assert.equal(compareClassIslandVersions("2.0.0.1", "2.0.0.0") > 0, true);
+  assert.equal(compareClassIslandVersions("1.9.9.9", "2.0.0.0") < 0, true);
+  assert.equal(isCompatibleClassIslandVersion("2.0.0.0"), true);
+  assert.equal(isCompatibleClassIslandVersion("2.0.4.0"), true);
+  assert.equal(isCompatibleClassIslandVersion("1.9.9.9"), false);
   assert.equal(isCompatibleClassIslandVersion(undefined), false);
 });
 
@@ -73,8 +74,8 @@ test("resolves portable and installer ClassIsland data directories", () => {
 test("discovers multiple ClassIsland versions and marks old versions incompatible", async () => {
   const paths = ["C:\\Portable\\ClassIsland.exe", "D:\\Old\\ClassIsland.exe", "C:\\Program Files\\ClassIsland\\ClassIsland.exe"];
   const versions: Record<string, string> = {
-    [paths[0]]: "2.1.1.0",
-    [paths[1]]: "2.0.4.0",
+    [paths[0]]: "2.0.0.0",
+    [paths[1]]: "1.9.9.9",
     [paths[2]]: "2.1.1.0"
   };
   const found = await discoverClassIslandInstallations({
@@ -91,7 +92,7 @@ test("discovers multiple ClassIsland versions and marks old versions incompatibl
   assert.equal(found.find((item) => item.executablePath === paths[0])?.isRunning, true);
   assert.deepEqual(found.find((item) => item.executablePath === paths[0])?.launchArgs, ["--quiet"]);
   assert.equal(found.find((item) => item.executablePath === paths[1])?.compatible, false);
-  assert.match(found.find((item) => item.executablePath === paths[1])?.reason || "", /2\.1\.1\.0/);
+  assert.match(found.find((item) => item.executablePath === paths[1])?.reason || "", /2\.0\.0\.0/);
 });
 
 test("maps the running ClassIsland.Desktop process back to its launcher and closes the real instance", async () => {
@@ -289,7 +290,7 @@ test("does not write a package when ClassIsland is too old or the digest is inva
   try {
     const exe = path.win32.join(root, "ClassIsland.exe");
     fs.writeFileSync(exe, "test executable");
-    const oldInstaller = new ClassIslandInstaller({ platform: "win32", executablePaths: [exe], runningProcesses: [], versionOf: () => "2.1.0.9", exists: (candidate) => fs.existsSync(candidate) });
+    const oldInstaller = new ClassIslandInstaller({ platform: "win32", executablePaths: [exe], runningProcesses: [], versionOf: () => "1.9.9.9", exists: (candidate) => fs.existsSync(candidate) });
     const [oldTarget] = await oldInstaller.detect();
     const [oldResult] = await oldInstaller.install([oldTarget.id]);
     assert.equal(oldResult.action, "skipped");

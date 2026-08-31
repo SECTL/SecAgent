@@ -1,0 +1,3 @@
+[2026-08-28 12:33:43.553] [INFO] [PluginManager] Plugin loaded: SecAgent 联动 v0.3.2 by SecAgent
+[2026-08-28 13:18:49.265] [ERROR] [PluginManager] Plugin ALC for inkcanvas.iccce.secagent is still alive after 10 GC passes; some host reference is pinning it (hot reload will fall back to restart).
+[2026-08-28 15:01:26.690] [ERROR] [PluginManager] Plugin ALC for inkcanvas.iccce.secagent is still alive after 10 GC passes; some host reference is pinning it (hot reload will fall back to restart).
