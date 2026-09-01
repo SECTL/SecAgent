@@ -59,4 +59,5 @@ jobs:
           agent: issue-pr-coder
           mentions: /oc,/opencode
           variant: medium
+          oidc_base_url: https://api.opencode.ai
           use_github_token: false
