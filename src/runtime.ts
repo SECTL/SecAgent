@@ -1,16 +1,17 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import type { ReasoningEffort, SecAgentConfig } from "./types.js";
+import type { ChatAttachment, ReasoningEffort, SecAgentConfig } from "./types.js";
 import { AuditStore } from "./audit.js";
 import { McpRegistry } from "./mcp-adapter.js";
 import { ModelToolAgent } from "./model-provider.js";
 import type { ConversationMessage } from "./model-provider.js";
 import type { LoadedSkill } from "./skills.js";
-import { callPiTool, piTools } from "./pi-tools.js";
+import { callPiTool, piTools, readImageFile } from "./pi-tools.js";
 import { PluginManager } from "./plugin-manager.js";
 import type { ResolvedPluginPreRule } from "./plugin-manager.js";
 import { summarizeToolResult } from "./tool-content.js";
+import { VISION_SYSTEM_PROMPT } from "./system-prompt.js";
 
 export type RunResult =
   | { kind: "completed"; message: string; actionId?: string; autoLoadedSkills?: string[] }
@@ -44,10 +45,24 @@ export function selectAutoLoadedSkills(skills: LoadedSkill[], content: string, p
 export class SecAgentRuntime {
   private registry: McpRegistry;
   private agent: ModelToolAgent;
+  private visionAgent: ModelToolAgent | undefined;
   private sequence = 0;
-  constructor(private config: SecAgentConfig, private audit: AuditStore, private skills: LoadedSkill[], private trace?: (event: TraceEvent) => void, private plugins?: PluginManager) {
+  constructor(private config: SecAgentConfig, private audit: AuditStore, private skills: LoadedSkill[], private trace?: (event: TraceEvent) => void, private plugins?: PluginManager, visionConfig?: SecAgentConfig) {
     this.registry = new McpRegistry(config, plugins?.getMcpServers());
     this.agent = new ModelToolAgent(config, skills, (stage, data) => this.emit(stage, data), () => this.plugins?.getPromptContributions() ?? Promise.resolve([]));
+    // A dedicated image-recognition sub-agent. Only present when a vision model is
+    // configured; its tool (`secagent__look_at_image`) is then exposed to the main agent
+    // and its trace events are isolated under the `vision.*` namespace.
+    this.visionAgent = visionConfig
+      ? new ModelToolAgent(
+        { ...visionConfig, agent: { ...visionConfig.agent, systemPrompt: VISION_SYSTEM_PROMPT } },
+        [],
+        (stage, data) => this.emit(`vision.${stage}`, data),
+        undefined,
+        false, // includeRuntimePrompts: keep only the dedicated vision system prompt
+        true   // allowEmptyTools: single-turn text-only sub-agent
+      )
+      : undefined;
   }
   async run(input: string, reasoningEffort: ReasoningEffort = "high", conversation?: ConversationMessage[], signal?: AbortSignal, state: { previousAutoLoadedSkills?: string[]; previousReadSkillNames?: string[]; preRule?: ResolvedPluginPreRule } = {}): Promise<RunResult> {
     signal?.throwIfAborted();
@@ -95,6 +110,7 @@ export class SecAgentRuntime {
       ...mcpTools.filter((tool) => !hiddenTools.has(tool.key)),
       ...pluginTools.filter((tool) => !hiddenTools.has(tool.key)),
       ...piTools,
+      ...(this.visionAgent ? [{ key: "secagent__look_at_image", description: "使用独立的识图模型查看本地图片并返回文字结果。当你的模型不支持直接查看图片（无法通过 look_at 查看图片内容）时，必须调用此工具代替 look_at。path 可使用绝对路径或相对于工作区的路径；仅支持 png、jpg、jpeg、webp、gif 图片。prompt 为需要基于图片内容回答的问题。", inputSchema: { type: "object", additionalProperties: false, required: ["path", "prompt"], properties: { path: { type: "string", description: "图片的绝对路径或相对于工作区的路径" }, prompt: { type: "string", description: "需要基于图片内容回答的问题" } } } }] : []),
       { key: "secagent__read_skill", description: "读取指定 Skill 或其 Skill 目录内专题 Markdown 的完整操作说明。仅当需要该 Skill 的详细流程、约束或示例时调用。", inputSchema: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", description: "Skill 名称，必须来自系统提示词中的可用 Skills 目录。" }, file: { type: "string", description: "可选；Skill 目录内的相对 Markdown 文件名，例如 components.md。" } } } },
       { key: "secagent__call_hidden_tool", description: "调用 Skill 约定的隐藏 MCP 工具。工具名称和参数格式应严格遵循 Skill 正文或模型已知的其他契约。", inputSchema: { type: "object", additionalProperties: false, required: ["name", "arguments"], properties: { name: { type: "string", description: "隐藏工具的完整 key，例如 secscore-connector__list_students。" }, arguments: { type: "object", description: "按照工具契约填写的参数。" } } } }
     ];
@@ -103,7 +119,7 @@ export class SecAgentRuntime {
     const prepared = this.prepareAutoLoadedSkills(conversation, state);
     this.emit("secagent.skills/auto-load", prepared.loaded.map((skill) => ({ name: skill.name, path: skill.path })));
     this.emit("model.agent.request", { provider: this.config.agent.provider, model: this.config.agent.model, baseUrl: this.config.agent.baseUrl, instruction: input });
-    const message = await this.agent.run(input, tools, async (key, args) => this.callTool(input, key, args, hiddenTools), reasoningEffort, prepared.conversation, signal);
+    const message = await this.agent.run(input, tools, async (key, args) => this.callTool(input, key, args, hiddenTools, signal), reasoningEffort, prepared.conversation, signal);
     this.emit("model.agent.result", { message });
     return { kind: "completed", message, autoLoadedSkills: prepared.loaded.map((skill) => skill.name) };
   }
@@ -137,7 +153,8 @@ export class SecAgentRuntime {
     const response = await this.callTool(`undo ${actionId}`, connectorUndoKey || "secscore__undo_score", { event_uuid: result.event_uuid, student_id: result.student_id });
     return { kind: "completed", message: `已请求撤销 ${actionId}：${JSON.stringify(response)}` };
   }
-  private async callTool(request: string, key: string, args: Record<string, unknown>, hiddenTools?: Set<string>): Promise<unknown> {
+  private async callTool(request: string, key: string, args: Record<string, unknown>, hiddenTools?: Set<string>, signal?: AbortSignal): Promise<unknown> {
+    if (key === "secagent__look_at_image") return this.callVision(request, args, signal);
     if (piTools.some((tool) => tool.key === key)) {
       this.emit("secagent.tools/call", { name: key, arguments: args });
       try {
@@ -155,6 +172,45 @@ export class SecAgentRuntime {
     if (key === "secagent__read_skill") return this.readSkill(request, args);
     if (key === "secagent__call_hidden_tool") return this.callHiddenTool(request, args, hiddenTools);
     return this.executeTool(request, key, args);
+  }
+  /**
+   * `secagent__look_at_image`: read a local image and send it to the dedicated vision
+   * sub-model, returning the sub-model's text answer to the (possibly non-vision) main
+   * agent. The image is only attached to the sub-model request, never fed back to the
+   * main model, and the audit/trace result is summarized without binary data.
+   */
+  private async callVision(request: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+    if (!this.visionAgent) throw new Error("未配置识图模型。请在「设置 → 模型」中选择识图模型后再调用识图工具。");
+    this.emit("secagent.tools/call", { name: "secagent__look_at_image", arguments: args });
+    try {
+      if (typeof args.path !== "string" || !args.path.trim()) throw new Error("secagent__look_at_image 需要非空 path");
+      if (typeof args.prompt !== "string" || !args.prompt.trim()) throw new Error("secagent__look_at_image 需要非空 prompt");
+      const image = await readImageFile(this.config.workspace, args.path);
+      const attachment: ChatAttachment = {
+        id: randomUUID(),
+        name: image.name,
+        mimeType: image.mimeType,
+        dataUrl: `data:${image.mimeType};base64,${image.base64}`,
+        size: Math.floor(image.base64.length * 3 / 4) - (image.base64.endsWith("==") ? 2 : image.base64.endsWith("=") ? 1 : 0)
+      };
+      const text = await this.visionAgent.run(
+        args.prompt,
+        [],
+        async () => { throw new Error("识图模型不应调用工具"); },
+        "low",
+        [{ role: "user", content: args.prompt, attachments: [attachment] }],
+        signal
+      );
+      const result = { path: image.filePath, name: image.name, text };
+      const summary = summarizeToolResult(result);
+      this.emit("secagent.tools/result", { name: "secagent__look_at_image", result: summary });
+      this.audit.log({ id: randomUUID(), status: "completed", tool: "secagent.look_at_image", request, params: args, result: summary });
+      return result;
+    } catch (error) {
+      const result = { error: error instanceof Error ? error.message : String(error) };
+      this.emit("secagent.tools/result", { name: "secagent__look_at_image", result });
+      throw error;
+    }
   }
   private async callHiddenTool(request: string, args: Record<string, unknown>, hiddenTools?: Set<string>): Promise<unknown> {
     const key = typeof args.name === "string" ? args.name : "";

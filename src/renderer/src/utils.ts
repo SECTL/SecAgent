@@ -29,6 +29,12 @@ export function isOfficialTierModel(model?: ModelOption | null): boolean {
   return Boolean(model && model.id.startsWith("official:") && (OFFICIAL_TIER_IDS as readonly string[]).includes(model.model));
 }
 
+/** The relay's virtual vision model is only a backend for the image-recognition tool,
+ *  never a main agent model. It is marked `vision: true` by `models:list`. */
+export function isOfficialVisionModel(model?: ModelOption | null): boolean {
+  return Boolean(model && model.id.startsWith("official:") && (model.vision === true || model.model === "virtual-vision"));
+}
+
 export function toolTitle(name: string): string {
   return name.replace(/__/g, " · ").replace(/_/g, " ");
 }

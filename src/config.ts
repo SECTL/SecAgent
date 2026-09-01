@@ -9,6 +9,13 @@ import { SYSTEM_PROMPT } from "./system-prompt.js";
 
 export const DEFAULT_GOOGLE_MODEL = "gemini-2.5-flash";
 export const DEFAULT_MAX_TOKENS = 16_384;
+/**
+ * Client-facing virtual vision model served by the official relay. The relay routes this
+ * model id to a vision-capable upstream, so the client does not need to know which concrete
+ * model is behind it. Only the client part lives in this repository; the relay contract is
+ * documented in the README/settings help text.
+ */
+export const OFFICIAL_VISION_MODEL = "virtual-vision";
 const ONBOARDING_MARKER = ".oobe-complete";
 const OOBE_PROGRESS_FILE = ".oobe-progress.json";
 const LEGACY_AGENT_MODEL_FIELDS = ["provider", "model", "apiKeyEnv", "baseUrl", "endpoint", "anthropicVersion", "maxTokens"] as const;
@@ -303,6 +310,41 @@ export function useConfiguredModel(config: SecAgentConfig, id?: string): void {
   config.agent = { ...config.agent, ...selected, model: dynamicModel || selectedModels[profileIndex] || selectedModels[0] || DEFAULT_GOOGLE_MODEL, maxTokens: selected.maxTokens || config.agent.maxTokens, systemPrompt: config.agent.systemPrompt, models: config.agent.models };
 }
 
+/**
+ * Return a copy of the config with `agent` resolved to the given model id, without
+ * mutating the caller's config. Unlike `useConfiguredModel`, this is safe to call for
+ * a secondary (e.g. vision) model while the main session keeps using its own model.
+ */
+export function resolveModelConfig(config: SecAgentConfig, modelId: string): SecAgentConfig {
+  const next = { ...config, agent: { ...config.agent } };
+  useConfiguredModel(next, modelId);
+  if (!next.agent.models?.length) throw new Error(`未找到配置模型：${modelId}`);
+  return next;
+}
+
+/**
+ * Resolve the dedicated image-recognition model config, if any.
+ * 1. An explicitly configured `defaults.visionModelId` wins.
+ * 2. In official (non-custom) mode, fall back to the relay's virtual-vision model so
+ *    the feature works without any manual setup.
+ * Returns undefined when no vision model is configured or the id is stale — the vision
+ * tool is then simply not exposed to the main agent.
+ */
+export function resolveVisionAgentConfig(config: SecAgentConfig): SecAgentConfig | undefined {
+  const id = config.defaults?.visionModelId;
+  if (id) {
+    try { return resolveModelConfig(config, id); }
+    catch { return undefined; }
+  }
+  if (config.defaults?.customModelMode === false
+      && process.env.SECTL_OFFICIAL_TOKEN
+      && config.agent.models?.some((model) => model.id.startsWith("sectl-official:"))) {
+    try { return resolveModelConfig(config, `official:sectl-official:${OFFICIAL_VISION_MODEL}`); }
+    catch { return undefined; }
+  }
+  return undefined;
+}
+
 export interface SettingsPayload {
   providers: Array<ProviderConfig & { apiKey?: string; apiKeyConfigured?: boolean }>;
   /** Compatibility field for older IPC callers; the settings UI uses providers. */
@@ -315,6 +357,8 @@ export interface SettingsPayload {
   mcp: { servers: Record<string, McpServerConfig> };
   defaultModelId?: string;
   defaultReasoningEffort?: ReasoningEffort;
+  /** Model used by the dedicated image-recognition tool when the main model has no vision input. */
+  visionModelId?: string;
   autostart?: boolean;
   /** On by default: an autostart launch stays in the tray instead of opening the main window. */
   autostartHidden?: boolean;
@@ -338,7 +382,7 @@ export function readSettings(workspaceInput: string): SettingsPayload {
       maxTokens: config.agent.maxTokens
     }];
   const providers = config.agent.providers?.length ? config.agent.providers : groupLegacyModels(configured);
-  return { providers: providers.map((provider) => ({ ...provider, apiKeyConfigured: Boolean(process.env[provider.apiKeyEnv]) })), models: configured.map((model) => ({ ...model, apiKeyConfigured: Boolean(process.env[model.apiKeyEnv]) })), tts: { voice: config.tts?.voice || DEFAULT_TTS_VOICE, rate: config.tts?.rate || DEFAULT_TTS_RATE }, wake: { hotkey: config.wake?.hotkey || DEFAULT_WAKE_HOTKEY, ...(config.wake?.modelId ? { modelId: config.wake.modelId } : {}), voiceEnabled: config.wake?.voiceEnabled === true, voicePhrase: config.wake?.voicePhrase || DEFAULT_WAKE_PHRASE }, speech: { betterRecognition: config.speech?.betterRecognition === true }, updates: { ...(config.updates || DEFAULT_UPDATE_PREFERENCES) }, telemetry: { enabled: config.telemetry?.enabled !== false }, mcp: config.mcp, defaultModelId: config.defaults?.modelId, defaultReasoningEffort: config.defaults?.reasoningEffort, autostart: config.defaults?.autostart === true, autostartHidden: config.defaults?.autostartHidden !== false, customModelMode: config.defaults?.customModelMode ?? false };
+  return { providers: providers.map((provider) => ({ ...provider, apiKeyConfigured: Boolean(process.env[provider.apiKeyEnv]) })), models: configured.map((model) => ({ ...model, apiKeyConfigured: Boolean(process.env[model.apiKeyEnv]) })), tts: { voice: config.tts?.voice || DEFAULT_TTS_VOICE, rate: config.tts?.rate || DEFAULT_TTS_RATE }, wake: { hotkey: config.wake?.hotkey || DEFAULT_WAKE_HOTKEY, ...(config.wake?.modelId ? { modelId: config.wake.modelId } : {}), voiceEnabled: config.wake?.voiceEnabled === true, voicePhrase: config.wake?.voicePhrase || DEFAULT_WAKE_PHRASE }, speech: { betterRecognition: config.speech?.betterRecognition === true }, updates: { ...(config.updates || DEFAULT_UPDATE_PREFERENCES) }, telemetry: { enabled: config.telemetry?.enabled !== false }, mcp: config.mcp, defaultModelId: config.defaults?.modelId, defaultReasoningEffort: config.defaults?.reasoningEffort, visionModelId: config.defaults?.visionModelId, autostart: config.defaults?.autostart === true, autostartHidden: config.defaults?.autostartHidden !== false, customModelMode: config.defaults?.customModelMode ?? false };
 }
 
 function groupLegacyModels(models: ModelProfile[]): ProviderConfig[] {
@@ -388,7 +432,7 @@ export function saveSettings(workspaceInput: string, payload: SettingsPayload): 
   raw.updates = nextUpdates;
   raw.telemetry = nextTelemetry;
   raw.mcp = payload.mcp;
-  raw.defaults = { modelId: payload.defaultModelId || undefined, reasoningEffort: payload.defaultReasoningEffort || undefined, customModelMode: Boolean(payload.customModelMode), autostart: payload.autostart === true, autostartHidden: payload.autostartHidden !== false };
+  raw.defaults = { modelId: payload.defaultModelId || undefined, reasoningEffort: payload.defaultReasoningEffort || undefined, customModelMode: Boolean(payload.customModelMode), autostart: payload.autostart === true, autostartHidden: payload.autostartHidden !== false, visionModelId: payload.visionModelId || undefined };
   delete (raw as SecAgentConfig & { policy?: unknown }).policy;
   fs.writeFileSync(file, YAML.stringify(raw), "utf8");
   return readSettings(workspace);

@@ -9,6 +9,7 @@ import path from "node:path";
 import type { LoadedSkill } from "./skills.js";
 import { AuditStore } from "./audit.js";
 import { PluginManager } from "./plugin-manager.js";
+import { resolveVisionAgentConfig } from "./config.js";
 import { SecAgentRuntime } from "./runtime.js";
 import AdmZip from "adm-zip";
 
@@ -126,6 +127,169 @@ export function activate(api) {
     await runtime?.close();
     audit.close();
     await manager.shutdown();
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+/** 1x1 transparent PNG used to exercise the vision tool path. */
+const TEST_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+function visionTestConfig(workspace: string, defaults: { visionModelId?: string; customModelMode?: boolean }): SecAgentConfig {
+  return {
+    workspace,
+    agent: {
+      provider: "openai-compatible",
+      model: "main",
+      apiKeyEnv: "TEST_MODEL_KEY",
+      baseUrl: "https://main.test/v1",
+      endpoint: "/chat/completions",
+      maxTokens: 100,
+      systemPrompt: "unused",
+      models: [
+        { id: "main", provider: "openai-compatible", model: "main", apiKeyEnv: "TEST_MODEL_KEY", baseUrl: "https://main.test/v1", endpoint: "/chat/completions", maxTokens: 100 },
+        { id: "vision", provider: "openai-compatible", model: "vision-model", apiKeyEnv: "VISION_MODEL_KEY", baseUrl: "https://vision.test/v1", endpoint: "/chat/completions", maxTokens: 100 }
+      ]
+    },
+    mcp: { servers: {} },
+    version: 1,
+    defaults
+  } as SecAgentConfig;
+}
+
+function sse(body: string): Response {
+  return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+}
+
+test("secagent__look_at_image sends the image to the vision model and returns its text", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-vision-ok-"));
+  const originalFetch = globalThis.fetch;
+  const previousMain = process.env.TEST_MODEL_KEY;
+  const previousVision = process.env.VISION_MODEL_KEY;
+  const requestBodies: Array<{ messages?: Array<Record<string, unknown>> }> = [];
+  let requestCount = 0;
+  try {
+    fs.writeFileSync(path.join(workspace, "test.png"), Buffer.from(TEST_PNG_BASE64, "base64"));
+    process.env.TEST_MODEL_KEY = "main-key";
+    process.env.VISION_MODEL_KEY = "vision-key";
+    globalThis.fetch = async (_url, init) => {
+      requestBodies.push(JSON.parse(String(init?.body || "{}")) as { messages?: Array<Record<string, unknown>> });
+      requestCount += 1;
+      if (requestCount === 1) return sse('data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"secagent__look_at_image","arguments":"{\\"path\\":\\"test.png\\",\\"prompt\\":\\"图中是什么颜色\\"}"}}]}}]}\n\ndata: [DONE]\n\n');
+      if (requestCount === 2) return sse('data: {"choices":[{"delta":{"content":"红色的圆。"}}]}\n\ndata: [DONE]\n\n');
+      return sse('data: {"choices":[{"delta":{"content":"图片内容：红色的圆。"}}]}\n\ndata: [DONE]\n\n');
+    };
+    const audit = new AuditStore(workspace);
+    const traces: string[] = [];
+    const config = visionTestConfig(workspace, { visionModelId: "vision" });
+    const runtime = new SecAgentRuntime(config, audit, [], (event) => traces.push(event.stage), undefined, resolveVisionAgentConfig(config));
+    try {
+      const result = await runtime.run("看看这张图片", "high", [{ role: "user", content: "看看这张图片" }]);
+      assert.equal(result.message, "图片内容：红色的圆。");
+      assert.equal(requestCount, 3);
+      // Vision sub-model request carries the prompt and the image dataUrl.
+      const visionBody = requestBodies[1]?.messages || [];
+      const userContent = visionBody[1]?.content as Array<{ type?: string; text?: string; image_url?: { url?: string } }>;
+      assert.ok(Array.isArray(userContent));
+      assert.equal(userContent[0]?.type, "text");
+      assert.equal(userContent[0]?.text, "图中是什么颜色");
+      assert.equal(userContent[1]?.type, "image_url");
+      assert.match(userContent[1]?.image_url?.url || "", /^data:image\/png;base64,/);
+      assert.equal(traces.includes("secagent.tools/call"), true);
+      assert.equal(traces.includes("vision.model.request"), true);
+    } finally {
+      await runtime.close();
+      audit.close();
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousMain === undefined) delete process.env.TEST_MODEL_KEY;
+    else process.env.TEST_MODEL_KEY = previousMain;
+    if (previousVision === undefined) delete process.env.VISION_MODEL_KEY;
+    else process.env.VISION_MODEL_KEY = previousVision;
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("secagent__look_at_image reports a clear error when no vision model is configured", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-vision-none-"));
+  const originalFetch = globalThis.fetch;
+  const previousMain = process.env.TEST_MODEL_KEY;
+  let requestCount = 0;
+  let secondBody = "";
+  try {
+    fs.writeFileSync(path.join(workspace, "test.png"), Buffer.from(TEST_PNG_BASE64, "base64"));
+    process.env.TEST_MODEL_KEY = "main-key";
+    globalThis.fetch = async (_url, init) => {
+      requestCount += 1;
+      if (requestCount === 2) secondBody = String(init?.body || "");
+      return requestCount === 1
+        ? sse('data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"secagent__look_at_image","arguments":"{\\"path\\":\\"test.png\\",\\"prompt\\":\\"图中是什么\\"}"}}]}}]}\n\ndata: [DONE]\n\n')
+        : sse('data: {"choices":[{"delta":{"content":"识图功能当前不可用。"}}]}\n\ndata: [DONE]\n\n');
+    };
+    const audit = new AuditStore(workspace);
+    const traces: string[] = [];
+    // No visionModelId and customModelMode undefined → no fallback, no vision agent.
+    const config = visionTestConfig(workspace, { visionModelId: undefined });
+    assert.equal(resolveVisionAgentConfig(config), undefined);
+    const runtime = new SecAgentRuntime(config, audit, [], (event) => traces.push(event.stage), undefined, resolveVisionAgentConfig(config));
+    try {
+      const result = await runtime.run("看看这张图片", "high", [{ role: "user", content: "看看这张图片" }]);
+      assert.equal(result.message, "识图功能当前不可用。");
+      // Only the main agent requests happened; no vision sub-request.
+      assert.equal(requestCount, 2);
+      assert.equal(traces.includes("vision.model.request"), false);
+      assert.match(secondBody, /未配置识图模型/);
+    } finally {
+      await runtime.close();
+      audit.close();
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousMain === undefined) delete process.env.TEST_MODEL_KEY;
+    else process.env.TEST_MODEL_KEY = previousMain;
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("secagent__look_at_image validates image input before any vision request", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "secagent-vision-bad-"));
+  const originalFetch = globalThis.fetch;
+  const previousMain = process.env.TEST_MODEL_KEY;
+  const previousVision = process.env.VISION_MODEL_KEY;
+  let requestCount = 0;
+  let secondBody = "";
+  try {
+    fs.writeFileSync(path.join(workspace, "notes.txt"), "not an image");
+    process.env.TEST_MODEL_KEY = "main-key";
+    process.env.VISION_MODEL_KEY = "vision-key";
+    globalThis.fetch = async (_url, init) => {
+      requestCount += 1;
+      if (requestCount === 2) secondBody = String(init?.body || "");
+      return requestCount === 1
+        ? sse('data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"secagent__look_at_image","arguments":"{\\"path\\":\\"notes.txt\\",\\"prompt\\":\\"图里有什么\\"}"}}]}}]}\n\ndata: [DONE]\n\n')
+        : sse('data: {"choices":[{"delta":{"content":"无法识别。"}}]}\n\ndata: [DONE]\n\n');
+    };
+    const audit = new AuditStore(workspace);
+    const traces: string[] = [];
+    const config = visionTestConfig(workspace, { visionModelId: "vision" });
+    const runtime = new SecAgentRuntime(config, audit, [], (event) => traces.push(event.stage), undefined, resolveVisionAgentConfig(config));
+    try {
+      const result = await runtime.run("看看这个文件", "high", [{ role: "user", content: "看看这个文件" }]);
+      assert.equal(result.message, "无法识别。");
+      // The vision sub-model was never called (2 = main turn 1 + main turn 2).
+      assert.equal(requestCount, 2);
+      assert.equal(traces.includes("vision.model.request"), false);
+      assert.match(secondBody, /仅支持 png、jpg、jpeg、webp、gif 图片/);
+    } finally {
+      await runtime.close();
+      audit.close();
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousMain === undefined) delete process.env.TEST_MODEL_KEY;
+    else process.env.TEST_MODEL_KEY = previousMain;
+    if (previousVision === undefined) delete process.env.VISION_MODEL_KEY;
+    else process.env.VISION_MODEL_KEY = previousVision;
     fs.rmSync(workspace, { recursive: true, force: true });
   }
 });
