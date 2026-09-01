@@ -424,6 +424,10 @@ html.wake-mode, html.wake-mode body, body.wake-mode { min-width: 0; overflow: hi
 @keyframes oobe-plugin-detection-spin { to { transform: rotate(360deg); } }
 .oobe-plugin-list { max-width: 760px; margin: 0 auto 22px; }
 .oobe-plugin-list h2 { margin: 0 0 10px; font-size: 15px; }
+.oobe-plugin-empty { display: grid; gap: 10px; }
+.oobe-plugin-empty .empty-list { margin: 0; }
+.oobe-plugin-manual-picks { display: flex; flex-wrap: wrap; gap: 8px; }
+.oobe-plugin-manual-picks .secondary-button { padding: 7px 10px; font-size: 12px; white-space: nowrap; }
 @property --oobe-plugin-progress { syntax: "<percentage>"; inherits: false; initial-value: 0%; }
 .oobe-plugin-card { --oobe-plugin-progress: 0%; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; position: relative; overflow: hidden; border-radius: 0; box-shadow: none; background: linear-gradient(90deg, rgba(35,137,236,.15) 0 var(--oobe-plugin-progress), #fff var(--oobe-plugin-progress) 100%); transition: --oobe-plugin-progress 420ms cubic-bezier(.2, .8, .2, 1), background 420ms cubic-bezier(.2, .8, .2, 1); }
 .oobe-plugin-card > * { position: relative; z-index: 1; }
