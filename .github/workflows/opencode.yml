@@ -18,6 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
+      id-token: write
       contents: write
       issues: write
       pull-requests: write
@@ -43,22 +44,19 @@ jobs:
           echo "SECTL_SECAGENT_REPOSITORIES=$repositories" >> "$GITHUB_ENV"
           echo "Allowed SecAgent repositories: $repositories"
 
-      - name: Configure Git identity and credentials
-        env:
-          GITHUB_TOKEN: ${{ secrets.SECTL_SECAGENT_GITHUB_TOKEN || github.token }}
+      - name: Configure Git identity
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          gh auth setup-git
 
       - name: Run OpenCode
         uses: anomalyco/opencode/github@cb7d8b2f5e44876ef98b661dc10590c915af3a9f
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.SECTL_SECAGENT_GITHUB_TOKEN || github.token }}
+          GITHUB_TOKEN: ${{ secrets.SECTL_SECAGENT_GITHUB_TOKEN }}
         with:
           model: deepseek/deepseek-v4-flash
           agent: issue-pr-coder
           mentions: /oc,/opencode
-          use_github_token: true
           variant: medium
+          use_github_token: false
