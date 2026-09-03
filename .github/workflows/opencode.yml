@@ -46,6 +46,15 @@ jobs:
           echo "SECTL_SECAGENT_REPOSITORIES=$repositories" >> "$GITHUB_ENV"
           echo "Allowed SecAgent repositories: $repositories"
 
+      - name: Verify cross-repository access
+        env:
+          GH_TOKEN: ${{ secrets.SECTL_SECAGENT_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN"
+          gh repo view SECTL/secagent-official-relay --json nameWithOwner --jq .nameWithOwner
+          gh auth setup-git
+
       - name: Configure Git identity
         run: |
           git config --global user.name "github-actions[bot]"
@@ -56,6 +65,7 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.SECTL_SECAGENT_GITHUB_TOKEN }}
         with:
           model: deepseek/deepseek-v4-flash
           agent: issue-pr-coder
