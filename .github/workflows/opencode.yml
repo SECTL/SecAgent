@@ -43,6 +43,9 @@ jobs:
             | sort -fu | paste -sd, -)" && [ -n "$discovered" ]; then
             repositories="$discovered"
           fi
+          if gh repo view SECTL/secagent-official-relay --json nameWithOwner --jq .nameWithOwner >/dev/null 2>&1; then
+            repositories="$repositories,SECTL/secagent-official-relay"
+          fi
           echo "SECTL_SECAGENT_REPOSITORIES=$repositories" >> "$GITHUB_ENV"
           echo "Allowed SecAgent repositories: $repositories"
 
@@ -52,7 +55,6 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$GH_TOKEN"
-          gh repo view SECTL/secagent-official-relay --json nameWithOwner --jq .nameWithOwner
           gh auth setup-git
 
       - name: Configure Git identity
