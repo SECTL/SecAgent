@@ -55,12 +55,17 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$GH_TOKEN"
+          gh repo view SECTL/secagent-official-relay --json nameWithOwner --jq .nameWithOwner
           gh auth setup-git
 
-      - name: Configure Git identity
+      - name: Configure Git identity and credentials
+        env:
+          GH_TOKEN: ${{ secrets.SECTL_SECAGENT_GITHUB_TOKEN }}
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          gh auth setup-git
+          git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w 0)"
 
       - name: Run OpenCode
         uses: anomalyco/opencode/github@cb7d8b2f5e44876ef98b661dc10590c915af3a9f
