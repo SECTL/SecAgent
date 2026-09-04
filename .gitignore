@@ -20,3 +20,6 @@ __pycache__/
 .tmp-icc-*/
 .claude-tmp-*
 secagent-ce-icon-generated.png
+
+
+AGENTS.local.md
