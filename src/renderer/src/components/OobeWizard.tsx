@@ -555,7 +555,7 @@ export function OobeWizard() {
       return false;
     }
     if (selectedTargets.some((target) => !target.compatible)) {
-      setError("所选 ClassIsland 版本低于 2.1.1.0，无法安装联动插件");
+      setError("所选 ClassIsland 版本低于 2.0.0.0，无法安装联动插件");
       return false;
     }
     // Holds land on the 50-100 half of the card when the SecAgent connector
