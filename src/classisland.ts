@@ -10,7 +10,13 @@ import { DEFAULT_MARKETPLACE_PROXY_URL, describeDownloadAttempt, marketplaceRequ
 export const CLASSISLAND_PLUGIN_REPOSITORY = "SECTL/ClassIsland-SecAgent-Plugin";
 export const CLASSISLAND_PLUGIN_ID = "classisland.secagent";
 export const CLASSISLAND_PLUGIN_ASSET_NAME = "ClassIsland.SecAgent.Plugin.cipx";
-export const MIN_CLASSISLAND_VERSION = "2.1.1.0";
+// Real floor is ClassIsland 2.0.0.0: the plugin (SECTL/ClassIsland-SecAgent-Plugin)
+// declares apiVersion 2.0.0.0 in its manifest.yml, and every ClassIsland host from
+// 2.0.0.0 onward only rejects plugins whose apiVersion is below 2.0.0.0
+// (ClassIsland/Services/PluginService.cs: `apiVersion < new Version(2,0,0,0)`).
+// The plugin also only uses host APIs already present in the 2.0.0.0 tag, so
+// 2.0.0.0 and every later 2.0.x/2.1.x host can load and run it.
+export const MIN_CLASSISLAND_VERSION = "2.0.0.0";
 export const CLASSISLAND_RELEASE_API_URL = `https://api.github.com/repos/${CLASSISLAND_PLUGIN_REPOSITORY}/releases/latest`;
 const CLASSISLAND_RELEASE_PAGE_URL = `https://github.com/${CLASSISLAND_PLUGIN_REPOSITORY}/releases/latest`;
 
