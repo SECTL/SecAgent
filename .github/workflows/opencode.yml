@@ -68,9 +68,6 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ secrets.SECTL_SECAGENT_GITHUB_TOKEN }}
-          GIT_CONFIG_COUNT: 1
-          GIT_CONFIG_KEY_0: http.https://github.com/.extraheader
-          GIT_CONFIG_VALUE_0: "AUTHORIZATION: basic ${{ secrets.SECTL_SECAGENT_GITHUB_TOKEN }}"
         with:
           model: deepseek/deepseek-v4-flash
           agent: issue-pr-coder
