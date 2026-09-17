@@ -224,3 +224,36 @@ test("persisted tool calls and results are restored to the next OpenAI request",
     delete process.env.TEST_MODEL_KEY;
   }
 });
+
+test("a single-turn sub-agent encodes user attachments as OpenAI image parts", async () => {
+  const originalFetch = globalThis.fetch;
+  process.env.TEST_MODEL_KEY = "test-key";
+  let requestBody: Record<string, unknown> | undefined;
+  globalThis.fetch = async (_url, init) => {
+    requestBody = JSON.parse(String(init?.body || "{}")) as Record<string, unknown>;
+    return response('data: {"choices":[{"delta":{"content":"red"}}]}\n\ndata: [DONE]\n\n');
+  };
+  try {
+    // Tool-less vision sub-agent: allowEmptyTools and no runtime prompts.
+    const agent = new ModelToolAgent(config(), [], undefined, undefined, false, true);
+    const conversation: ConversationMessage[] = [
+      {
+        role: "user",
+        content: "图中是什么颜色",
+        attachments: [{ id: "a1", name: "test.png", mimeType: "image/png", dataUrl: "data:image/png;base64,iVBORw0KGgo=", size: 6 }]
+      }
+    ];
+    const result = await agent.run("图中是什么颜色", [], async () => {
+      throw new Error("识图模型不应调用工具");
+    }, "low", conversation);
+    assert.equal(result, "red");
+    const messages = requestBody?.messages as Array<Record<string, unknown>>;
+    const content = messages[1]?.content as Array<Record<string, unknown>>;
+    assert.ok(Array.isArray(content));
+    assert.deepEqual(content[0], { type: "text", text: "图中是什么颜色" });
+    assert.deepEqual(content[1], { type: "image_url", image_url: { url: "data:image/png;base64,iVBORw0KGgo=" } });
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete process.env.TEST_MODEL_KEY;
+  }
+});

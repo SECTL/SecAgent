@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { initializeWorkspace, loadConfig, normalizeAndValidate, useConfiguredModel } from "./config.js";
+import { initializeWorkspace, loadConfig, normalizeAndValidate, resolveVisionAgentConfig, useConfiguredModel } from "./config.js";
 import { DEFAULT_WORKSPACE, expandPath } from "./paths.js";
 import { loadEnabledSkills } from "./skills.js";
 import { AuditStore } from "./audit.js";
@@ -160,7 +160,8 @@ async function openRuntime(workspace: string, modelId: string | undefined, trace
   const plugins = new PluginManager(workspace);
   await plugins.initialize();
   const skills = [...loadEnabledSkills(config), ...plugins.getSkills()];
-  return { runtime: new SecAgentRuntime(config, audit, skills, trace, plugins), audit, plugins, config };
+  const visionConfig = resolveVisionAgentConfig(config);
+  return { runtime: new SecAgentRuntime(config, audit, skills, trace, plugins, visionConfig), audit, plugins, config };
 }
 
 async function closeRuntime(handle: RuntimeHandle | undefined): Promise<void> {

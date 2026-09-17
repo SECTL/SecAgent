@@ -7,6 +7,36 @@ import type { ToolImageContent } from "./tool-content.js";
 
 const execAsync = promisify(exec);
 
+/** Supported local image formats shared by `look_at` and the vision sub-model tool. */
+const IMAGE_MEDIA_TYPES: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif" };
+export const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
+
+export interface ReadImageResult {
+  filePath: string;
+  name: string;
+  mimeType: string;
+  base64: string;
+}
+
+export function resolveWorkspacePath(workspace: string, filePath: string): string {
+  return path.isAbsolute(filePath) ? filePath : path.resolve(workspace, filePath);
+}
+
+/**
+ * Shared image read + validation used both by the `look_at` Pi tool (returns the image to a
+ * vision-capable main model) and by `secagent__look_at_image` (feeds the image to a dedicated
+ * vision sub-model and returns text).
+ */
+export async function readImageFile(workspace: string, filePath: string): Promise<ReadImageResult> {
+  const resolved = resolveWorkspacePath(workspace, filePath);
+  const mediaType = IMAGE_MEDIA_TYPES[path.extname(resolved).toLowerCase()];
+  if (!mediaType) throw new Error("仅支持 png、jpg、jpeg、webp、gif 图片");
+  const stat = await fs.stat(resolved);
+  if (!stat.isFile()) throw new Error("path 不是文件");
+  if (stat.size > MAX_IMAGE_BYTES) throw new Error("图片不能超过 12 MB");
+  return { filePath: resolved, name: path.basename(resolved), mimeType: mediaType, base64: (await fs.readFile(resolved)).toString("base64") };
+}
+
 export const piTools: AgentTool[] = [
   { key: "look_at", description: "查看本地图片并把图片内容直接提供给模型。path 可使用绝对路径或相对于工作区的路径；仅支持 png、jpg、jpeg、webp、gif 图片。需要理解图片内容时必须调用此工具，不要只读取图片文件的二进制内容。", inputSchema: { type: "object", additionalProperties: false, required: ["path"], properties: { path: { type: "string", description: "图片的绝对路径或相对于工作区的路径" } } } },
   { key: "read", description: "读取文件内容。path 可使用绝对路径或相对于工作区的路径。", inputSchema: { type: "object", additionalProperties: false, required: ["path"], properties: { path: { type: "string" }, offset: { type: "integer", minimum: 1 }, limit: { type: "integer", minimum: 1 } } } },
@@ -15,19 +45,13 @@ export const piTools: AgentTool[] = [
   { key: "bash", description: "在工作区目录执行 shell 命令并返回标准输出和错误输出。", inputSchema: { type: "object", additionalProperties: false, required: ["command"], properties: { command: { type: "string" }, timeout: { type: "integer", minimum: 1 } } } }
 ];
 
-function resolvePath(workspace: string, filePath: string): string { return path.isAbsolute(filePath) ? filePath : path.resolve(workspace, filePath); }
+function resolvePath(workspace: string, filePath: string): string { return resolveWorkspacePath(workspace, filePath); }
 
 export async function callPiTool(workspace: string, key: string, args: Record<string, unknown>): Promise<unknown> {
   if (key === "look_at") {
     if (typeof args.path !== "string" || !args.path.trim()) throw new Error("look_at 需要非空 path");
-    const filePath = resolvePath(workspace, args.path);
-    const mediaTypes: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif" };
-    const mediaType = mediaTypes[path.extname(filePath).toLowerCase()];
-    if (!mediaType) throw new Error("look_at 仅支持 png、jpg、jpeg、webp、gif 图片");
-    const stat = await fs.stat(filePath);
-    if (!stat.isFile()) throw new Error("look_at 的 path 不是文件");
-    if (stat.size > 12 * 1024 * 1024) throw new Error("look_at 图片不能超过 12 MB");
-    const result: ToolImageContent = { type: "image", data: (await fs.readFile(filePath)).toString("base64"), mimeType: mediaType, name: path.basename(filePath), path: filePath };
+    const image = await readImageFile(workspace, args.path);
+    const result: ToolImageContent = { type: "image", data: image.base64, mimeType: image.mimeType, name: image.name, path: image.filePath };
     return result;
   }
   if (key === "read") {

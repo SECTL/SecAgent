@@ -11,7 +11,7 @@ import { WorkspaceFileStrip } from "./components/WorkspaceFileStrip.js";
 import { stripWorkspaceFilesMarkup } from "../../workspace-file-contract.js";
 import { reasoningEffortLabels, traceLabel } from "./constants.js";
 import type { TraceEvent } from "./constants.js";
-import { isOfficialModel, isOfficialTierModel, reasoningEffortsForModel } from "./utils.js";
+import { isOfficialModel, isOfficialTierModel, isOfficialVisionModel, reasoningEffortsForModel } from "./utils.js";
 import { officialTiers, tierDefaultId } from "./constants.js";
 import { buildQuotedUserMessage, parseQuotedUserMessage, webSearchUrl } from "../../quoted-message.js";
 
@@ -91,8 +91,11 @@ export function App() {
   const answerScrollLockTimer = useRef<number | undefined>(undefined);
   const answerStartScrollPending = useRef(false);
   const modelMenuEnd = useRef<HTMLDivElement>(null);
-  const orderedModels = useMemo(() => [...models.filter(isOfficialModel), ...models.filter((model) => !isOfficialModel(model))], [models]);
-  const selectedModel = models.find((model) => model.id === selectedModelId);
+  const orderedModels = useMemo(() => {
+    const visible = models.filter((model) => !isOfficialVisionModel(model));
+    return [...visible.filter(isOfficialModel), ...visible.filter((model) => !isOfficialModel(model))];
+  }, [models]);
+  const selectedModel = models.find((model) => model.id === selectedModelId && !isOfficialVisionModel(model));
   const reasoningEfforts = useMemo(() => reasoningEffortsForModel(selectedModel), [selectedModel]);
   useEffect(() => {
     bridge.setWakeContext({ sessionId: session?.meta.id, modelId: selectedModelId || undefined, reasoningEffort: customModelMode ? reasoningEffort : defaultEffort });
@@ -187,9 +190,10 @@ export function App() {
       setSession(active);
       requestAnimationFrame(() => textareaRef.current?.focus());
       const configured = await modelsPromise;
-      const preferred = configured.find((model) => model.id === savedSettings.defaultModelId)
-        || configured.find((model) => isOfficialTierModel(model) && model.model === tierDefaultId)
-        || configured[0];
+      const mainModels = configured.filter((model) => !isOfficialVisionModel(model));
+      const preferred = mainModels.find((model) => model.id === savedSettings.defaultModelId)
+        || mainModels.find((model) => isOfficialTierModel(model) && model.model === tierDefaultId)
+        || mainModels[0];
       setSelectedModelId(preferred?.id || "");
     })();
   }, [bridge]);
@@ -204,10 +208,10 @@ export function App() {
           setCustomModelMode(customMode);
           setDefaultEffort((settings.defaultReasoningEffort || "high") as ReasoningEffort);
           setSelectedModelId((current) => {
-            if (models.some((model) => model.id === (settings.defaultModelId || current))) return settings.defaultModelId || current;
+            if (models.some((model) => !isOfficialVisionModel(model) && model.id === (settings.defaultModelId || current))) return settings.defaultModelId || current;
             const tier = models.find((model) => isOfficialTierModel(model) && model.model === tierDefaultId);
             if (tier) return tier.id;
-            return models[0]?.id || "";
+            return models.find((model) => !isOfficialVisionModel(model))?.id || "";
           });
           setReasoningEffort(settings.defaultReasoningEffort || "high");
         });

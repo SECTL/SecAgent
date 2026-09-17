@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import YAML from "yaml";
-import { configPath, initializeWorkspace, isOnboardingComplete, loadConfig, markOnboardingComplete, oobeProgressPath, readOobeProgress, readSettings, saveOobeProgress, saveSettings, type OobeProgress } from "./config.js";
+import { OFFICIAL_VISION_MODEL, configPath, initializeWorkspace, isOnboardingComplete, loadConfig, markOnboardingComplete, oobeProgressPath, readOobeProgress, readSettings, resolveVisionAgentConfig, saveOobeProgress, saveSettings, type OobeProgress } from "./config.js";
+import type { SecAgentConfig } from "./types.js";
 import { SYSTEM_PROMPT } from "./system-prompt.js";
 
 function temporaryWorkspace(): string {
@@ -119,5 +120,89 @@ test("defaults and persists Windows update preferences", () => {
     assert.deepEqual(readSettings(workspace).updates, saved.updates);
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("persists the vision model id with the settings", () => {
+  const workspace = temporaryWorkspace();
+  try {
+    initializeWorkspace(workspace);
+    const settings = readSettings(workspace);
+    const saved = saveSettings(workspace, { ...settings, visionModelId: "custom-provider:vision" });
+    assert.equal(saved.visionModelId, "custom-provider:vision");
+    assert.equal(readSettings(workspace).visionModelId, "custom-provider:vision");
+    // Clearing the value removes the persisted key.
+    const cleared = saveSettings(workspace, { ...settings, visionModelId: undefined });
+    assert.equal(cleared.visionModelId, undefined);
+    assert.equal(readSettings(workspace).visionModelId, undefined);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+function multiModelConfig(overrides: Partial<SecAgentConfig> = {}): SecAgentConfig {
+  return {
+    version: 1,
+    workspace: "/tmp/secagent-test-ws",
+    agent: {
+      provider: "openai-compatible",
+      model: "main",
+      apiKeyEnv: "MAIN_KEY",
+      baseUrl: "https://main.test/v1",
+      endpoint: "/chat/completions",
+      maxTokens: 100,
+      systemPrompt: "main",
+      models: [
+        { id: "main", provider: "openai-compatible", model: "main", apiKeyEnv: "MAIN_KEY", baseUrl: "https://main.test/v1", endpoint: "/chat/completions", maxTokens: 100 },
+        { id: "vision", provider: "openai-compatible", model: "vision-model", apiKeyEnv: "VISION_KEY", baseUrl: "https://vision.test/v1", endpoint: "/chat/completions", maxTokens: 100 },
+        { id: "sectl-official:deepseek-v4-flash", provider: "openai-responses", model: "deepseek-v4-flash", apiKeyEnv: "SECTL_OFFICIAL_TOKEN", baseUrl: "https://relay.test/v1", endpoint: "/responses", maxTokens: 100 }
+      ]
+    },
+    mcp: { servers: {} },
+    ...overrides
+  } as SecAgentConfig;
+}
+
+test("resolveVisionAgentConfig honors an explicit vision model id without mutating the source config", () => {
+  const config = multiModelConfig({ defaults: { modelId: "main", visionModelId: "vision" } });
+  const vision = resolveVisionAgentConfig(config);
+  assert.ok(vision);
+  assert.equal(vision.agent.model, "vision-model");
+  assert.equal(vision.agent.apiKeyEnv, "VISION_KEY");
+  assert.equal(vision.agent.baseUrl, "https://vision.test/v1");
+  // The caller's config keeps its own model.
+  assert.equal(config.agent.model, "main");
+});
+
+test("resolveVisionAgentConfig returns undefined for a stale vision model id", () => {
+  const config = multiModelConfig({ defaults: { visionModelId: "does-not-exist" } });
+  assert.equal(resolveVisionAgentConfig(config), undefined);
+});
+
+test("resolveVisionAgentConfig falls back to the official virtual-vision model in official mode", () => {
+  const previous = process.env.SECTL_OFFICIAL_TOKEN;
+  process.env.SECTL_OFFICIAL_TOKEN = "test-token";
+  try {
+    const config = multiModelConfig({ defaults: { customModelMode: false } });
+    const vision = resolveVisionAgentConfig(config);
+    assert.ok(vision);
+    assert.equal(vision.agent.model, OFFICIAL_VISION_MODEL);
+    assert.equal(vision.agent.apiKeyEnv, "SECTL_OFFICIAL_TOKEN");
+    assert.equal(vision.agent.endpoint, "/responses");
+  } finally {
+    if (previous === undefined) delete process.env.SECTL_OFFICIAL_TOKEN;
+    else process.env.SECTL_OFFICIAL_TOKEN = previous;
+  }
+});
+
+test("resolveVisionAgentConfig does not fall back in custom model mode", () => {
+  const previous = process.env.SECTL_OFFICIAL_TOKEN;
+  process.env.SECTL_OFFICIAL_TOKEN = "test-token";
+  try {
+    const config = multiModelConfig({ defaults: { customModelMode: true } });
+    assert.equal(resolveVisionAgentConfig(config), undefined);
+  } finally {
+    if (previous === undefined) delete process.env.SECTL_OFFICIAL_TOKEN;
+    else process.env.SECTL_OFFICIAL_TOKEN = previous;
   }
 });
