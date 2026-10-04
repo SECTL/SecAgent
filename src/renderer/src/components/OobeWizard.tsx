@@ -3,6 +3,7 @@ import { ArrowRight, Check, ChevronDown, ChevronRight } from "lucide-react";
 import { PresetCombobox } from "./PresetCombobox.js";
 import { SelectCombobox } from "./SelectCombobox.js";
 import { emptyProvider } from "../utils.js";
+import { filterRecommendedCompanionApps } from "../companion-recommend.js";
 
 type SourcePath = "official" | "custom";
 type OobeStep = "source" | "config" | "plugins";
@@ -907,7 +908,15 @@ export function OobeWizard() {
     }
   };
 
-  const recommended = useMemo(() => apps.filter((app) => app.detected || app.pluginId === "classisland-connector" || app.pluginId === "secrandom" || app.pluginId === "iccce-connector" || app.pluginId === "class-widgets"), [apps]);
+  // A dual-end card is only shown when there is real evidence for it: the app
+  // was auto-detected, its SecAgent connector is already installed, or an
+  // installation target was found/manually picked. Previously the four linkage
+  // apps were always listed, so e.g. Class Widgets appeared as "detected" even
+  // when it was never installed on the machine.
+  const recommended = useMemo(
+    () => filterRecommendedCompanionApps(apps, { plugins, classIslandTargets, secRandomTargets, iccceTargets, cwTargets }),
+    [apps, classIslandTargets, cwTargets, iccceTargets, plugins, secRandomTargets]
+  );
   const allDetectedCompanionsInstalled = useMemo(() => {
     const detectedApps = apps.filter((app) => app.detected);
     if (!detectedApps.length) return false;
@@ -952,7 +961,7 @@ export function OobeWizard() {
         {OOBE_STEP_ORDER.map((item, index) => <span className={`oobe-progress-segment ${index <= OOBE_STEP_ORDER.indexOf(step) ? "is-active" : ""}`} key={item} />)}
       </div>
       <p className="oobe-step-label">第 {step === "source" ? "1" : step === "config" ? "2" : "3"} / 3 步</p>
-      {step === "plugins" ? <div className="oobe-plugin-heading"><h1>安装课堂联动插件</h1><button className="secondary-button oobe-install-all-button" type="button" disabled={!companionDetectionReady || Boolean(installingId) || busy || allDetectedCompanionsInstalled} onClick={() => void installAllPlugins()}>{!companionDetectionReady ? "检测本机应用中…" : allDetectedCompanionsInstalled ? <><Check aria-hidden="true" size={16} strokeWidth={2.5} />已安装所有</> : "一键安装所有"}</button></div> : <h1>{step === "source" ? "选择模型服务" : "配置模型服务"}</h1>}
+      {step === "plugins" ? <div className="oobe-plugin-heading"><h1>安装课堂联动插件</h1><button className="secondary-button oobe-install-all-button" type="button" disabled={!companionDetectionReady || Boolean(installingId) || busy || allDetectedCompanionsInstalled || recommended.length === 0} onClick={() => void installAllPlugins()}>{!companionDetectionReady ? "检测本机应用中…" : allDetectedCompanionsInstalled ? <><Check aria-hidden="true" size={16} strokeWidth={2.5} />已安装所有</> : "一键安装所有"}</button></div> : <h1>{step === "source" ? "选择模型服务" : "配置模型服务"}</h1>}
       {step !== "plugins" && <p>{step === "source"
         ? "先选择使用 SECTL 官方模型服务，还是接入自己的模型提供商。"
         : step === "config"
@@ -1026,7 +1035,15 @@ export function OobeWizard() {
         <span className="visually-hidden">正在检测本机课堂软件…</span>
       </div> : <section className="oobe-plugin-list">
         <h2>本机已检测到</h2>
-        {!apps.some((app) => app.detected) && <p className="empty-list">没有自动检测到已适配的课堂应用。你可以在 ClassIsland 卡片中手动选择安装位置，或稍后在设置里处理。</p>}
+        {!recommended.length && <div className="oobe-plugin-empty">
+          <p className="empty-list">没有自动检测到已适配的课堂应用。安装对应应用后会自动出现在这里；若已安装但未被识别，可手动选择其可执行文件。</p>
+          <div className="oobe-plugin-manual-picks">
+            <button className="secondary-button" type="button" onClick={() => void pickClassIslandExecutable()}>选择 ClassIsland.exe</button>
+            <button className="secondary-button" type="button" onClick={() => void pickClassWidgetsExecutable()}>选择 Class Widgets 可执行文件</button>
+            <button className="secondary-button" type="button" onClick={() => void pickSecRandomExecutable()}>选择 SecRandom 可执行文件</button>
+            <button className="secondary-button" type="button" onClick={() => void pickIccceExecutable()}>选择 ICC-CE 可执行文件</button>
+          </div>
+        </div>}
         {recommended.map((app, index) => {
           const market = marketPlugins.find((plugin) => plugin.id === app.pluginId);
           const installed = plugins.find((plugin) => plugin.id === app.pluginId);
